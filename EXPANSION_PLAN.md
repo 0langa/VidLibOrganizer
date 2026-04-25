@@ -302,6 +302,68 @@ Establish a stricter migration policy for SQLite:
 - job history is queryable
 - all runtime-critical flows are covered by integration tests
 
+### Current autopilot execution plan
+
+This is the active implementation sequence for moving the product from MVP platform to serious daily-use software.
+
+#### Track A — finish platform reliability first
+
+1. complete persisted job runtime foundations
+	- status: in progress
+	- done: persisted job records, persisted progress/failure snapshots, desktop job listing
+	- next: runtime-owned cancellation tokens, in-process job registry, resumable workflow state
+	- tags: `[priority:P0] [complexity:medium] [size:large]`
+
+2. expose workflow operations consistently across CLI and desktop
+	- status: in progress
+	- done: shared scan workflow, desktop job history, CLI job history starting here
+	- next: job detail views, cancellation commands, shared workflow summaries
+	- tags: `[priority:P0] [complexity:medium] [size:medium]`
+
+3. add integration coverage for workflow lifecycle
+	- target: start, progress, completion, cancellation, persistence visibility
+	- tags: `[priority:P0] [complexity:medium] [size:medium]`
+
+#### Track B — unlock browsing and discovery quality
+
+4. move search from basic filtering to indexed discovery
+	- add SQLite FTS-backed search path
+	- add ranking, extension facets, tag facets, saved search groundwork
+	- tags: `[priority:P1] [complexity:high] [size:large]`
+
+5. add thumbnail and preview pipeline
+	- generate preview assets and cache records
+	- prepare browsing UX for grid/list/detail views
+	- tags: `[priority:P1] [complexity:high] [size:large]`
+
+6. expand metadata depth
+	- enrich stream/container metadata and quality signals
+	- tags: `[priority:P1] [complexity:medium] [size:large]`
+
+#### Track C — premium workflow depth
+
+7. build duplicate review workflow
+	- review state, canonical choice, safe action staging
+	- tags: `[priority:P2] [complexity:high] [size:large]`
+
+8. build taxonomy and rules engine
+	- smart tags, normalized labels, rule-based organization
+	- tags: `[priority:P2] [complexity:high] [size:large]`
+
+9. add integrated preview and playback shell
+	- embedded player, inspect pane, side-by-side review foundation
+	- tags: `[priority:P2] [complexity:high] [size:large]`
+
+#### Autopilot operating rule
+
+Near-term execution should repeat this loop:
+
+1. harden one shared backend slice
+2. expose it in CLI and desktop where reasonable
+3. update `README.MD` and `docs/` to match reality
+4. validate with Rust checks and targeted tests
+5. only then move to the next slice
+
 ---
 
 ## Phase 2 — Build a serious search and browsing engine

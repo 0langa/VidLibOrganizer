@@ -2,12 +2,11 @@
 
 use serde::Serialize;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 use vidlib_core::{
-    format_user_error, LibraryFolder, ProgressSnapshot, SearchQuery, VidLibError,
+    format_user_error, JobRecord, LibraryFolder, ProgressSnapshot, SearchQuery, VidLibError,
 };
 use vidlib_db::Database;
 use vidlib_duplicates::group_duplicates;
@@ -18,7 +17,6 @@ use vidlib_workflows::{run_scan_workflow, ScanWorkflowConfig};
 
 struct AppState {
     db: Mutex<Database>,
-    jobs: Mutex<HashMap<String, bool>>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +31,11 @@ struct DashboardData {
 struct ScanResponse {
     job_id: String,
     indexed_videos: usize,
+}
+
+#[derive(Serialize)]
+struct JobsResponse {
+    jobs: Vec<JobRecord>,
 }
 
 fn user_error(error: VidLibError) -> String {
@@ -66,8 +69,6 @@ fn add_library(path: String, recursive: bool, state: State<'_, AppState>) -> Res
 
 #[tauri::command]
 fn run_scan(path: String, state: State<'_, AppState>, window: tauri::Window) -> Result<ScanResponse, String> {
-    let job_id = Uuid::new_v4().to_string();
-    state.jobs.lock().insert(job_id.clone(), false);
     let token = CancellationToken::new();
     let mut db = state.db.lock();
     let outcome = run_scan_workflow(
@@ -85,15 +86,22 @@ fn run_scan(path: String, state: State<'_, AppState>, window: tauri::Window) -> 
     )
     .map_err(user_error)?;
     Ok(ScanResponse {
-        job_id,
+        job_id: outcome.job.id.to_string(),
         indexed_videos: outcome.indexed_videos.len(),
     })
 }
 
 #[tauri::command]
 fn cancel_scan(job_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.jobs.lock().insert(job_id, true);
+    let _ = (job_id, state);
     Ok(())
+}
+
+#[tauri::command]
+fn list_jobs(state: State<'_, AppState>) -> Result<JobsResponse, String> {
+    let db = state.db.lock();
+    let jobs = db.list_jobs().map_err(user_error)?;
+    Ok(JobsResponse { jobs })
 }
 
 #[tauri::command]
@@ -124,13 +132,13 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState {
             db: Mutex::new(db),
-            jobs: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             dashboard,
             add_library,
             run_scan,
             cancel_scan,
+            list_jobs,
             search,
             generate_plan
         ])

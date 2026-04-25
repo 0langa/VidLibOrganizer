@@ -62,6 +62,50 @@ pub enum JobState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JobKind {
+    ScanLibrary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobProgress {
+    pub processed_files: u64,
+    pub discovered_files: u64,
+    pub bytes_processed: u64,
+    pub percent: f32,
+    pub current_path: Option<PathBuf>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobCheckpoint {
+    pub job_id: Uuid,
+    pub library_id: Option<Uuid>,
+    pub last_path: Option<PathBuf>,
+    pub scanned_files: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobFailure {
+    pub message: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobRecord {
+    pub id: Uuid,
+    pub kind: JobKind,
+    pub state: JobState,
+    pub library_id: Option<Uuid>,
+    pub root_path: Option<PathBuf>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub progress: Option<JobProgress>,
+    pub failure: Option<JobFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestructureAction {
     pub source: PathBuf,
     pub destination: PathBuf,

@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use vidlib_core::{
-    AuditRecord, AuditRecordKind, LibraryFolder, ScanCheckpoint, ScanWarningKind,
-    ScanWarningRecord, SearchQuery, VidLibError, VidLibResult, VideoEntry,
+    AuditRecord, AuditRecordKind, JobFailure, JobKind, JobProgress, JobRecord, JobState,
+    LibraryFolder, ScanCheckpoint, ScanWarningKind, ScanWarningRecord, SearchQuery,
+    VidLibError, VidLibResult, VideoEntry,
 };
 
 pub struct Database {
@@ -102,6 +103,20 @@ impl Database {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_audit_records_plan_id ON audit_records(plan_id);
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                library_id TEXT,
+                root_path TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                progress_json TEXT,
+                failure_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+            CREATE INDEX IF NOT EXISTS idx_jobs_library_id ON jobs(library_id);
             "#,
         )?;
         self.conn.execute(
@@ -410,6 +425,102 @@ impl Database {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(VidLibError::from)
+    }
+
+    pub fn upsert_job(&self, job: &JobRecord) -> VidLibResult<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO jobs (id, kind, state, library_id, root_path, created_at, started_at, finished_at, progress_json, failure_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                job.id.to_string(),
+                job_kind_to_str(&job.kind),
+                job_state_to_str(&job.state),
+                job.library_id.map(|id| id.to_string()),
+                job.root_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                job.created_at.to_rfc3339(),
+                job.started_at.map(|dt| dt.to_rfc3339()),
+                job.finished_at.map(|dt| dt.to_rfc3339()),
+                job.progress.as_ref().map(serde_json::to_string).transpose()?,
+                job.failure.as_ref().map(serde_json::to_string).transpose()?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_jobs(&self) -> VidLibResult<Vec<JobRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, state, library_id, root_path, created_at, started_at, finished_at, progress_json, failure_json FROM jobs ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let created_at: String = row.get(5)?;
+            let started_at: Option<String> = row.get(6)?;
+            let finished_at: Option<String> = row.get(7)?;
+            let progress_json: Option<String> = row.get(8)?;
+            let failure_json: Option<String> = row.get(9)?;
+            Ok(JobRecord {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
+                kind: job_kind_from_str(&row.get::<_, String>(1)?),
+                state: job_state_from_str(&row.get::<_, String>(2)?),
+                library_id: row
+                    .get::<_, Option<String>>(3)?
+                    .and_then(|value| Uuid::parse_str(&value).ok()),
+                root_path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                created_at: DateTime::parse_from_rfc3339(&created_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                started_at: started_at.map(|dt| {
+                    DateTime::parse_from_rfc3339(&dt)
+                        .unwrap()
+                        .with_timezone(&Utc)
+                }),
+                finished_at: finished_at.map(|dt| {
+                    DateTime::parse_from_rfc3339(&dt)
+                        .unwrap()
+                        .with_timezone(&Utc)
+                }),
+                progress: progress_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<JobProgress>(value).ok()),
+                failure: failure_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<JobFailure>(value).ok()),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(VidLibError::from)
+    }
+}
+
+fn job_kind_to_str(kind: &JobKind) -> &'static str {
+    match kind {
+        JobKind::ScanLibrary => "scan_library",
+    }
+}
+
+fn job_kind_from_str(value: &str) -> JobKind {
+    match value {
+        "scan_library" => JobKind::ScanLibrary,
+        _ => JobKind::ScanLibrary,
+    }
+}
+
+fn job_state_to_str(state: &JobState) -> &'static str {
+    match state {
+        JobState::Pending => "pending",
+        JobState::Running => "running",
+        JobState::Completed => "completed",
+        JobState::Failed => "failed",
+        JobState::Cancelled => "cancelled",
+    }
+}
+
+fn job_state_from_str(value: &str) -> JobState {
+    match value {
+        "pending" => JobState::Pending,
+        "running" => JobState::Running,
+        "completed" => JobState::Completed,
+        "failed" => JobState::Failed,
+        "cancelled" => JobState::Cancelled,
+        _ => JobState::Failed,
     }
 }
 

@@ -1,88 +1,211 @@
-## VidLibOrganizer
+# VidLibOrganizer
 
-VidLibOrganizer is a Windows-first, local-only Rust workspace for organizing, indexing, searching, tagging, and safely restructuring very large video libraries. The repository ships with a Rust CLI, a Tauri desktop shell, resumable SQLite-backed indexing, duplicate analysis, metadata extraction via `ffprobe`, and a staged ML abstraction for local face/object workflows.
+VidLibOrganizer is a Windows-first, local-first Rust workspace for organizing, indexing, searching, analyzing, and safely restructuring large video libraries.
 
-## Architecture
+The repository already includes:
 
-Workspace crate boundaries are defined in `docs/crate-contracts.md`.
+- a Rust CLI for power users and automation
+- a Tauri desktop shell
+- SQLite-backed local persistence
+- filesystem scanning and indexing
+- `ffprobe`-based metadata extraction
+- duplicate grouping support
+- safe restructure planning, apply, and undo flows
+- an early local ML abstraction for future premium analysis features
 
-### Workspace crates
+The long-term goal is a premium all-in-one desktop application for video library organization, labeling, review, analysis, browsing, playback, and safe operational workflows.
 
-- `crates/vidlib-core` — shared domain models, progress, and structured workspace error types.
-- `crates/vidlib-db` — SQLite schema versioning, migrations, transactional persistence, checkpoints, search.
-- `crates/vidlib-scanner` — bounded-memory filesystem scanning, skip rules, resilient discovery, chunk/exact hashing integration.
-- `crates/vidlib-metadata` — local `ffprobe` metadata provider with offline fallback.
-- `crates/vidlib-duplicates` — layered duplicate helpers for exact and chunk hashing.
-- `crates/vidlib-fileops` — safe restructure planning, conflict preview, apply, and undo manifests.
-- `crates/vidlib-ml` — local ML abstraction with heuristic offline fallback and documented ONNX extension path.
-- `crates/vidlib-cli` — `vidlib` command-line interface for power users and automation.
-- `src-tauri` — Tauri desktop backend exposing the same core workflows to the GUI.
-- `ui/` — lightweight Tauri frontend shell.
+## Project status
 
-### Phase coverage in this MVP
+Current maturity: **MVP / early platform stage**
 
-- **Phase 1**: workspace, CLI, SQLite, scanner, metadata extraction.
-- **Phase 2**: duplicate grouping, search, tagging hooks, checkpoint persistence.
-- **Phase 3**: Tauri shell with dashboard, add library, scan, search, restructure preview.
-- **Phase 4**: safe plan generation, conflict detection, apply, undo manifest.
-- **Phase 5**: local ML plugin abstraction with working offline heuristic tagging fallback and explicit ONNX roadmap.
+This project already has a strong architecture foundation, but it is still early in product maturity. Core workflows exist, yet many advanced product features described in `EXPANSION_PLAN.md` are still planned rather than finished.
 
-## Security and safety model
+## Core characteristics
 
-- Local-only by default. No telemetry, no cloud services, no network dependency for analysis.
-- All media paths are treated as untrusted input.
-- Restructure operations are preview-first, dry-run by default, require explicit confirmation, and emit undo manifests with audit trails.
-- Scanning uses streaming file reads for hashing and avoids loading whole files into memory.
-- Scanner tolerates inaccessible files and records warnings instead of aborting full runs.
-- Metadata extraction uses `ffprobe` as a subprocess and never executes media-derived content.
-- SQLite runs in WAL mode for safer concurrent access.
+- local-first and offline-first
+- Windows-first desktop focus
+- safe-by-default file operations
+- shared Rust crate architecture
+- designed to grow into a premium video library management platform
 
 ## Current capabilities
 
-- Add and list library roots.
-- Scan folders recursively for common video formats.
-- Skip selected extensions during scans and retain scan summaries.
-- Extract width, height, codec, and duration with local `ffprobe` when installed.
-- Fall back gracefully when `ffprobe` is unavailable.
-- Persist indexed entries in SQLite.
-- Batch-upsert indexed entries transactionally.
-- Compute chunk hashes by default and optional exact hashes.
-- Generate local heuristic tags.
-- Search by text, tag, and extension.
-- Group duplicates by exact, chunk, and perceptual-hash placeholders with grouping metadata.
-- Generate folder restructure plans by extension.
-- Apply plans only when conflict-free, explicitly confirmed, and save undo manifests with audit logs.
-- Use the Tauri GUI for dashboard, scan, search, and preview workflows.
+### Library management
 
-## Planned next work
+- add and list library roots
+- persist library information in SQLite
 
-- Bind checkpoints to persistent library IDs instead of ad-hoc scan IDs.
-- Add true incremental scan scheduler and cancellation tokens.
-- Add FTS indexes and richer search ranking.
-- Implement perceptual video hashing with sampled frame extraction.
-- Add ONNX Runtime-backed local face/object recognition.
-- Add duplicate review UI, tag editor UI, progress streams, settings, and packaged installers.
+### Scanning and indexing
 
-## Dependencies
+- recursively scan common video formats
+- skip selected extensions
+- collect warnings without aborting the entire scan
+- persist scan checkpoints and summaries
 
-- Rust stable toolchain
-- `ffprobe` available on `PATH` for rich metadata extraction
-- Windows WebView2 runtime for Tauri on Windows
-- Tauri prerequisites from the official Tauri documentation
+### Metadata extraction
 
-### Windows prerequisites
+- extract width, height, codec, and duration via local `ffprobe`
+- fall back gracefully when `ffprobe` is unavailable
 
-- Install Rust stable with the MSVC toolchain.
-- Install WebView2 Runtime.
-- Install Microsoft Visual Studio Build Tools with the Desktop C++ workload.
-- Install `ffmpeg`/`ffprobe` and ensure `ffprobe.exe` is on `PATH`.
-- For Tauri builds, ensure the Tauri Windows prerequisites are installed.
+### Duplicate analysis
 
-## Build and run
+- exact-hash grouping
+- chunk-hash grouping
+- placeholder perceptual-hash path for future evolution
+
+### Search
+
+- search by text
+- search by tag
+- search by extension
+
+### File operations
+
+- generate restructure plans
+- preview conflict state
+- apply plans with explicit confirmation
+- create undo manifests
+- undo from manifests
+
+### Desktop shell
+
+- dashboard summary
+- add library
+- run scan
+- persisted scan job history
+- search
+- plan generation preview
 
 ### CLI
 
+- add library
+- list libraries
+- list jobs
+- scan
+- search
+- duplicates
+- plan move
+- apply plan
+- undo
+
+## What is not finished yet
+
+Important planned but not yet complete areas include:
+
+- true cancellation ownership in the desktop app
+- full persistent multi-job runtime beyond the current scan job record foundation
+- FTS-backed search and browse UX
+- thumbnails and preview pipeline
+- duplicate review UI and canonical resolution workflow
+- structured tag taxonomy and rules engine
+- integrated playback
+- richer local ML analysis
+- premium UX polish, diagnostics, packaging, and updater flows
+
+## Workspace structure
+
+### Main crates and folders
+
+- `crates/vidlib-core`
+	- shared domain models, error types, progress types
+- `crates/vidlib-db`
+	- SQLite persistence, schema bootstrapping, queries
+- `crates/vidlib-scanner`
+	- filesystem scanning and scan result assembly
+- `crates/vidlib-metadata`
+	- local media metadata extraction
+- `crates/vidlib-duplicates`
+	- duplicate analysis helpers
+- `crates/vidlib-fileops`
+	- safe filesystem planning, apply, and undo
+- `crates/vidlib-ml`
+	- local ML abstraction and future inference path
+- `crates/vidlib-workflows`
+	- shared business workflow orchestration
+- `crates/vidlib-cli`
+	- command-line interface
+- `src-tauri`
+	- Tauri backend and desktop app wiring
+- `ui/`
+	- frontend shell assets
+- `docs/`
+	- long-term project documentation
+
+For authoritative crate ownership rules, see `docs/crate-contracts.md`.
+
+## Documentation index
+
+The `docs/` folder is intended to be the long-term reference set for the repository.
+
+- `docs/architecture.md`
+	- system architecture, layering, trust boundaries, and runtime flow
+- `docs/codemap.md`
+	- where code lives and where changes should be made
+- `docs/development_progress.md`
+	- current maturity, implemented areas, partial areas, and gaps
+- `docs/full_project_documentation.md`
+	- broad project reference document
+- `docs/crate-contracts.md`
+	- crate ownership and dependency rules
+
+For long-term roadmap planning, see `EXPANSION_PLAN.md`.
+
+## Architecture summary
+
+The workspace follows a layered model:
+
+1. `vidlib-core`
+	 - shared domain contracts
+2. feature crates
+	 - database, scanner, metadata, duplicates, fileops, ML
+3. `vidlib-workflows`
+	 - shared orchestration layer
+4. application entrypoints
+	 - CLI and Tauri backend
+5. frontend shell
+	 - `ui/`
+
+Intended dependency direction:
+
+`vidlib-core` <- feature crates <- `vidlib-workflows` <- application entrypoints
+
+## Security and safety model
+
+- local-only by default
+- no required cloud services
+- no hidden telemetry in the current design
+- media paths are treated as untrusted input
+- metadata extraction is subprocess-based and should remain defensive
+- restructure operations are preview-first and confirmation-gated
+- undo manifests and audit records are part of the product safety model
+- SQLite runs in WAL mode for safer local access patterns
+
+## Requirements and prerequisites
+
+### Runtime and tooling
+
+- Rust stable toolchain
+- Windows environment
+- `ffprobe` on `PATH` for rich metadata extraction
+- WebView2 runtime for Tauri on Windows
+- Tauri prerequisites for desktop builds
+
+### Windows prerequisites
+
+- install Rust stable with the MSVC toolchain
+- install WebView2 Runtime
+- install Visual Studio Build Tools with Desktop C++ workload
+- install `ffmpeg` / `ffprobe` and ensure `ffprobe.exe` is on `PATH`
+- install Tauri prerequisites required for Windows builds
+
+## Build and run
+
+## CLI examples
+
 - `cargo run -p vidlib-cli -- add-library C:\\Videos`
+- `cargo run -p vidlib-cli -- list-libraries`
+- `cargo run -p vidlib-cli -- list-jobs`
 - `cargo run -p vidlib-cli -- scan C:\\Videos --exact-hash --skip-extension tmp`
 - `cargo run -p vidlib-cli -- search --text holiday --tag family`
 - `cargo run -p vidlib-cli -- duplicates --json`
@@ -90,46 +213,65 @@ Workspace crate boundaries are defined in `docs/crate-contracts.md`.
 - `cargo run -p vidlib-cli -- apply-plan plan.json --manifest undo.json --confirm`
 - `cargo run -p vidlib-cli -- undo undo.json`
 
-### GUI
+## Desktop app
 
 - `cargo tauri dev`
 - `cargo tauri build`
 
-The GUI frontend assets are in `ui/`. The Tauri backend is in `src-tauri/`.
+Frontend assets live in `ui/`. The desktop backend lives in `src-tauri/`.
 
 ## Validation
 
+Recommended workspace-level validation:
+
 - `cargo fmt --all --check`
-- `cargo test -p vidlib-core -p vidlib-db -p vidlib-metadata -p vidlib-duplicates -p vidlib-fileops -p vidlib-ml -p vidlib-scanner -p vidlib-cli`
-- `cargo clippy -p vidlib-core -p vidlib-db -p vidlib-metadata -p vidlib-duplicates -p vidlib-fileops -p vidlib-ml -p vidlib-scanner -p vidlib-cli --all-targets -- -D warnings`
 - `cargo check --workspace`
+- `cargo test`
+- `cargo clippy --all-targets --all-features -- -D warnings`
 
-## Test strategy
+## Testing coverage today
 
-Included tests currently cover:
+The repository already includes tests for important current behavior, including:
 
-- SQLite persistence and search behavior.
-- SQLite update/upsert behavior.
-- `ffprobe` JSON parsing.
-- Duplicate grouping logic.
-- Scanner filtering and skip behavior.
-- Safe dry-run/apply/undo file operations.
+- SQLite persistence and search behavior
+- batch update/upsert behavior
+- `ffprobe` JSON parsing
+- duplicate grouping logic
+- scanner filtering and skip behavior
+- safe plan/apply/undo file workflows
 
-## Limitations
+## Development priorities
 
-- Rich metadata requires `ffprobe` installed locally.
-- GUI is still an MVP shell and currently does not stream live scan progress.
-- ML tagging is currently heuristic fallback until ONNX-backed models are integrated.
-- Perceptual video hashing is reserved for a later phase.
+The recommended near-term priorities are:
 
-## ONNX / local ML roadmap
+1. persistent workflow runtime and job model
+2. indexed search and browse improvements
+3. richer metadata and thumbnail pipeline
+4. duplicate review workflow
+5. taxonomy and rules-based organization
 
-- Add a model registry under `crates/vidlib-ml`.
-- Integrate ONNX Runtime behind the existing trait abstraction.
-- Support sampled-frame extraction via local `ffmpeg`.
-- Add local face clustering and object label confidence thresholds.
-- Keep all inference offline and opt-in.
+For the full long-range sequencing, see `EXPANSION_PLAN.md`.
 
-## Open-source posture
+## Contribution guidance
 
-All dependencies are open-source crates or local tools. The design is suitable for an open-source desktop application and keeps analysis on the local machine.
+When making changes:
+
+- keep business logic in reusable crates
+- keep `vidlib-core` free of runtime-specific concerns
+- keep CLI and Tauri entrypoints thin
+- prefer updating shared models before duplicating types in feature crates
+- preserve preview-first and rollback-aware file operation behavior
+- update `docs/` when architecture, ownership, or project maturity materially changes
+
+## Known limitations
+
+- rich metadata currently depends on `ffprobe`
+- the GUI is still an MVP shell
+- desktop cancellation is not yet a full persistent job system
+- search is still basic for large-library use cases
+- playback is not implemented yet
+- ML is still early and mostly future-facing
+
+## License and open-source posture
+
+The workspace uses open-source crates and local tools. The project is suitable for open-source development and is intentionally designed to keep user media analysis on the local machine.

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 use vidlib_core::{
-    format_user_error, AuditRecord, AuditRecordKind, LibraryFolder, ProgressSnapshot,
-    SearchQuery, VidLibError, VidLibResult,
+    format_user_error, AuditRecord, AuditRecordKind, JobRecord, LibraryFolder,
+    ProgressSnapshot, SearchQuery, VidLibError, VidLibResult,
 };
 use vidlib_db::Database;
 use vidlib_duplicates::group_duplicates;
@@ -30,6 +30,7 @@ struct Cli {
 enum Commands {
     AddLibrary(AddLibraryArgs),
     ListLibraries,
+    ListJobs,
     Scan(ScanArgs),
     Search(SearchArgs),
     Duplicates,
@@ -118,6 +119,14 @@ fn run() -> VidLibResult<()> {
         Commands::ListLibraries => {
             let folders = db.list_library_folders()?;
             print_output(cli.json, &folders)?;
+        }
+        Commands::ListJobs => {
+            let jobs = db.list_jobs()?;
+            if cli.json {
+                print_output(true, &jobs)?;
+            } else {
+                print_jobs_table(&jobs);
+            }
         }
         Commands::Scan(args) => {
             if !ffprobe_available() {
@@ -211,4 +220,34 @@ fn print_output<T: serde::Serialize + std::fmt::Debug>(json: bool, value: &T) ->
         println!("{value:#?}");
     }
     Ok(())
+}
+
+fn print_jobs_table(jobs: &[JobRecord]) {
+    if jobs.is_empty() {
+        println!("No jobs found.");
+        return;
+    }
+
+    for job in jobs {
+        let progress = job
+            .progress
+            .as_ref()
+            .map(|progress| format!(
+                "{:.0}% {} / {}",
+                progress.percent, progress.processed_files, progress.discovered_files
+            ))
+            .unwrap_or_else(|| "n/a".to_string());
+
+        println!(
+            "{} | {:?} | {:?} | {} | {}",
+            job.id,
+            job.kind,
+            job.state,
+            job.root_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            progress,
+        );
+    }
 }
