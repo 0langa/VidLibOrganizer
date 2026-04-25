@@ -1,0 +1,16 @@
+[package]
+name = "vidlib-workflows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+uuid.workspace = true
+vidlib-core = { path = "../vidlib-core" }
+vidlib-db = { path = "../vidlib-db" }
+vidlib-metadata = { path = "../vidlib-metadata" }
+vidlib-ml = { path = "../vidlib-ml" }
+vidlib-scanner = { path = "../vidlib-scanner" }

@@ -7,15 +7,14 @@ use std::path::PathBuf;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 use vidlib_core::{
-    format_user_error, AuditRecord, AuditRecordKind, LibraryFolder, ProgressSnapshot,
-    SearchQuery, VidLibError,
+    format_user_error, LibraryFolder, ProgressSnapshot, SearchQuery, VidLibError,
 };
 use vidlib_db::Database;
 use vidlib_duplicates::group_duplicates;
 use vidlib_fileops::plan_by_extension;
-use vidlib_metadata::{ffprobe_available, FfprobeMetadataProvider};
-use vidlib_ml::{LocalHeuristicEngine, MlInferenceEngine};
-use vidlib_scanner::{scan_path, CancellationToken, ScanOptions};
+use vidlib_metadata::ffprobe_available;
+use vidlib_scanner::CancellationToken;
+use vidlib_workflows::{run_scan_workflow, ScanWorkflowConfig};
 
 struct AppState {
     db: Mutex<Database>,
@@ -67,44 +66,27 @@ fn add_library(path: String, recursive: bool, state: State<'_, AppState>) -> Res
 
 #[tauri::command]
 fn run_scan(path: String, state: State<'_, AppState>, window: tauri::Window) -> Result<ScanResponse, String> {
-    let provider = FfprobeMetadataProvider;
     let job_id = Uuid::new_v4().to_string();
     state.jobs.lock().insert(job_id.clone(), false);
     let token = CancellationToken::new();
-    let scan_result = scan_path(
-        PathBuf::from(&path).as_path(),
-        &ScanOptions::default(),
-        &provider,
+    let mut db = state.db.lock();
+    let outcome = run_scan_workflow(
+        &mut db,
+        ScanWorkflowConfig {
+            root_path: PathBuf::from(&path),
+            compute_exact_hash: false,
+            skip_extensions: Vec::new(),
+            onnx_model: None,
+        },
         |progress: ProgressSnapshot| {
             let _ = window.emit("scan-progress", &progress);
         },
         Some(&token),
     )
     .map_err(user_error)?;
-
-    let mut db = state.db.lock();
-    for mut video in scan_result.videos {
-        let tags = LocalHeuristicEngine
-            .describe_video(&video.path)
-            .map_err(user_error)?;
-        video.tags = tags.into_iter().map(|tag| tag.label).collect();
-        db.upsert_video(&video).map_err(user_error)?;
-    }
-    db.insert_scan_warnings(&scan_result.warnings)
-        .map_err(user_error)?;
-    db.insert_audit_records(&[AuditRecord {
-        id: Uuid::new_v4(),
-        plan_id: None,
-        kind: AuditRecordKind::ScanCompleted,
-        source_path: Some(PathBuf::from(&path)),
-        destination_path: None,
-        details: format!("scan job {} completed", job_id),
-        created_at: chrono::Utc::now(),
-    }])
-    .map_err(user_error)?;
     Ok(ScanResponse {
         job_id,
-        indexed_videos: db.all_videos().map_err(user_error)?.len(),
+        indexed_videos: outcome.indexed_videos.len(),
     })
 }
 

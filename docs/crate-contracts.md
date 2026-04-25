@@ -11,7 +11,7 @@ This document is the source of truth for workspace crate boundaries and shared t
 
 Allowed high-level flow:
 
-`vidlib-core` <- (`vidlib-db`, `vidlib-scanner`, `vidlib-metadata`, `vidlib-duplicates`, `vidlib-fileops`, `vidlib-ml`) <- (`vidlib-cli`, `src-tauri`)
+`vidlib-core` <- (`vidlib-db`, `vidlib-scanner`, `vidlib-metadata`, `vidlib-duplicates`, `vidlib-fileops`, `vidlib-ml`) <- `vidlib-workflows` <- (`vidlib-cli`, `src-tauri`)
 
 ## Crate responsibilities
 
@@ -52,6 +52,10 @@ Owns safe file move planning, apply/undo behavior, and filesystem-side conflict 
 ### `vidlib-ml`
 
 Owns local ML tagging abstractions and inference engines.
+
+### `vidlib-workflows`
+
+Owns reusable orchestration across feature crates, such as scan/index workflows, while keeping application entrypoints thin.
 
 ### `vidlib-cli`
 

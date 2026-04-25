@@ -7,6 +7,7 @@ members = [
     "crates/vidlib-duplicates",
     "crates/vidlib-fileops",
     "crates/vidlib-ml",
+    "crates/vidlib-workflows",
     "crates/vidlib-cli",
     "src-tauri",
 ]

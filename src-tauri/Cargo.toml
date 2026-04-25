@@ -25,3 +25,4 @@ vidlib-fileops = { path = "../crates/vidlib-fileops" }
 vidlib-metadata = { path = "../crates/vidlib-metadata" }
 vidlib-ml = { path = "../crates/vidlib-ml" }
 vidlib-scanner = { path = "../crates/vidlib-scanner" }
+vidlib-workflows = { path = "../crates/vidlib-workflows" }

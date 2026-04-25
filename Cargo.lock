@@ -4539,6 +4539,7 @@ dependencies = [
  "vidlib-metadata",
  "vidlib-ml",
  "vidlib-scanner",
+ "vidlib-workflows",
 ]
 
 [[package]]
@@ -4644,6 +4645,20 @@ dependencies = [
  "vidlib-db",
  "vidlib-duplicates",
  "vidlib-fileops",
+ "vidlib-metadata",
+ "vidlib-ml",
+ "vidlib-scanner",
+ "vidlib-workflows",
+]
+
+[[package]]
+name = "vidlib-workflows"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "uuid",
+ "vidlib-core",
+ "vidlib-db",
  "vidlib-metadata",
  "vidlib-ml",
  "vidlib-scanner",

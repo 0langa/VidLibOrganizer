@@ -4,14 +4,14 @@ use std::path::PathBuf;
 use uuid::Uuid;
 use vidlib_core::{
     format_user_error, AuditRecord, AuditRecordKind, LibraryFolder, ProgressSnapshot,
-    ScanCheckpoint, SearchQuery, VidLibError, VidLibResult,
+    SearchQuery, VidLibError, VidLibResult,
 };
 use vidlib_db::Database;
 use vidlib_duplicates::group_duplicates;
 use vidlib_fileops::{apply_plan, audit_records_for_manifest, plan_by_extension, undo_from_manifest};
-use vidlib_metadata::{ffprobe_available, FfprobeMetadataProvider};
-use vidlib_ml::{LocalHeuristicEngine, MlInferenceEngine, OnnxInferenceEngine};
-use vidlib_scanner::{scan_path, CancellationToken, ScanOptions};
+use vidlib_metadata::ffprobe_available;
+use vidlib_scanner::CancellationToken;
+use vidlib_workflows::{run_scan_workflow, ScanWorkflowConfig};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -123,74 +123,21 @@ fn run() -> VidLibResult<()> {
             if !ffprobe_available() {
                 eprintln!("warning: ffprobe not found on PATH; media metadata will fall back to filesystem-only values");
             }
-            let canonical_path = fs::canonicalize(&args.path).unwrap_or(args.path.clone());
-            let library = db
-                .find_library_by_path(&canonical_path)?
-                .unwrap_or(LibraryFolder {
-                    id: Uuid::new_v4(),
-                    path: canonical_path.clone(),
-                    recursive: true,
-                });
-            db.add_library_folder(&library)?;
             let cancellation = CancellationToken::new();
-            let provider = FfprobeMetadataProvider;
-            let onnx_engine = args
-                .onnx_model
-                .as_ref()
-                .map(|path| OnnxInferenceEngine::from_model_path(path))
-                .transpose()?;
-            db.insert_audit_records(&[AuditRecord {
-                id: Uuid::new_v4(),
-                plan_id: None,
-                kind: AuditRecordKind::ScanStarted,
-                source_path: Some(canonical_path.clone()),
-                destination_path: None,
-                details: "scan started".into(),
-                created_at: chrono::Utc::now(),
-            }])?;
-            let scan_result = scan_path(
-                &canonical_path,
-                &ScanOptions {
-                    recursive: true,
+            let outcome = run_scan_workflow(
+                &mut db,
+                ScanWorkflowConfig {
+                    root_path: args.path,
                     compute_exact_hash: args.exact_hash,
-                    compute_chunk_hash: true,
-                    ignore_hidden: false,
                     skip_extensions: args.skip_extension,
+                    onnx_model: args.onnx_model,
                 },
-                &provider,
                 |snapshot: ProgressSnapshot| {
                     println!("{}", snapshot.message);
                 },
                 Some(&cancellation),
             )?;
-            let mut persisted = Vec::with_capacity(scan_result.videos.len());
-            for mut video in scan_result.videos {
-                let ml_tags = if let Some(engine) = &onnx_engine {
-                    engine.describe_video(&video.path)?
-                } else {
-                    LocalHeuristicEngine.describe_video(&video.path)?
-                };
-                video.tags = ml_tags.into_iter().map(|tag| tag.label).collect();
-                persisted.push(video);
-            }
-            db.upsert_videos(&persisted)?;
-            db.insert_scan_warnings(&scan_result.warnings)?;
-            db.save_checkpoint(&ScanCheckpoint {
-                library_id: library.id,
-                last_path: Some(canonical_path),
-                scanned_files: persisted.len() as u64,
-                updated_at: chrono::Utc::now(),
-            })?;
-            db.insert_audit_records(&[AuditRecord {
-                id: Uuid::new_v4(),
-                plan_id: None,
-                kind: AuditRecordKind::ScanCompleted,
-                source_path: Some(library.path.clone()),
-                destination_path: None,
-                details: format!("scan completed with {} indexed files", persisted.len()),
-                created_at: chrono::Utc::now(),
-            }])?;
-            print_output(cli.json, &scan_result.summary)?;
+            print_output(cli.json, &outcome.summary)?;
         }
         Commands::Search(args) => {
             let query = SearchQuery {

@@ -22,6 +22,7 @@ vidlib-fileops = { path = "../vidlib-fileops" }
 vidlib-metadata = { path = "../vidlib-metadata" }
 vidlib-ml = { path = "../vidlib-ml" }
 vidlib-scanner = { path = "../vidlib-scanner" }
+vidlib-workflows = { path = "../vidlib-workflows" }
 
 [[bin]]
 name = "vidlib"
