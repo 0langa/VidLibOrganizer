@@ -1,458 +1,1645 @@
-# VidLibOrganizer Expansion Plan
+# VidLibOrganizer Long-Term Product Roadmap
 
-## Goal
+## Executive summary
 
-Expand VidLibOrganizer from a functional MVP into a reliable, scalable, local-first video library management application with strong workflow orchestration, safe file operations, rich discovery, and practical duplicate review.
+VidLibOrganizer already has a solid local-first Rust workspace foundation: shared domain contracts in `vidlib-core`, SQLite persistence in `vidlib-db`, bounded-memory scanning in `vidlib-scanner`, safe restructure planning in `vidlib-fileops`, a reusable scan orchestration layer in `vidlib-workflows`, a CLI, and a Tauri desktop shell. It is not starting from zero. It is starting from an MVP platform.
 
-## Roadmap principles
+The long-term goal is to evolve that platform into a production-ready, enterprise-grade, premium video library suite for collectors, archivists, media teams, post-production users, and power users who need a single application for:
 
-- Keep core business logic in reusable Rust crates, not in CLI or Tauri entrypoints.
-- Preserve the local-first and offline-first safety model.
-- Prioritize safe operations over feature breadth for any file-destructive workflow.
-- Ship vertical slices that are usable end-to-end instead of isolated technical pieces.
-- Prefer testable service boundaries and shared workflow orchestration.
+- large-scale library ingestion and indexing
+- intelligent organization and labeling
+- fast search and browsing
+- duplicate and quality review
+- metadata enrichment and media analysis
+- safe batch editing and file operations
+- integrated preview and playback
+- operational reliability, auditability, and recoverability
 
-## Target product outcomes
-
-By the end of this roadmap, VidLibOrganizer should:
-
-- scan and index large video libraries reliably across interrupted sessions
-- provide fast, filterable, high-signal search and browsing
-- help users review and resolve duplicates safely
-- support richer metadata and local ML-assisted tagging
-- perform high-confidence restructure operations with rollback support
-- expose the same core workflows to CLI and desktop UI through shared crates
+This roadmap is written as a strategic product and engineering plan, not just a backlog. It is intended to guide the project from MVP to a serious premium desktop program.
 
 ---
 
-## Phase 1 — Workflow foundation and scan architecture
+## 1. Current project understanding
 
-### Objective
+## What exists today
 
-Turn scanning into a resilient long-running workflow that supports cancellation, checkpointing, and shared orchestration across CLI and Tauri.
+The current repository already demonstrates the correct architectural direction.
 
-### Problems being solved
+### Workspace structure
 
-- scan orchestration is duplicated in entrypoints
-- Tauri cancellation is not connected to real runtime state
-- progress is not persisted
-- library scans are not modeled as first-class jobs
+- `crates/vidlib-core`
+	- owns shared domain models, progress, and workspace error contracts
+- `crates/vidlib-db`
+	- owns SQLite schema, persistence, checkpoints, warnings, audit records, and basic search
+- `crates/vidlib-scanner`
+	- owns filesystem traversal, extension filtering, hashing, warning generation, and metadata integration
+- `crates/vidlib-metadata`
+	- owns metadata extraction contracts and `ffprobe` integration
+- `crates/vidlib-duplicates`
+	- owns duplicate grouping and hashing helpers
+- `crates/vidlib-fileops`
+	- owns restructure planning, apply, undo, and conflict-safe file operations
+- `crates/vidlib-ml`
+	- owns local ML abstraction and staged ONNX integration path
+- `crates/vidlib-workflows`
+	- owns shared orchestration for scan workflows
+- `crates/vidlib-cli`
+	- exposes CLI workflows
+- `src-tauri`
+	- exposes desktop app workflows
+- `ui/`
+	- lightweight frontend shell
 
-### Deliverables
+### Product capabilities already present
 
-#### 1. New orchestration crate
+- local-only, offline-first architecture
+- SQLite-backed indexed video catalog
+- library registration
+- recursive video scanning
+- warning-tolerant ingestion
+- `ffprobe` metadata extraction with fallback behavior
+- exact and chunk hashing options
+- placeholder perceptual hashing path
+- duplicate grouping
+- basic search by text, tag, and extension
+- restructure planning by extension
+- apply + undo manifest behavior
+- audit record persistence
+- desktop dashboard and basic scan/search/plan flows
 
-Create `crates/vidlib-workflows` to own application workflows such as:
+### Structural strengths already in place
 
-- scan library
-- resume scan
-- persist warnings and checkpoints
-- emit progress events
-- enrich entries with metadata and ML tags
+- crate boundaries are mostly clean and well documented in `docs/crate-contracts.md`
+- reusable workflow logic is already moving out of entrypoints
+- safety-first file operations already exist
+- the app is local-first by design, which is a strong product differentiator
 
-#### 2. Shared scan job model
+## What is missing today
 
-Add shared workflow models for:
+The current system is still early-stage in the areas that separate an MVP from a premium professional product:
 
-- `ScanJobId`
-- `ScanJobState`
-- `ScanJobSummary`
-- `ScanProgressEvent`
-- `ScanRequest`
-- `ScanOutcome`
-
-These can live in `vidlib-core` if shared broadly, or in `vidlib-workflows` if orchestration-specific.
-
-#### 3. Real cancellation registry
-
-Implement an in-memory job manager for active runs with:
-
-- job id to cancellation token mapping
-- job id to current progress snapshot mapping
-- job lifecycle transitions: pending, running, completed, failed, cancelled
-
-#### 4. Persistent progress and resumability
-
-Extend DB persistence to track:
-
-- active and historical scan jobs
-- per-library latest checkpoint
-- last progress message and counters
-- summary statistics from completed runs
-
-#### 5. Thin entrypoint integration
-
-Refactor:
-
-- `vidlib-cli` to call workflow APIs instead of manually orchestrating scanning
-- `src-tauri` to call the same workflow APIs and emit UI events
-
-### Suggested crate changes
-
-- add `crates/vidlib-workflows`
-- keep `vidlib-scanner` focused on discovery and file-level scan mechanics
-- keep `vidlib-db` focused on persistence only
-- keep entrypoints thin
-
-### Validation
-
-- unit tests for job state transitions
-- integration tests for start, cancel, and resume flows
-- tests for checkpoint persistence and restore behavior
-
-### Success criteria
-
-- a scan can be started, cancelled, and resumed by library id
-- CLI and Tauri both use the same orchestration path
-- scan progress can be inspected during execution
-
-### Risks
-
-- over-designing abstractions before workflows stabilize
-- race conditions in job registry design
-
-### Mitigation
-
-- begin with a synchronous internal implementation hidden behind a clean API
-- add concurrency only where needed
+- no real persistent job system
+- no true cancellation ownership in the desktop app
+- no live enterprise-grade progress model
+- basic search only; no FTS, ranking, faceting, or saved intelligence
+- no first-class browsing experience
+- no embedded playback pipeline
+- no timeline-aware review tools
+- no batch metadata editing UX
+- no real duplicate resolution workflow
+- no advanced tagging taxonomy or rule engine
+- no production packaging, updater, diagnostics, or supportability model
+- no plugin or extension architecture
+- no multi-library governance features for advanced users or teams
 
 ---
 
-## 1. Make scanning a real long-running workflow
+## 2. Product vision
 
-### Why
+VidLibOrganizer should become a premium all-in-one desktop platform for video library management.
 
-Current scan flow is synchronous and the Tauri cancel path is not truly connected to active work.
+At maturity, the product should feel like a fusion of:
 
-### Add
+- a media asset organizer
+- a desktop DAM-lite system for local video collections
+- a safe bulk file operations tool
+- a duplicate and quality review system
+- a metadata intelligence and tagging engine
+- a library browser with rich preview and playback
+- a local-first media analysis workbench
 
-- job registry with real cancellation token ownership
-- resumable scan jobs by library id
-- persisted progress snapshots in SQLite
-- background worker model for Tauri and CLI reuse
+## Core vision pillars
 
-### Outcome
+### 1. Local-first and privacy-first
 
-Reliable ingestion for large libraries and better recovery for interrupted runs.
+- no forced cloud dependency
+- no hidden telemetry by default
+- local control over metadata, tags, previews, thumbnails, and ML models
+- optional connected features later, but never as the foundation
 
-## Phase 2 — Search and library discovery
+### 2. Safety-first media operations
 
-### Objective
+- preview before destructive action
+- reversible workflows where possible
+- strong audit trails
+- conflict detection and rollback support
+- explicit trust boundaries around file operations
 
-Turn search from simple filtering into a fast, high-utility discovery experience for large libraries.
+### 3. High-performance library scale
 
-### Problems being solved
+- handle hundreds of thousands of media records
+- support very large libraries on local, external, and network-attached storage
+- remain responsive during scan, search, browse, and review workflows
 
-- current search performs in-memory filtering over stored entries
-- no ranking or full-text support exists
-- browsing large libraries will degrade as the dataset grows
+### 4. Premium workflow depth
 
-### Deliverables
+- not just scan and search
+- also review, compare, label, sort, restructure, inspect, preview, play, analyze, and curate
 
-#### 1. FTS-backed search
+### 5. Shared business logic across interfaces
 
-Add SQLite FTS support for:
+- CLI for automation and power workflows
+- desktop UI for premium daily usage
+- future API/plugin surface without rewriting core logic
 
-- file name
-- full path
+---
+
+## 3. Product maturity target
+
+To be considered production-ready and enterprise-grade, VidLibOrganizer should meet the following standards.
+
+## Reliability
+
+- scans survive interruption
+- state is resumable and repairable
+- large operations are chunked and recoverable
+- corruption scenarios are detectable and repairable
+
+## Usability
+
+- polished desktop experience
+- clear progress, errors, and recovery guidance
+- powerful but understandable workflows
+- discoverable advanced features
+
+## Performance
+
+- responsive browsing on large libraries
+- indexed search with strong latency targets
+- low-memory long-running background operations
+- thumbnail and preview caching that scales
+
+## Safety
+
+- all destructive operations previewed
+- manifest-backed undo where possible
+- audit log for all major changes
+- quarantine/recycle workflows before permanent delete
+
+## Extensibility
+
+- clean crate-level boundaries
+- versioned data contracts
+- plugin-ready service boundaries
+- future model and analyzer backends can be added without architectural collapse
+
+## Supportability
+
+- structured logs
+- diagnostics bundles
+- database integrity checks
+- migration discipline
+- installer, updater, and version compatibility strategy
+
+---
+
+## 4. Strategic roadmap themes
+
+This roadmap is organized around long-term themes rather than isolated features.
+
+1. Platform and workflow reliability
+2. Search, discovery, and browsing
+3. Media intelligence and metadata depth
+4. Duplicate, quality, and curation workflows
+5. Integrated preview, playback, and review tools
+6. Editing, organization, and batch operations
+7. Premium desktop UX and product polish
+8. Enterprise readiness, diagnostics, packaging, and support
+9. Extensibility, automation, and ecosystem growth
+
+---
+
+## 5. Roadmap phases
+
+## Phase 1 — Stabilize the platform foundation
+
+### Purpose
+
+Convert the current MVP architecture into a dependable product core that can safely support premium features.
+
+### Why this phase matters
+
+The codebase already has the right crate layout, but the runtime model is still shallow. Premium features will fail if workflows, jobs, persistence, and UI state are not hardened first.
+
+### Key outcomes
+
+- first-class workflow runtime
+- persistent job history
+- resumable scans
+- real cancellation and progress ownership
+- stronger schema/versioning discipline
+- thin CLI and Tauri entrypoints
+
+### Major workstreams
+
+#### 1. Workflow runtime hardening
+
+Expand `vidlib-workflows` into the central orchestration layer for:
+
+- scan jobs
+- metadata enrichment jobs
+- thumbnail generation jobs
+- duplicate analysis jobs
+- restructure preview/apply jobs
+- background maintenance jobs
+
+Introduce explicit workflow types such as:
+
+- `JobId`
+- `JobKind`
+- `JobState`
+- `JobProgress`
+- `JobCheckpoint`
+- `JobResult`
+- `JobFailure`
+
+#### 2. Real job manager
+
+Replace the Tauri-side `HashMap<String, bool>` placeholder with a true job runtime that owns:
+
+- cancellation tokens
+- progress snapshots
+- lifecycle transitions
+- completion summaries
+- last error state
+- event fanout to UI subscribers
+
+#### 3. Persistent operational state
+
+Extend `vidlib-db` to persist:
+
+- job table and history
+- richer scan checkpoints
+- library health status
+- ingest sessions
+- thumbnail generation queue state
+- analysis queue state
+
+#### 4. Data model cleanup
+
+Evolve `vidlib-core` shared types into more production-ready contracts:
+
+- richer `VideoEntry`
+- versioned query/filter model
+- explicit media stream models
+- normalized tag and label types
+- review state enums
+- operation summary types
+
+#### 5. Migration discipline
+
+Establish a stricter migration policy for SQLite:
+
+- numbered migrations
+- migration tests
+- upgrade compatibility checks
+- downgrade/repair strategy where practical
+
+### Exit criteria
+
+- scans can be started, cancelled, resumed, and inspected reliably
+- desktop and CLI both use the same workflow APIs
+- job history is queryable
+- all runtime-critical flows are covered by integration tests
+
+---
+
+## Phase 2 — Build a serious search and browsing engine
+
+### Purpose
+
+Turn the product from an indexer into a library browser users can live in all day.
+
+### Key outcomes
+
+- fast indexed search
+- advanced filters and facets
+- saved searches and collections
+- browse-first UI patterns
+- large library responsiveness
+
+### Major workstreams
+
+#### 1. Full-text and structured search
+
+Upgrade `vidlib-db::search` from in-memory filtering to indexed search using SQLite FTS and structured filtering.
+
+Index candidate fields such as:
+
+- filename
+- path
 - tags
-- codec and selected textual metadata
+- codec/container
+- user notes
+- derived labels
+- library name
 
-#### 2. Search ranking and query interpretation
+#### 2. Advanced query model
+
+Replace the minimal `SearchQuery` with a richer query contract supporting:
+
+- text query
+- include/exclude tags
+- extension/container
+- codec
+- width/height/resolution classes
+- frame rate range
+- duration range
+- bitrate range
+- size range
+- date added / modified date
+- duplicate state
+- quality flags
+- review status
+- library and collection scope
+
+#### 3. Faceted discovery
+
+Add browse facets and aggregations for:
+
+- format
+- resolution
+- duration bucket
+- codec
+- library root
+- tag family
+- duplicate status
+- quality warnings
+
+#### 4. Saved search and smart collections
 
 Support:
 
-- ranked results
-- exact phrase vs loose match
-- prefix matching where practical
-- optional snippet generation for matched fields
+- recent searches
+- named filters
+- dynamic smart collections
+- pinned views such as “Needs Review”, “Likely Duplicates”, “No Metadata”, “Large Files”, and “Low Quality Imports”
 
-#### 3. Rich filter model
+#### 5. Browser-grade UI
 
-Extend `SearchQuery` or create a versioned advanced query type with filters for:
+The UI should evolve into a proper library browser with:
 
-- extension
-- codec
-- resolution range
-- duration range
-- size range
-- duplicate state
-- library root
-- tags include/exclude
+- table view
+- thumbnail grid view
+- details inspector
+- quick filter chips
+- keyboard navigation
+- multi-select workflows
+- persistent sort/view preferences
 
-#### 4. Saved search support
+### Exit criteria
 
-Persist:
-
-- recent queries
-- named saved searches
-- UI-friendly filter presets
-
-#### 5. Search UX improvements
-
-Desktop UI should gain:
-
-- filter panels
-- sortable result tables
-- quick-open or preview actions
-- result count and latency display
-
-### Suggested implementation order
-
-1. DB schema and FTS setup
-2. core query model expansion
-3. repository/search API updates
-4. CLI support for advanced filters
-5. Tauri/UI support
-
-### Validation
-
-- tests for FTS indexing and query correctness
-- performance checks on synthetic large libraries
-- regression tests for combined filters
-
-### Success criteria
-
-- search remains responsive on large libraries
-- users can narrow results precisely with combined filters
+- search remains fast at large scale
+- the UI supports real browse workflows, not just lookup
+- saved views make daily usage practical
 
 ---
 
-## 2. Upgrade search from basic filtering to fast discovery
+## Phase 3 — Rich metadata, thumbnails, and media understanding
 
-### Why
+### Purpose
 
-Search works, but it is still shallow and does not yet support fast exploratory workflows.
+Expand the system from file indexing to actual media understanding.
 
-### Add
+### Key outcomes
 
-- SQLite FTS for filename, path, and tag search
-- ranking and optional snippets
-- saved searches and recent queries
-- filters for codec, resolution, duration, size, and duplicate status
+- richer technical metadata
+- thumbnail and preview generation
+- stream-level insight
+- better foundations for playback, duplicate review, and ML analysis
 
-### Outcome
+### Major workstreams
 
-The app becomes a practical daily-use browser for large libraries.
+#### 1. Expanded metadata extraction
 
-## Phase 3 — Duplicate review and resolution workflow
+Extend `vidlib-metadata` to collect and normalize:
 
-### Objective
+- container format
+- bitrate
+- frame rate
+- pixel format
+- aspect ratio
+- color space / HDR indicators where available
+- audio streams, channels, language, codec
+- subtitle streams
+- creation date and embedded metadata when present
+- rotation/orientation
 
-Transform duplicate detection from raw grouping output into a guided decision workflow.
+#### 2. Thumbnail and preview asset pipeline
 
-### Problems being solved
+Add a managed preview subsystem for:
 
-- users can detect duplicates but cannot resolve them safely in-app
-- duplicate groups are not prioritized by confidence or actionability
+- poster thumbnails
+- contact sheet generation
+- multi-frame preview strips
+- cached preview stills
+- preview invalidation and regeneration
 
-### Deliverables
+#### 3. Preview cache management
 
-#### 1. Duplicate review domain model
+Implement cache policies for:
+
+- cache location
+- size limits
+- regeneration rules
+- stale cache cleanup
+- multi-quality preview variants
+
+#### 4. Media technical diagnostics
+
+Add derived analysis flags such as:
+
+- missing audio
+- unusual duration
+- corrupted metadata indicators
+- very low bitrate for resolution
+- likely screen capture vs camera footage
+- mismatched container/codec expectations
+
+### Exit criteria
+
+- each indexed record can support richer inspection
+- the UI can show meaningful previews and technical detail
+- the data model is ready for advanced review workflows
+
+---
+
+## Phase 4 — Duplicate detection, similarity, and curation workflows
+
+### Purpose
+
+Turn duplicate detection into one of the product’s flagship premium workflows.
+
+### Key outcomes
+
+- guided duplicate review
+- exact and near-duplicate confidence tiers
+- canonical selection assistance
+- safe batch resolution
+
+### Major workstreams
+
+#### 1. Duplicate intelligence model
+
+Expand `vidlib-duplicates` and core models to support:
+
+- exact duplicates
+- chunk-based near duplicates
+- perceptual similarity from sampled frames
+- metadata-based likely duplicates
+- variant relationships such as transcodes, trims, re-encodes, and renamed copies
+
+#### 2. Review state and decision model
 
 Add support for:
 
-- canonical item selection
-- reviewed / ignored / pending statuses
-- per-group notes or rationale
-- confidence class for exact, chunk, perceptual, and metadata similarity
+- pending / reviewed / ignored / resolved groups
+- canonical keep choice
+- user notes
+- decision rationale
+- confidence scores
+- suggested action type
 
-#### 2. Heuristics for best candidate selection
+#### 3. Best-version heuristics
 
-Implement rules such as:
+Implement ranking heuristics such as:
 
-- prefer higher resolution
-- prefer larger bitrate or size when metadata supports it
-- prefer newer container/codec only when clearly superior
-- prefer user-pinned library roots
-
-#### 3. Safe duplicate actions
-
-Support:
-
-- mark canonical and hide alternates
-- move duplicates to review folder
-- send duplicates to recycle bin or quarantine area
-- batch action preview before commit
+- prefer higher visual quality
+- prefer better codec when practical
+- prefer complete duration over truncated variants
+- prefer files in trusted roots
+- prefer manually tagged or user-pinned versions
 
 #### 4. Duplicate review UI
 
-Desktop UI should show:
+Add a premium review experience with:
 
-- grouped duplicate sets
 - side-by-side metadata comparison
-- recommended keep candidate
-- action preview and confirmation
+- thumbnail/contact sheet comparison
+- quick playback comparison
+- “keep best” recommendations
+- batch quarantine/move/delete actions
+- reversible action preview
 
-### Validation
+### Exit criteria
 
-- tests for grouping stability
-- tests for heuristic ranking
-- tests for batch action previews and rollback paths
-
-### Success criteria
-
-- duplicate groups become reviewable and actionable
-- destructive decisions remain preview-first and reversible
+- duplicate resolution becomes a real end-user workflow
+- users can safely reduce clutter with confidence
 
 ---
 
-## 3. Turn duplicate detection into a review workflow
+## Phase 5 — Tagging, taxonomy, and intelligent organization
 
-### Why
+### Purpose
 
-Duplicate grouping exists, but users cannot yet review and act on results safely.
+Move from simple labels to a true organization system.
 
-### Add
+### Key outcomes
 
-- duplicate review UI
-- keep-best heuristics
-- bulk actions for canonical selection, move, and recycle-bin delete
-- confidence tiers for exact, near, and perceptual matches
+- manual and machine-assisted labeling
+- structured tag taxonomy
+- rules engine for automated organization
+- premium curation workflows
 
-### Outcome
+### Major workstreams
 
-Users can safely reduce clutter instead of only seeing raw duplicate groups.
+#### 1. Tag system redesign
 
-## Phase 4 — Rich metadata, thumbnails, and local ML tagging
+Support multiple label classes:
 
-### Objective
+- freeform tags
+- controlled vocabulary tags
+- hierarchical categories
+- machine-suggested labels
+- locked/protected labels
+- provenance-aware tags
 
-Increase the quality of organization and search by expanding metadata extraction and making local ML features practical.
+#### 2. Rules engine
 
-### Problems being solved
+Users should be able to define rules like:
 
-- metadata is limited to a small `ffprobe` subset
-- there are no thumbnails or sampled frames for UI review
-- ML tagging is placeholder-level today
+- if codec is `h264` and resolution is `480p`, tag as `legacy`
+- if path contains `wedding`, tag as `event/wedding`
+- if duration < threshold and resolution low, mark for review
+- if duplicate confidence is high, place in duplicate review collection
 
-### Deliverables
+#### 3. Organization templates
 
-#### 1. Richer media metadata extraction
+Expand `vidlib-fileops` from extension-based planning to rule/template-driven organization:
 
-Expand support for:
+- by date
+- by event
+- by tag
+- by library
+- by quality tier
+- by custom path templates
 
-- bitrate
-- frame rate
-- aspect ratio
-- audio streams and codecs
-- container format
-- creation timestamps where available
+#### 4. Batch metadata and tag editing
 
-#### 2. Thumbnail and frame sampling pipeline
+Add bulk edit workflows for:
 
-Add sampled-frame extraction for:
+- tag add/remove/replace
+- review status changes
+- collection assignment
+- naming template preview
 
-- preview thumbnails in UI
-- future perceptual video hashing improvements
-- downstream ML inference input
+### Exit criteria
 
-#### 3. ONNX model integration path
-
-Extend `vidlib-ml` with:
-
-- model registry/config
-- pluggable model descriptors
-- threshold tuning support
-- fallback logic when models are unavailable
-
-#### 4. Tag management model
-
-Support:
-
-- manual tags
-- machine-suggested tags
-- locked tags
-- tag provenance
-- user rules for auto-tagging
-
-### Validation
-
-- tests for metadata parsing edge cases
-- tests for thumbnail generation pipeline
-- deterministic tests for rule-based tagging behavior
-
-### Success criteria
-
-- results display richer media detail
-- users can organize libraries based on more than filename and extension
-- ML tagging remains optional and local-only
+- the product supports real curation at scale
+- users can maintain consistent organization over time
 
 ---
 
-## 4. Build a real metadata and tagging pipeline
+## Phase 6 — Integrated browsing, preview, and playback
 
-### Why
+### Purpose
 
-Metadata extraction is still minimal and ML tagging is currently heuristic.
+Make VidLibOrganizer a place where users not only organize media, but also inspect and consume it.
 
-### Add
+### Key outcomes
 
-- richer `ffprobe` parsing
-- thumbnail and sampled-frame generation
-- ONNX-backed local tagging
-- user-editable tags and tag rules
-- folder naming templates driven by metadata and tags
+- integrated playback
+- browser-like media navigation
+- review-friendly playback controls
+- premium daily-use experience
 
-### Outcome
+### Major workstreams
 
-Organization becomes meaningfully smarter while staying local-first.
+#### 1. Embedded player architecture
 
-## Phase 5 — Production-safe restructure engine
+Introduce a playback subsystem supporting:
 
-### Objective
+- common desktop playback formats
+- reliable seeking
+- frame stepping where feasible
+- audio track switching where feasible
+- subtitle support over time
 
-Make restructure and move operations safe enough for large real-world libraries.
-
-### Problems being solved
-
-- file move operations are inherently high risk
-- policy decisions for naming and conflicts are still basic
-- recovery guarantees need to be stronger
-
-### Deliverables
-
-#### 1. Naming and placement policy engine
-
-Support configurable strategies such as:
-
-- by extension
-- by codec
-- by year
-- by tags
-- by custom templates
-
-#### 2. Conflict policy model
-
-Support:
-
-- rename on collision
-- skip on collision
-- quarantine on collision
-- compare-and-confirm behavior
-
-#### 3. Stronger rollback model
-
-Improve undo manifests with:
-
-- validation before apply
-- verification after apply
-- post-action audit trail
-- rollback consistency checks
-
-#### 4. Safety-oriented UI
+#### 2. Playback UX
 
 Add:
 
-- preflight summary
-- diff preview
-- confirmation checkpoints
-- dry-run as default in GUI and CLI
+- inline preview player
+- dedicated detail view player
+- keyboard shortcuts
+- scrub bar with preview markers
+- previous/next in filtered result set
+- loop and comparison playback modes
 
-### Validation
+#### 3. Browse and inspect flows
 
-- integration tests for conflict-heavy plans
-- rollback tests on partial failure scenarios
+Support:
+
+- double-click to play
+- hover preview where practical
+- quick inspect panel
+- collection browsing
+- timeline of recently added or recently reviewed content
+
+#### 4. Playback-aware review tools
+
+Premium workflows should eventually support:
+
+- compare two similar clips
+- review quality issues while playing
+- mark timestamps or notes
+- create curation markers for later action
+
+### Exit criteria
+
+- the desktop app becomes a true browsing environment
+- preview and playback are good enough for regular use
+
+---
+
+## Phase 7 — Media analysis and premium intelligence features
+
+### Purpose
+
+Introduce advanced offline intelligence without compromising the local-first promise.
+
+### Key outcomes
+
+- usable local ML analysis
+- better auto-labeling
+- quality and content insights
+- premium differentiation
+
+### Major workstreams
+
+#### 1. ONNX-powered local inference
+
+Expand `vidlib-ml` into a real inference subsystem with:
+
+- model registry
+- model capability metadata
+- threshold tuning
+- opt-in model downloads or manual installs
+- hardware acceleration support when available
+- graceful fallback to heuristic behavior
+
+#### 2. Analysis feature tracks
+
+Potential premium intelligence features:
+
+- scene classification
+- object labels
+- face clustering
+- NSFW/sensitive content flagging with local-only execution
+- quality scoring
+- low-light / blur / stability indicators
+- likely screen recording / webcam / phone footage classification
+
+#### 3. Confidence-aware UX
+
+All ML outputs should be treated as suggestions with:
+
+- confidence display
+- provenance display
+- user override
+- bulk accept/reject review flows
+
+### Exit criteria
+
+- ML features are optional, local, and useful
+- analysis enriches workflows without becoming mandatory or opaque
+
+---
+
+## Phase 8 — Editing-adjacent features and operational media tools
+
+### Purpose
+
+Expand beyond organization into light editing-adjacent and review-adjacent capabilities expected from premium tools.
+
+### Key outcomes
+
+- batch operations beyond moving files
+- lightweight media transformation workflows
+- stronger quality control and review pipelines
+
+### Major workstreams
+
+#### 1. Non-destructive action planning
+
+Broaden planning support for:
+
+- rename preview
+- directory restructure preview
+- move/copy/quarantine preview
+- metadata/tag changes preview
+
+#### 2. Optional transformation workflows
+
+Longer term, consider controlled workflows for:
+
+- clip extraction helpers
+- poster frame selection
+- thumbnail regeneration
+- transcode queue handoff or preset launch
+- audio extraction helpers
+
+These should remain clearly separated from full NLE ambitions. The product should be editing-adjacent, not necessarily a full editor.
+
+#### 3. QC and review queues
+
+Add workflows for:
+
+- corrupt or suspicious files
+- low-quality imports
+- missing metadata
+- probable duplicates
+- unreviewed clips
+- untagged media
+
+### Exit criteria
+
+- VidLibOrganizer becomes a practical operational media workbench
+- users can manage cleanup and prep workflows without leaving the app
+
+---
+
+## Phase 9 — Premium desktop UX, settings, and polish
+
+### Purpose
+
+Close the gap between “tool” and “premium product.”
+
+### Key outcomes
+
+- modern desktop UX
+- configurable preferences
+- cohesive product identity
+- reduced friction for long daily sessions
+
+### Major workstreams
+
+#### 1. UI architecture upgrade
+
+The current `ui/` shell should evolve into a more scalable frontend with:
+
+- reusable state model
+- view routing
+- component library
+- virtualization for large result sets
+- stronger keyboard accessibility
+
+#### 2. Product settings
+
+Add settings for:
+
+- database location
+- cache location and size
+- thumbnail quality
+- scan defaults
+- ignore rules
+- model paths
+- theme and density preferences
+- playback preferences
+
+#### 3. UX polish features
+
+Add:
+
+- onboarding and first-run guidance
+- empty-state guidance
+- progress center
+- notifications and action history
+- recent activity feed
+- richer error messages and recovery guidance
+
+### Exit criteria
+
+- the app feels cohesive, polished, and premium
+- advanced features remain approachable
+
+---
+
+## Phase 10 — Production readiness, packaging, and enterprise supportability
+
+### Purpose
+
+Make the application supportable as a serious shipped product.
+
+### Key outcomes
+
+- production build pipeline
+- update strategy
+- diagnostics and repair tools
+- long-term data safety posture
+
+### Major workstreams
+
+#### 1. Packaging and release engineering
+
+Establish:
+
+- signed installers
+- stable release channels
+- beta/preview channels
+- automated build validation
+- artifact verification
+
+#### 2. Upgrades and compatibility
+
+Support:
+
+- safe DB migrations across versions
+- preview of breaking schema changes during development
+- import/export of configuration and metadata
+- backup and restore guidance
+
+#### 3. Diagnostics and support bundle
+
+Add supportability features such as:
+
+- structured logs
+- debug log viewer/export
+- environment diagnostics
+- database integrity check
+- cache cleanup tools
+- scan health and performance diagnostics
+
+#### 4. Reliability and quality engineering
+
+Raise test maturity to include:
+
+- unit tests for crate internals
+- integration tests for full workflows
+- synthetic large-library performance tests
+- migration tests
+- file operation failure injection tests
+- UI smoke/regression tests
+
+### Exit criteria
+
+- releases are safer to ship and support
+- users can recover from common failures without data loss
+
+---
+
+## Phase 11 — Automation, extensibility, and ecosystem growth
+
+### Purpose
+
+Enable power-user and enterprise-style extension scenarios without weakening the local core.
+
+### Key outcomes
+
+- scriptable workflows
+- plugin-ready boundaries
+- future ecosystem potential
+
+### Major workstreams
+
+#### 1. Automation surface
+
+Continue growing the CLI as a first-class automation layer for:
+
+- scheduled scans
+- smart collection export
+- batch organization runs
+- reporting and audits
+
+#### 2. Plugin/service boundaries
+
+Define extension points for:
+
+- metadata providers
+- analyzers
+- duplicate strategies
+- import/export adapters
+- rule packs
+
+#### 3. Optional future integration surfaces
+
+Longer-term possibilities:
+
+- local API for automation
+- plugin SDK
+- importers from other media organizers
+- team-oriented metadata exchange
+
+### Exit criteria
+
+- the platform can grow without monolithic churn
+- advanced users can automate more of their workflows
+
+---
+
+## 6. Capability map for a premium all-in-one program
+
+The mature product should include most or all of the following premium capability areas.
+
+## Library management
+
+- multi-library support
+- health status per library
+- incremental scanning
+- offline/external drive awareness
+- library statistics and storage visibility
+
+## Search and discovery
+
+- full-text search
+- structured filters
+- faceted browse
+- smart collections
+- saved searches
+
+## Metadata and labeling
+
+- technical metadata
+- user metadata
+- rule-based labels
+- ML-assisted suggestions
+- controlled taxonomy
+
+## Duplicate and quality control
+
+- exact duplicate detection
+- near-duplicate detection
+- canonical choice support
+- quality warnings
+- quarantine flows
+
+## Preview and playback
+
+- thumbnails
+- preview strips
+- integrated player
+- compare mode
+- playback-aware review
+
+## File operations
+
+- move/copy/rename planning
+- preview and conflict handling
+- apply with manifests
+- undo and audit trails
+
+## Review and curation
+
+- queues
+- notes
+- status flags
+- bulk review actions
+- smart worklists
+
+## Product operations
+
+- settings
+- logs
+- diagnostics
+- repair and recovery tools
+- installer and updater
+
+---
+
+## 7. Recommended engineering priorities
+
+To maximize product value and reduce rework, the recommended order of execution is:
+
+1. harden workflow runtime and persistent jobs
+2. rebuild search and browse around indexed discovery
+3. build richer metadata and thumbnail pipeline
+4. deliver duplicate review and safe curation workflows
+5. add taxonomy, rules, and batch organization depth
+6. add integrated playback and media review UX
+7. deepen local ML and premium intelligence features
+8. harden packaging, diagnostics, and supportability
+
+This order preserves the current architecture and builds on its strengths.
+
+---
+
+## 8. Prioritized milestone plan and implementation order
+
+This section converts the roadmap into a practical milestone sequence. The goal is priority order, not calendar planning.
+
+### Tag legend
+
+- `Complexity: Low | Medium | High | Very High`
+- `Coding Size: Small | Medium | Large | Very Large | Massive`
+
+## Milestone 1 — Core workflow runtime and persistent jobs
+
+**Priority:** 1
+**Primary roadmap phase:** Phase 1 — Stabilize the platform foundation
+
+### Goal
+
+Establish a production-grade job and workflow backbone before deeper product features are layered on top.
+
+### Implementation steps
+
+1. Define shared job/workflow models in `vidlib-core`
+	- add durable job identity, job kind, lifecycle state, richer progress, checkpoints, failure summaries, and operation summaries
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Expand `vidlib-workflows` into the central orchestration layer
+	- unify scan, metadata enrichment, background maintenance, and future queued workflows under one runtime pattern
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Replace the Tauri placeholder job registry in `src-tauri`
+	- remove the simple `HashMap<String, bool>` cancellation placeholder and introduce real runtime-owned jobs, progress subscriptions, and cancellation handles
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+4. Persist job history and operational state in `vidlib-db`
+	- store job records, checkpoints, summaries, and failure state
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+5. Refactor `vidlib-cli` and `src-tauri` to consume the same workflow APIs
+	- keep entrypoints thin and move orchestration details fully into reusable crates
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-db`
+- `crates/vidlib-workflows`
+- `crates/vidlib-scanner`
+- `crates/vidlib-cli`
+- `src-tauri`
+
+### Schema changes
+
+- new `jobs` table
+  - `id`, `kind`, `state`, `created_at`, `started_at`, `finished_at`, `requested_by`, `root_scope`, `summary_json`, `error_json`
+- new `job_checkpoints` table
+  - `job_id`, `checkpoint_kind`, `payload_json`, `updated_at`
+- new `job_events` table
+  - append-only progress/event log for audit and resume support
+- extend `scan_checkpoints`
+  - tie checkpoints to job id and library id more explicitly
+- optional `library_status` table
+  - health, last scan state, last successful scan, warning counts
+
+### Why first
+
+This milestone reduces rework across search, thumbnails, playback, ML, and duplicate review because all of them benefit from a unified job model.
+
+## Milestone 2 — Indexed search, filters, and browser foundation
+
+**Priority:** 2
+**Primary roadmap phase:** Phase 2 — Build a serious search and browsing engine
+
+### Goal
+
+Turn the product into a true browse-and-discover application.
+
+### Implementation steps
+
+1. Replace in-memory search with indexed search in `vidlib-db`
+	- adopt SQLite FTS and structured filtering paths
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Redesign `SearchQuery` and related result contracts in `vidlib-core`
+	- support include/exclude tags, duration, size, codec, library scope, quality flags, and review state
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Add saved searches and smart collections workflow support in `vidlib-workflows`
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+4. Upgrade the desktop UI into a real browser surface
+	- table view, grid view, inspector, persistent sort/filter state, keyboard navigation
+	- **Tags:** `Complexity: High`, `Coding Size: Very Large`
+
+5. Extend `vidlib-cli` search surface for advanced filters and scripted exports
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-db`
+- `crates/vidlib-workflows`
+- `crates/vidlib-cli`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- new FTS virtual table for searchable text fields
+  - filename, path, tags, notes, derived labels, codec/container text
+- new `saved_searches` table
+  - `id`, `name`, `query_json`, `created_at`, `updated_at`, `pinned`
+- new `collections` table
+  - support static and smart collections
+- new `collection_members` table
+  - for static collections
+- optional search-related indexes on structured filter columns
+
+### Why second
+
+Search and browsing become the central daily interaction model. Many future premium features depend on users being able to efficiently find and work with subsets of the library.
+
+## Milestone 3 — Rich metadata and thumbnail pipeline
+
+**Priority:** 3
+**Primary roadmap phase:** Phase 3 — Rich metadata, thumbnails, and media understanding
+
+### Goal
+
+Deepen media understanding so the product can support inspection, playback, review, and premium labeling workflows.
+
+### Implementation steps
+
+1. Expand media metadata contracts in `vidlib-core`
+	- add stream-level models, audio/subtitle descriptors, bitrate/frame-rate/aspect/color fields, and diagnostics flags
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Extend `vidlib-metadata` extraction and normalization
+	- richer `ffprobe` mapping, fallback behavior, and parse resilience
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Build preview asset generation workflows in `vidlib-workflows`
+	- thumbnail generation, contact sheets, preview strips, cache refresh jobs
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+4. Add preview/cache persistence and lookup in `vidlib-db`
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+5. Surface thumbnails and rich inspection in `src-tauri` and `ui/`
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-metadata`
+- `crates/vidlib-workflows`
+- `crates/vidlib-db`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- extend `video_entries`
+  - add container, bitrate, frame_rate, aspect_ratio, pixel_format, color_space, created_media_at, rotation, diagnostics flags
+- new `video_streams` table
+  - normalized stream-level metadata per video
+- new `preview_assets` table
+  - poster, contact sheet, strip, cache path, generation status, checksum, updated_at
+- new `preview_cache_settings` or app settings persistence entry
+
+### Why third
+
+This unlocks higher-value UX: thumbnails, inspection, playback readiness, duplicate review fidelity, and better ML input quality.
+
+## Milestone 4 — Duplicate review and canonical resolution system
+
+**Priority:** 4
+**Primary roadmap phase:** Phase 4 — Duplicate detection, similarity, and curation workflows
+
+### Goal
+
+Make duplicate review one of the first truly premium workflows in the application.
+
+### Implementation steps
+
+1. Redesign duplicate domain models in `vidlib-core`
+	- group state, canonical selection, confidence, rationale, suggested action, variant relationship types
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Extend `vidlib-duplicates` to support richer similarity strategies
+	- exact, chunk, perceptual, metadata similarity, and best-version heuristics
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Persist duplicate groups and review decisions in `vidlib-db`
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+4. Add duplicate review orchestration in `vidlib-workflows`
+	- queue generation, review summaries, safe resolution actions
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+5. Build review UI with compare, recommend, quarantine, and batch resolve flows
+	- **Tags:** `Complexity: High`, `Coding Size: Very Large`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-duplicates`
+- `crates/vidlib-db`
+- `crates/vidlib-workflows`
+- `crates/vidlib-fileops`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- new `duplicate_groups` table
+  - `id`, `strategy`, `fingerprint`, `confidence`, `status`, `canonical_video_id`, `summary_json`, `updated_at`
+- new `duplicate_group_members` table
+  - `group_id`, `video_id`, `rank`, `relationship_type`
+- new `duplicate_review_actions` table
+  - review decisions, notes, rationale, selected action, acted_at
+
+### Why fourth
+
+After browse, metadata, and thumbnails exist, duplicate review becomes much more valuable and much easier to trust.
+
+## Milestone 5 — Tag taxonomy, rules engine, and premium organization
+
+**Priority:** 5
+**Primary roadmap phase:** Phase 5 — Tagging, taxonomy, and intelligent organization
+
+### Goal
+
+Move beyond loose tags into a full organization system that can drive curation and automated placement.
+
+### Implementation steps
+
+1. Redesign tag and label contracts in `vidlib-core`
+	- controlled tags, hierarchical categories, provenance, locked tags, suggestion state
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Add taxonomy persistence and tag assignment data in `vidlib-db`
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Build a rules engine in `vidlib-workflows`
+	- derive tags, route content into collections, assign review queues, and propose organization changes
+	- **Tags:** `Complexity: Very High`, `Coding Size: Very Large`
+
+4. Expand `vidlib-fileops` to support rule/template-driven placement
+	- rename/move logic by metadata, tags, date, and custom templates
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+5. Add batch metadata/tag editing UI and workflow surfaces
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-db`
+- `crates/vidlib-workflows`
+- `crates/vidlib-fileops`
+- `crates/vidlib-cli`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- new `tags` table
+- new `tag_assignments` table
+- new `tag_taxonomy` or hierarchical parent linkage
+- new `rules` table
+  - rule definitions and serialized conditions/actions
+- new `rule_execution_log` table
+- optional `collections` reuse for rule-driven queues
+
+### Why fifth
+
+By this point the app can identify, search, preview, and compare. The next major value jump is organized curation at scale.
+
+## Milestone 6 — Integrated playback and review-grade browsing
+
+**Priority:** 6
+**Primary roadmap phase:** Phase 6 — Integrated browsing, preview, and playback
+
+### Goal
+
+Make the desktop application a true media browsing and review environment.
+
+### Implementation steps
+
+1. Introduce playback abstractions and review models in `vidlib-core`
+	- playback session, markers, notes, compare session contracts
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+2. Add playback orchestration in `vidlib-workflows`
+	- review sessions, compare flows, marker persistence coordination
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+3. Implement desktop playback integration in `src-tauri` and `ui/`
+	- embedded player, timeline controls, keyboard shortcuts, compare mode
+	- **Tags:** `Complexity: Very High`, `Coding Size: Very Large`
+
+4. Persist review markers and notes in `vidlib-db`
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-workflows`
+- `crates/vidlib-db`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- new `playback_notes` table
+- new `review_markers` table
+- optional `review_sessions` table
+
+### Why sixth
+
+Playback is premium-value UX, but it is more effective after search, metadata, thumbnails, duplicates, and organization are already strong.
+
+## Milestone 7 — Local ML and advanced media analysis
+
+**Priority:** 7
+**Primary roadmap phase:** Phase 7 — Media analysis and premium intelligence features
+
+### Goal
+
+Introduce optional offline intelligence that improves labeling, triage, and quality review.
+
+### Implementation steps
+
+1. Expand model and inference contracts in `vidlib-ml` and `vidlib-core`
+	- model registry, capabilities, confidence, provenance, output classes
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Build analysis job orchestration in `vidlib-workflows`
+	- batch inference, retry, partial success handling, background scheduling
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Persist analysis outputs and reviewable suggestions in `vidlib-db`
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+4. Add confidence-aware suggestion UX in `src-tauri` and `ui/`
+	- accept/reject, provenance display, override flows
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+### Crate mapping
+
+- `crates/vidlib-ml`
+- `crates/vidlib-core`
+- `crates/vidlib-workflows`
+- `crates/vidlib-db`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- new `ml_models` table
+- new `analysis_results` table
+- new `analysis_suggestions` table
+- optional `face_clusters` / `object_detections` specialized tables later
+
+### Why seventh
+
+ML should enrich a mature product, not compensate for weak foundations.
+
+## Milestone 8 — Advanced operational file workflows and editing-adjacent tooling
+
+**Priority:** 8
+**Primary roadmap phase:** Phase 8 — Editing-adjacent features and operational media tools
+
+### Goal
+
+Turn the app into a stronger operational workstation for cleanup, prep, and controlled media actions.
+
+### Implementation steps
+
+1. Expand `vidlib-fileops` planning and action model
+	- rename, copy, quarantine, metadata-change preview, richer preflight validation
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+2. Add QC queue orchestration in `vidlib-workflows`
+	- suspicious files, low quality, unreviewed, missing metadata, probable duplicates
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+3. Add queue-centric UI workflows for cleanup and prep operations
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+4. Optionally add controlled helper transforms later
+	- clip extraction, poster frame selection, transcode queue handoff
+	- **Tags:** `Complexity: Very High`, `Coding Size: Very Large`
+
+### Crate mapping
+
+- `crates/vidlib-fileops`
+- `crates/vidlib-workflows`
+- `crates/vidlib-core`
+- `crates/vidlib-db`
+- `src-tauri`
+- `ui/`
+
+### Schema changes
+
+- new `review_queues` table
+- new `review_queue_items` table
+- extend audit tables for richer operation typing
+- optional `transform_jobs` table for helper media actions
+
+### Why eighth
+
+These workflows are valuable, but they become much more coherent after taxonomy, playback, and ML-assisted triage exist.
+
+## Milestone 9 — Premium UX, settings, and desktop polish
+
+**Priority:** 9
+**Primary roadmap phase:** Phase 9 — Premium desktop UX, settings, and polish
+
+### Goal
+
+Raise the product from powerful to polished.
+
+### Implementation steps
+
+1. Restructure the frontend architecture for scale
+	- reusable state, routing, virtualization, shared components
+	- **Tags:** `Complexity: High`, `Coding Size: Very Large`
+
+2. Add comprehensive settings management across `src-tauri`, `ui/`, and persistence
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+3. Add progress center, notifications, onboarding, and improved recovery UX
+	- **Tags:** `Complexity: Medium`, `Coding Size: Large`
+
+### Crate mapping
+
+- `src-tauri`
+- `ui/`
+- `crates/vidlib-core`
+- `crates/vidlib-db`
+
+### Schema changes
+
+- new `app_settings` table or config store
+- new `user_preferences` table if separated
+- optional `notification_log` table
+
+### Why ninth
+
+Polish should follow depth. Once the core workflows are strong, polish compounds value significantly.
+
+## Milestone 10 — Production readiness, packaging, diagnostics, and quality hardening
+
+**Priority:** 10
+**Primary roadmap phase:** Phase 10 — Production readiness, packaging, and enterprise supportability
+
+### Goal
+
+Make the application shippable and supportable as a serious product.
+
+### Implementation steps
+
+1. Add structured diagnostics and support bundle generation
+	- logs, environment info, health summaries, repair helpers
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+2. Formalize migration testing and recovery tools in `vidlib-db`
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Add installer/update/release pipeline work
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+4. Raise automated test maturity across the workspace
+	- large-library tests, failure injection, UI smoke/regression, workflow integration coverage
+	- **Tags:** `Complexity: Very High`, `Coding Size: Massive`
+
+### Crate mapping
+
+- `crates/vidlib-db`
+- `crates/vidlib-core`
+- `crates/vidlib-workflows`
+- `crates/vidlib-fileops`
+- `crates/vidlib-cli`
+- `src-tauri`
+- `tests/`
+
+### Schema changes
+
+- minimal direct schema change likely
+- possible `diagnostic_reports` table if in-app history is desired
+- possible migration/version audit table expansion
+
+### Why tenth
+
+This milestone is essential before broad release, but most of its value compounds after the product workflows are already substantial.
+
+## Milestone 11 — Automation and extension surfaces
+
+**Priority:** 11
+**Primary roadmap phase:** Phase 11 — Automation, extensibility, and ecosystem growth
+
+### Goal
+
+Open the platform for power-user automation and future ecosystem growth without destabilizing the core product.
+
+### Implementation steps
+
+1. Expand CLI automation coverage in `vidlib-cli`
+	- reporting, batch exports, scheduled workflow support, smart collection output
+	- **Tags:** `Complexity: Medium`, `Coding Size: Medium`
+
+2. Formalize extension boundaries in `vidlib-core` and `vidlib-workflows`
+	- metadata providers, analyzers, duplicate strategies, import/export adapters, rules packs
+	- **Tags:** `Complexity: High`, `Coding Size: Large`
+
+3. Optionally add local API/plugin surface later
+	- **Tags:** `Complexity: Very High`, `Coding Size: Very Large`
+
+### Crate mapping
+
+- `crates/vidlib-core`
+- `crates/vidlib-workflows`
+- `crates/vidlib-cli`
+- `crates/vidlib-metadata`
+- `crates/vidlib-duplicates`
+- `crates/vidlib-ml`
+
+### Schema changes
+
+- likely minimal initially
+- optional `import_export_profiles` table
+- optional plugin/adapter registration metadata if in-app management is introduced
+
+### Why eleventh
+
+Extension points are strongest when the internal product workflows are already mature and stable.
+
+---
+
+## 9. Roadmap phase to crate and schema mapping summary
+
+## Phase 1 — Stabilize the platform foundation
+
+- **Primary crates:** `vidlib-core`, `vidlib-db`, `vidlib-workflows`, `vidlib-scanner`, `vidlib-cli`, `src-tauri`
+- **Primary schema changes:** `jobs`, `job_checkpoints`, `job_events`, enhanced `scan_checkpoints`, optional `library_status`
+
+## Phase 2 — Search and browsing engine
+
+- **Primary crates:** `vidlib-core`, `vidlib-db`, `vidlib-workflows`, `vidlib-cli`, `src-tauri`, `ui/`
+- **Primary schema changes:** FTS virtual tables, `saved_searches`, `collections`, `collection_members`, structured filter indexes
+
+## Phase 3 — Metadata, thumbnails, and media understanding
+
+- **Primary crates:** `vidlib-core`, `vidlib-metadata`, `vidlib-db`, `vidlib-workflows`, `src-tauri`, `ui/`
+- **Primary schema changes:** extended `video_entries`, `video_streams`, `preview_assets`
+
+## Phase 4 — Duplicate detection and curation
+
+- **Primary crates:** `vidlib-core`, `vidlib-duplicates`, `vidlib-db`, `vidlib-workflows`, `vidlib-fileops`, `src-tauri`, `ui/`
+- **Primary schema changes:** `duplicate_groups`, `duplicate_group_members`, `duplicate_review_actions`
+
+## Phase 5 — Tagging, taxonomy, and intelligent organization
+
+- **Primary crates:** `vidlib-core`, `vidlib-db`, `vidlib-workflows`, `vidlib-fileops`, `vidlib-cli`, `src-tauri`, `ui/`
+- **Primary schema changes:** `tags`, `tag_assignments`, taxonomy hierarchy, `rules`, `rule_execution_log`
+
+## Phase 6 — Integrated playback and review tools
+
+- **Primary crates:** `vidlib-core`, `vidlib-workflows`, `vidlib-db`, `src-tauri`, `ui/`
+- **Primary schema changes:** `playback_notes`, `review_markers`, optional `review_sessions`
+
+## Phase 7 — Media analysis and premium intelligence
+
+- **Primary crates:** `vidlib-ml`, `vidlib-core`, `vidlib-workflows`, `vidlib-db`, `src-tauri`, `ui/`
+- **Primary schema changes:** `ml_models`, `analysis_results`, `analysis_suggestions`, optional specialized analysis tables
+
+## Phase 8 — Editing-adjacent and operational media tools
+
+- **Primary crates:** `vidlib-fileops`, `vidlib-workflows`, `vidlib-core`, `vidlib-db`, `src-tauri`, `ui/`
+- **Primary schema changes:** `review_queues`, `review_queue_items`, extended audit records, optional `transform_jobs`
+
+## Phase 9 — Premium desktop UX and polish
+
+- **Primary crates:** `src-tauri`, `ui/`, `vidlib-core`, `vidlib-db`
+- **Primary schema changes:** `app_settings`, optional `user_preferences`, optional `notification_log`
+
+## Phase 10 — Production readiness and supportability
+
+- **Primary crates:** workspace-wide, especially `vidlib-db`, `vidlib-workflows`, `src-tauri`, `tests/`
+- **Primary schema changes:** likely minimal; possible diagnostics/audit expansion
+
+## Phase 11 — Automation and ecosystem growth
+
+- **Primary crates:** `vidlib-core`, `vidlib-workflows`, `vidlib-cli`, `vidlib-metadata`, `vidlib-duplicates`, `vidlib-ml`
+- **Primary schema changes:** likely minimal initially; optional import/export or plugin-management metadata later
+
+---
+
+## 10. Non-negotiable product principles
+
+These should remain true throughout the roadmap.
+
+- keep core logic in reusable crates, not entrypoints
+- keep `vidlib-core` free of runtime-specific concerns
+- preserve preview-first and rollback-first file safety
+- treat media files and metadata as untrusted inputs
+- prefer local-first features over cloud-first shortcuts
+- avoid over-coupling UI concerns into feature crates
+- validate on the workspace root with formatting, linting, and tests
+
+---
+
+## 11. Definition of success
+
+VidLibOrganizer succeeds when it is no longer just a useful Rust project, but a dependable premium desktop program that a serious user can trust with a large and valuable video collection.
+
+That means:
+
+- it scales well
+- it is safe to operate
+- it is pleasant to use daily
+- it provides elite browsing and organization workflows
+- it offers meaningful preview, playback, review, and analysis features
+- it remains local-first and privacy-respecting
+- it is engineered like a product, not just a prototype
+
+In short: the destination is a professional-grade, all-in-one video library platform built on the strong Rust workspace foundation already present in this repository.
 - tests for naming template determinism
 
 ### Success criteria
