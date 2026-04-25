@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VidLibOrganizer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <h1>VidLibOrganizer</h1>
+        <p>Windows-first local video library manager.</p>
+        <button id="refresh">Refresh Dashboard</button>
+      </aside>
+      <main class="content">
+        <section class="panel stats">
+          <h2>Library Overview</h2>
+          <div id="stats">Loading...</div>
+        </section>
+        <section class="panel actions">
+          <h2>Add Library</h2>
+          <input id="libraryPath" placeholder="C:\\Videos" />
+          <button id="addLibrary">Add</button>
+          <button id="scanLibrary">Scan Path</button>
+        </section>
+        <section class="panel search">
+          <h2>Search</h2>
+          <input id="searchText" placeholder="Search videos" />
+          <button id="runSearch">Search</button>
+          <pre id="searchResults"></pre>
+        </section>
+        <section class="panel plan">
+          <h2>Restructure Preview</h2>
+          <input id="destinationRoot" placeholder="C:\\Videos\\Organized" />
+          <button id="generatePlan">Generate Plan</button>
+          <pre id="planResults"></pre>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="main.js"></script>
+  </body>
+  </html>

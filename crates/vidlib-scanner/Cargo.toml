@@ -1,0 +1,19 @@
+[package]
+name = "vidlib-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+ignore.workspace = true
+uuid.workspace = true
+vidlib-core = { path = "../vidlib-core" }
+vidlib-duplicates = { path = "../vidlib-duplicates" }
+vidlib-metadata = { path = "../vidlib-metadata" }
+
+[dev-dependencies]
+tempfile.workspace = true

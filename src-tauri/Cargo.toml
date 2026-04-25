@@ -1,0 +1,27 @@
+[package]
+name = "vidlib-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.0", features = [] }
+tokio.workspace = true
+uuid.workspace = true
+vidlib-core = { path = "../crates/vidlib-core" }
+vidlib-db = { path = "../crates/vidlib-db" }
+vidlib-duplicates = { path = "../crates/vidlib-duplicates" }
+vidlib-fileops = { path = "../crates/vidlib-fileops" }
+vidlib-metadata = { path = "../crates/vidlib-metadata" }
+vidlib-ml = { path = "../crates/vidlib-ml" }
+vidlib-scanner = { path = "../crates/vidlib-scanner" }

@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/vidlib-core",
+    "crates/vidlib-db",
+    "crates/vidlib-scanner",
+    "crates/vidlib-metadata",
+    "crates/vidlib-duplicates",
+    "crates/vidlib-fileops",
+    "crates/vidlib-ml",
+    "crates/vidlib-cli",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["VidLibOrganizer contributors"]
+repository = "https://github.com/0langa/VidLibOrganizer"
+
+[workspace.dependencies]
+anyhow = "1.0"
+blake3 = "1.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
+futures = "0.3"
+hex = "0.4"
+ignore = "0.4"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic"] }
+parking_lot = "0.12"
+rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.23"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+walkdir = "2.5"

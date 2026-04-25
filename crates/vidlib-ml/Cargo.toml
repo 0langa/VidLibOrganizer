@@ -1,0 +1,13 @@
+[package]
+name = "vidlib-ml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ort.workspace = true
+serde.workspace = true
+vidlib-core = { path = "../vidlib-core" }

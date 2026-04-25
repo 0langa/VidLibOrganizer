@@ -1,0 +1,28 @@
+[package]
+name = "vidlib-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+vidlib-core = { path = "../vidlib-core" }
+vidlib-db = { path = "../vidlib-db" }
+vidlib-duplicates = { path = "../vidlib-duplicates" }
+vidlib-fileops = { path = "../vidlib-fileops" }
+vidlib-metadata = { path = "../vidlib-metadata" }
+vidlib-ml = { path = "../vidlib-ml" }
+vidlib-scanner = { path = "../vidlib-scanner" }
+
+[[bin]]
+name = "vidlib"
+path = "src/main.rs"
