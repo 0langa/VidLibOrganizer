@@ -12,3 +12,5 @@ src-tauri/target/
 Thumbs.db
 src-tauri/gen/
 .test-fixtures/
+.worktrees/
+.superpowers/
