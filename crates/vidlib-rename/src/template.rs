@@ -45,7 +45,8 @@ fn render(parts: &[TemplatePart], context: &TemplateContext<'_>) -> Result<Strin
                 format,
                 fallback,
             } => {
-                let value = value(key, context)?;
+                let raw = value(key, context)?;
+                let value = raw.resolved();
                 match value {
                     FrozenFieldValue::Missing {
                         decision: MissingDecision::Fallback(text),
@@ -54,7 +55,10 @@ fn render(parts: &[TemplatePart], context: &TemplateContext<'_>) -> Result<Strin
                         if let Some(text) = fallback {
                             output.push_str(text);
                         } else {
-                            return Err(missing(key));
+                            return Err(match &raw {
+                                FrozenFieldValue::Metadata(value) => value.missing_issue(),
+                                _ => missing(key),
+                            });
                         }
                     }
                     value => output.push_str(&formatted(key, &value, format, context)?),
@@ -153,6 +157,7 @@ fn formatted(
 ) -> Result<String, RuleIssue> {
     match (value, format) {
         (FrozenFieldValue::Text(text), ValueFormat::Text) => Ok(text.clone()),
+        (FrozenFieldValue::TextList(text), ValueFormat::Text) => Ok(text.join("; ")),
         (FrozenFieldValue::Integer(value), ValueFormat::Text) => Ok(value.to_string()),
         (FrozenFieldValue::Integer(value), ValueFormat::Integer { radix, padding }) => {
             format_number(*value, *radix, u64::from(*padding))
@@ -164,14 +169,23 @@ fn formatted(
             decimal(*coefficient, *scale, *scale)
         }
         (_, ValueFormat::Date { pattern }) => {
-            let FieldKey::Date { source } = key else {
+            let date = if let FieldKey::Date { source } = key {
+                crate::dates::date_source(context.entry, context.rule_id, *source, context.inputs)?
+            } else if key.is_date() {
+                match value {
+                    FrozenFieldValue::Timestamp { ns, .. } => DateValue::Instant { ns: *ns },
+                    FrozenFieldValue::LocalTimestamp { value, timezone } => DateValue::Local {
+                        value: *value,
+                        timezone: timezone.clone(),
+                    },
+                    _ => DateValue::Missing,
+                }
+            } else {
                 return Err(issue(
                     RuleIssueCode::InvalidInput,
                     "date format requires a date field",
                 ));
             };
-            let date =
-                crate::dates::date_source(context.entry, context.rule_id, *source, context.inputs)?;
             format_date(
                 &date,
                 &DateRule {

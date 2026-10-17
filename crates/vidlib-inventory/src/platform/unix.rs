@@ -45,6 +45,28 @@ impl std::io::Read for UnixFile {
     }
 }
 impl crate::InventoryFile for UnixFile {
+    #[cfg(target_os = "linux")]
+    fn helper_path(&self) -> io::Result<std::path::PathBuf> {
+        use std::os::fd::AsRawFd;
+        let path = std::path::PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            self.0.as_raw_fd()
+        ));
+        let metadata = std::fs::metadata(&path).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("safe metadata helper proc-fd handoff unavailable: {e}"),
+            )
+        })?;
+        let held = self.0.metadata()?;
+        if physical_id(&path, &metadata) != physical_id(&path, &held) {
+            return Err(io::Error::other(
+                "metadata helper descriptor identity changed",
+            ));
+        }
+        Ok(path)
+    }
     fn observation(&self) -> io::Result<FileObservation> {
         let metadata = self.0.metadata()?;
         Ok(FileObservation {

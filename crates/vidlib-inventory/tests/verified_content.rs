@@ -186,3 +186,103 @@ fn selected_anchor_root_must_match_scan_identity_before_content_callback() {
         "descendant identity cannot authorize a different root"
     );
 }
+
+#[test]
+fn helper_rejects_wrong_grant_and_stale_source_before_callback() {
+    let (dir, mut inv, id) = fixture();
+    let grant = inv.roots[0].source_grant.path.clone();
+    inv.roots[0].source_grant.path = grant.join("other");
+    assert!(
+        with_verified_helper_path(&inv, id, |_| -> std::io::Result<()> {
+            panic!("wrong grant reached helper")
+        })
+        .is_err()
+    );
+    inv.roots[0].source_grant.path = grant;
+    std::fs::rename(dir.path().join("sub/source"), dir.path().join("old")).unwrap();
+    std::fs::write(dir.path().join("sub/source"), b"xyz").unwrap();
+    assert!(
+        with_verified_helper_path(&inv, id, |_| -> std::io::Result<()> {
+            panic!("replacement source reached helper")
+        })
+        .is_err()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn helper_path_pins_source_during_swap_and_releases_descriptor_after_callback() {
+    let (dir, inv, id) = fixture();
+    let source = dir.path().join("sub/source");
+    let backup = dir.path().join("backup");
+    let alias = with_verified_helper_path(&inv, id, |path| {
+        assert_ne!(path, source);
+        std::fs::rename(&source, &backup)?;
+        std::fs::write(&source, b"xyz")?;
+        assert_eq!(std::fs::read(path)?, b"abc");
+        std::fs::remove_file(&source)?;
+        std::fs::rename(&backup, &source)?;
+        Ok(path.to_owned())
+    })
+    .unwrap();
+    assert_ne!(
+        std::fs::read_link(&alias).ok().as_ref(),
+        Some(&source),
+        "held source descriptor must close; another test may reuse its fd number"
+    );
+    assert!(
+        with_verified_helper_path(&inv, id, |_| {
+            std::fs::rename(&source, &backup)?;
+            std::fs::write(&source, b"xyz")?;
+            Ok(())
+        })
+        .is_err(),
+        "persistent replacement rejected by postcheck"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn helper_rejects_source_and_ancestor_links_before_callback() {
+    use std::os::unix::fs::symlink;
+    let (dir, inv, id) = fixture();
+    std::fs::rename(dir.path().join("sub/source"), dir.path().join("sub/real")).unwrap();
+    symlink("real", dir.path().join("sub/source")).unwrap();
+    assert!(
+        with_verified_helper_path(&inv, id, |_| -> std::io::Result<()> {
+            panic!("source link reached helper")
+        })
+        .is_err()
+    );
+    std::fs::remove_file(dir.path().join("sub/source")).unwrap();
+    std::fs::rename(dir.path().join("sub/real"), dir.path().join("sub/source")).unwrap();
+    std::fs::rename(dir.path().join("sub"), dir.path().join("real_sub")).unwrap();
+    symlink("real_sub", dir.path().join("sub")).unwrap();
+    assert!(
+        with_verified_helper_path(&inv, id, |_| -> std::io::Result<()> {
+            panic!("ancestor link reached helper")
+        })
+        .is_err()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn helper_pins_windows_source_and_ancestry_without_blocking_unrelated_children() {
+    let (dir, inv, id) = fixture();
+    let parent = dir.path().join("sub");
+    let source = parent.join("source");
+    with_verified_helper_path(&inv, id, |path| {
+        assert_eq!(std::fs::read(path)?, b"abc");
+        assert!(std::fs::write(&source, b"xyz").is_err());
+        assert!(std::fs::rename(&source, parent.join("moved")).is_err());
+        assert!(std::fs::rename(&parent, dir.path().join("moved_parent")).is_err());
+        assert!(std::fs::rename(dir.path(), dir.path().with_extension("moved")).is_err());
+        std::fs::write(parent.join("unrelated"), b"allowed")?;
+        Ok(())
+    })
+    .unwrap();
+    std::fs::write(&source, b"xyz").unwrap();
+    std::fs::rename(&source, parent.join("moved")).unwrap();
+    std::fs::rename(&parent, dir.path().join("moved_parent")).unwrap();
+}

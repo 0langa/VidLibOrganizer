@@ -206,7 +206,9 @@ pub fn run() {
         .setup(|app| {
             let preferences = app.path().app_config_dir()?.join("libraries.json");
             let app_data = app.path().app_local_data_dir()?;
-            app.manage(AppState::open(&app_data, preferences)?);
+            let mut state = AppState::open(&app_data, preferences)?;
+            state.metadata_provider = std::sync::Arc::new(metadata::DesktopMetadataProvider::from_resources(&app.path().resource_dir()?));
+            app.manage(state);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -224,3 +226,5 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("Could not start VidLibOrganizer");
 }
+
+pub mod metadata;

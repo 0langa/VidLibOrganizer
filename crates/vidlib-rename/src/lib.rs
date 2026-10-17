@@ -34,3 +34,5 @@ pub mod mappings;
 pub use mappings::*;
 
 pub mod presets;
+
+pub mod metadata;

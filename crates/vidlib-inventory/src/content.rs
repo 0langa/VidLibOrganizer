@@ -8,6 +8,13 @@ use std::{
 
 pub trait InventoryFile: Read {
     fn observation(&self) -> io::Result<FileObservation>;
+    /// Stable path to this held file, usable only while the owner remains alive.
+    fn helper_path(&self) -> io::Result<PathBuf> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "safe metadata helper handoff is unavailable on this platform",
+        ))
+    }
 }
 fn stale() -> io::Error {
     io::Error::other("source identity, ancestry or material freshness changed")
@@ -42,6 +49,40 @@ pub fn with_verified_content<T>(
     inventory: &Inventory,
     entry_id: ids::EntryId,
     operation: impl FnOnce(&mut dyn Read) -> io::Result<T>,
+) -> io::Result<T> {
+    with_verified_file(inventory, entry_id, false, |file| operation(file))
+}
+/// Runs a synchronous read-only helper against a source pinned to the selected grant.
+/// The callback must finish/reap its children before returning. Linux receives a parent
+/// proc-fd path; Windows receives the original path with source and ancestry held against
+/// replacement (and source writes). No unsafe absolute-path fallback is permitted.
+pub fn with_verified_helper_path<T>(
+    inventory: &Inventory,
+    entry_id: ids::EntryId,
+    operation: impl FnOnce(&Path) -> io::Result<T>,
+) -> io::Result<T> {
+    with_verified_file(inventory, entry_id, true, |file| {
+        #[cfg(windows)]
+        let path = {
+            let _ = file;
+            inventory
+                .entries
+                .iter()
+                .find(|e| e.id == entry_id)
+                .ok_or_else(stale)?
+                .absolute_path
+                .clone()
+        };
+        #[cfg(not(windows))]
+        let path = file.helper_path()?;
+        operation(&path)
+    })
+}
+fn with_verified_file<T>(
+    inventory: &Inventory,
+    entry_id: ids::EntryId,
+    helper: bool,
+    operation: impl FnOnce(&mut dyn InventoryFile) -> io::Result<T>,
 ) -> io::Result<T> {
     let entry = inventory
         .entries
@@ -90,7 +131,11 @@ pub fn with_verified_content<T>(
     if !anchor.is_absolute() || names.is_empty() {
         return Err(stale());
     }
-    let directory = platform::open_directory(&anchor)?;
+    let directory = if helper {
+        platform::open_helper_directory(&anchor)?
+    } else {
+        platform::open_directory(&anchor)?
+    };
     let before = directory.observation()?;
     identity(&before, &before.stamp, EntryKind::Directory)?;
     // A selected filesystem anchor is never visited as a descended child.
@@ -121,7 +166,7 @@ fn descend<T>(
     parent: &dyn InventoryDirectory,
     path: &Path,
     names: &[&OsStr],
-    operation: impl FnOnce(&mut dyn Read) -> io::Result<T>,
+    operation: impl FnOnce(&mut dyn InventoryFile) -> io::Result<T>,
 ) -> io::Result<T> {
     let name = names[0];
     let child_path = path.join(name);
@@ -132,7 +177,7 @@ fn descend<T>(
         if child_path == root.path && entry.stamp.physical_id != root.evidence.observed_identity {
             return Err(stale());
         }
-        let result = operation(&mut file)?;
+        let result = operation(file.as_mut())?;
         material(&file.observation()?, &entry.stamp)?;
         material(&parent.observe_child(name)?, &entry.stamp)?;
         return Ok(result);

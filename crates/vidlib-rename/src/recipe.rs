@@ -123,6 +123,7 @@ pub enum FieldKey {
     Date { source: DateSource },
     SizeBytes,
     Media { property: MediaProperty },
+    WindowsProperty { property: WindowsProperty },
     Hash { algorithm: HashAlgorithm },
     Uuid,
     Random,
@@ -148,6 +149,33 @@ pub enum MediaProperty {
     AudioChannels,
     BitRate,
     Container,
+    Title,
+    Language,
+}
+/// Canonical Property System names; arbitrary lookup/coercion is not accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum WindowsProperty {
+    #[serde(rename = "System.Author")]
+    Author,
+    #[serde(rename = "System.Title")]
+    Title,
+    #[serde(rename = "System.Media.DateEncoded")]
+    DateEncoded,
+    #[serde(rename = "System.Photo.DateTaken")]
+    DateTaken,
+}
+impl WindowsProperty {
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Author => "System.Author",
+            Self::Title => "System.Title",
+            Self::DateEncoded => "System.Media.DateEncoded",
+            Self::DateTaken => "System.Photo.DateTaken",
+        }
+    }
+    pub fn is_date(self) -> bool {
+        matches!(self, Self::DateEncoded | Self::DateTaken)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -443,7 +471,7 @@ pub(crate) fn validate_template(parts: &[TemplatePart], depth: usize) -> Result<
                         }
                 );
                 let valid = match format {
-                    ValueFormat::Text => !matches!(key, FieldKey::Date { .. }),
+                    ValueFormat::Text => !key.is_date(),
                     ValueFormat::Integer { padding, .. } => numeric && *padding <= 4096,
                     ValueFormat::Decimal { places } => {
                         matches!(
@@ -453,9 +481,7 @@ pub(crate) fn validate_template(parts: &[TemplatePart], depth: usize) -> Result<
                             }
                         ) && *places <= 18
                     }
-                    ValueFormat::Date { pattern } => {
-                        matches!(key, FieldKey::Date { .. }) && valid_date_pattern(pattern)
-                    }
+                    ValueFormat::Date { pattern } => key.is_date() && valid_date_pattern(pattern),
                 };
                 if !valid {
                     return Err(invalid(
@@ -492,5 +518,12 @@ fn deserialize_version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D:
         Ok(version)
     } else {
         Err(serde::de::Error::custom("unknown recipe version"))
+    }
+}
+
+impl FieldKey {
+    pub fn is_date(&self) -> bool {
+        matches!(self, Self::Date { .. })
+            || matches!(self,Self::WindowsProperty { property } if property.is_date())
     }
 }

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "version": "25.10",
+  "supported_targets": [
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu"
+  ],
+  "artifacts": [
+    {
+      "architecture": "x86_64",
+      "url": "https://mediaarea.net/download/binary/mediainfo/25.10/MediaInfo_CLI_25.10_Windows_x64.zip",
+      "sha256": "e47978091e5716052409d776cafbd42819a17dc9ab4586f413faf60c82d39c92",
+      "destination": "src-tauri/resources/mediainfo/windows-x86_64",
+      "files": {
+        "MediaInfo.exe": {
+          "archive_member": "MediaInfo.exe",
+          "sha256": "14444c927b941db848bc83b7e9911abd775d6c8f801f5d720e467bebfbe3fb28"
+        },
+        "LICENSE": {
+          "archive_member": "LICENSE",
+          "sha256": "a8f0db97f62dbcff8e30edd5cac0f48a4b702bfa55f52b71214f9639133358af"
+        },
+        "License.html": {
+          "archive_member": "License.html",
+          "sha256": "d68413f8d2002897e0b5d1be77490b14cfbfb6a47544093e20ebced0e8beed18"
+        },
+        "ReadMe.txt": {
+          "archive_member": "ReadMe.txt",
+          "sha256": "0602a75a226b93b0c3d28d4e0db540e4ea7eaf4896f27c2b1f1f6e3c2a0d85ea"
+        }
+      },
+      "notices": [
+        {
+          "file": "ZenLib-LICENSE.txt",
+          "url": "https://raw.githubusercontent.com/MediaArea/ZenLib/v0.4.41/License.txt",
+          "sha256": "054f4c5881d8906df8b1255fdbb2eaa78f7422829cfa1c67eb1c9e252493bdde",
+          "extraction": "complete"
+        },
+        {
+          "file": "zlib-LICENSE.txt",
+          "url": "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE",
+          "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243",
+          "extraction": "complete"
+        },
+        {
+          "file": "AES-NOTICE.txt",
+          "url": "https://raw.githubusercontent.com/MediaArea/MediaInfoLib/v25.10/Source/ThirdParty/aes-gladman/aes.h",
+          "sha256": "7a777147d50d7dcc248999357626f2b17db5e1ffb4659a4088bbbd2fae829fa9",
+          "extraction": "first_c_comment"
+        },
+        {
+          "file": "TinyXML2-NOTICE.txt",
+          "url": "https://raw.githubusercontent.com/MediaArea/MediaInfoLib/v25.10/Source/ThirdParty/tinyxml2/tinyxml2.h",
+          "sha256": "2829b757b674d521dc2d717a9a432e0a4128ad3448c652b6279d748880e30b3e",
+          "extraction": "first_c_comment"
+        }
+      ]
+    }
+  ],
+  "packaging_notes": [
+    "The CLI executable imports only Windows system DLLs (PE inspection). The optional archive LIBCURL.DLL and GUI/plugins are not distributed; only native local source paths are accepted.",
+    "Pinned supplementary source notices reproduce the licenses for static third-party components; MediaInfo License.html provides upstream component attribution.",
+    "Supported package architecture is x86_64; other architectures fail explicitly. GNU checks do not establish installer/runtime support."
+  ]
+}

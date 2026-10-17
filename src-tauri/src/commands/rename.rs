@@ -525,6 +525,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         .ok_or_else(|| stale("Scan sources first"))?;
     let policy = r.policy.clone();
     let frozen_inputs = r.frozen_inputs.clone();
+    let metadata_provider = state.metadata_provider.clone();
     let selection_generation = r.selection_generation;
     let version = next_plan(state, &mut r)?;
     let (id, control) = reserve(&mut r)?;
@@ -602,7 +603,12 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         let inputs = frozen_inputs
             .lock()
             .map_err(|_| stale("Frozen input state unavailable"))?
-            .prepare(&requirements, &inventory, &control)?;
+            .prepare_with_metadata(
+                &requirements,
+                &inventory,
+                &control,
+                metadata_provider.as_ref(),
+            )?;
         let mappings = MappingSet {
             inventory_id: inventory.id,
             generation: inventory.generation,

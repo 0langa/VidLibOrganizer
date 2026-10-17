@@ -377,10 +377,40 @@ fn valid_timezone(zone: &FrozenTimezone) -> bool {
 }
 
 fn valid_frozen_value(key: &FieldKey, value: &FrozenFieldValue) -> bool {
+    if let FrozenFieldValue::Metadata(metadata) = value {
+        if crate::metadata::PropertyKey::from_field(key).is_none()
+            || matches!(
+                &metadata.value,
+                crate::metadata::MetadataState::Value(FrozenFieldValue::Metadata(_))
+            )
+        {
+            return false;
+        }
+        if let crate::metadata::TimezoneEvidence::Known(zone) = &metadata.timezone {
+            if !valid_timezone(zone) {
+                return false;
+            }
+        }
+    }
+    let resolved = value.resolved();
+    if matches!(&resolved,FrozenFieldValue::Timestamp { timezone:Some(zone),.. } | FrozenFieldValue::LocalTimestamp { timezone:Some(zone),.. } if !valid_timezone(zone))
+    {
+        return false;
+    }
+    let value = &resolved;
     if matches!(value, FrozenFieldValue::Missing { .. }) {
         return true;
     }
+    if key.is_date() {
+        return matches!(
+            value,
+            FrozenFieldValue::Timestamp { .. } | FrozenFieldValue::LocalTimestamp { .. }
+        );
+    }
     match key {
+        FieldKey::WindowsProperty {
+            property: WindowsProperty::Author,
+        } => matches!(value, FrozenFieldValue::TextList(_)),
         FieldKey::Date { .. } => matches!(
             value,
             FrozenFieldValue::Timestamp { .. } | FrozenFieldValue::LocalTimestamp { .. }

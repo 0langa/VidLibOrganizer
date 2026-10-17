@@ -1565,3 +1565,210 @@ fn preset_document_wire_matches_shared_camel_case_golden_without_schema_rewritin
         assert!(serde_json::from_value::<RecipeDocumentRequest>(bad).is_err());
     }
 }
+
+#[test]
+fn real_metadata_reaches_ordered_and_legacy_template_preview() {
+    use vidlib_rename::*;
+    use vidlib_tauri::metadata::MediaInfoProvider;
+    let (dir, mut state) = fixture();
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/media/metadata.mp4"),
+        dir.path().join("media/original.mp4"),
+    )
+    .unwrap();
+    #[cfg(not(windows))]
+    let (exe, version) = (PathBuf::from("/usr/bin/mediainfo"), "25.04");
+    #[cfg(windows)]
+    let (exe, version) = (
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/mediainfo/windows-x86_64/MediaInfo.exe"),
+        "25.10",
+    );
+    state.metadata_provider =
+        std::sync::Arc::new(MediaInfoProvider::from_executable(exe, version.into()));
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let selected = vec![serde_json::from_value(page.items[0]["itemId"].clone()).unwrap()];
+    let parts = vec![
+        TemplatePart::Field {
+            key: FieldKey::Media {
+                property: MediaProperty::Title,
+            },
+            format: ValueFormat::Text,
+            fallback: None,
+        },
+        TemplatePart::Literal("-".into()),
+        TemplatePart::Field {
+            key: FieldKey::Media {
+                property: MediaProperty::Width,
+            },
+            format: ValueFormat::Text,
+            fallback: None,
+        },
+    ];
+    for (revision, ordered) in [(2, false), (3, true)] {
+        let recipe = RecipeV1 {
+            schema_version: 1,
+            revision,
+            selection: vec![],
+            selection_filter: None,
+            numbering_order: vec![],
+            numbering_scope: Default::default(),
+            rules: vec![
+                Rule {
+                    id: "first".into(),
+                    enabled: true,
+                    segment: SegmentSelector::Stem,
+                    parameters: RuleParameters::FixedStem {
+                        value: "discarded".into(),
+                    },
+                },
+                Rule {
+                    id: "metadata".into(),
+                    enabled: true,
+                    segment: SegmentSelector::Stem,
+                    parameters: RuleParameters::Template {
+                        parts: parts.clone(),
+                    },
+                },
+            ],
+            companions: CompanionPolicy::None,
+            destination: Destination::SameDirectory,
+            collision_policy: CollisionPolicy::Block,
+            metadata_changes: vec![],
+        };
+        let request = RenameRequestDto {
+            revision,
+            selected_ids: selected.clone(),
+            rule: NamingRule::Template {
+                parts: parts.clone(),
+            },
+            fixed_stem: String::new(),
+            recipe_json: ordered.then(|| serde_json::to_string(&recipe).unwrap()),
+            rebind_selection: ordered,
+            selection_filter: None,
+            numbering_scope: Default::default(),
+            row_overrides: vec![],
+        };
+        let result = wait(&state, preview_owned(&state, request).unwrap());
+        let reference = serde_json::from_value(result["planRef"].clone()).unwrap();
+        let rows = page_owned(
+            &state,
+            PageRequest {
+                plan_ref: reference,
+                query: PageQuery::new(revision),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rows.items[0]["newName"], "VidLib fixture-64.mp4",
+            "actual backend metadata pipeline, ordered={ordered}: {:?}",
+            rows.items
+        );
+    }
+    let request = RenameRequestDto {
+        revision: 4,
+        selected_ids: selected.clone(),
+        rule: NamingRule::Template {
+            parts: vec![TemplatePart::Field {
+                key: FieldKey::Date {
+                    source: DateSource::Recorded,
+                },
+                format: ValueFormat::Date {
+                    pattern: "%Y%m%d".into(),
+                },
+                fallback: None,
+            }],
+        },
+        fixed_stem: String::new(),
+        recipe_json: None,
+        rebind_selection: false,
+        selection_filter: None,
+        numbering_scope: Default::default(),
+        row_overrides: vec![],
+    };
+    let result = wait(&state, preview_owned(&state, request).unwrap());
+    let reference = serde_json::from_value(result["planRef"].clone()).unwrap();
+    let rows = page_owned(
+        &state,
+        PageRequest {
+            plan_ref: reference,
+            query: PageQuery::new(4),
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.items[0]["status"], "blocked");
+    assert!(
+        rows.items[0]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("timezone is unknown")),
+        "civil recording time must not silently become UTC"
+    );
+    let recipe = RecipeV1 {
+        schema_version: 1,
+        revision: 5,
+        selection: vec![],
+        selection_filter: None,
+        numbering_order: vec![],
+        numbering_scope: Default::default(),
+        rules: vec![Rule {
+            id: "date".into(),
+            enabled: true,
+            segment: SegmentSelector::Stem,
+            parameters: RuleParameters::Date {
+                operation: DateOperation::Insert {
+                    source: DateSource::Recorded,
+                    at: InsertPosition::End,
+                    prefix: "-".into(),
+                    suffix: String::new(),
+                    rule: DateRule {
+                        input_format: None,
+                        output_format: "%Y%m%d".into(),
+                        timezone: None,
+                        assume_timezone: Some(FrozenTimezone::Utc),
+                        ambiguity: DstAmbiguity::Reject,
+                        nonexistent: NonexistentTime::Reject,
+                    },
+                },
+            },
+        }],
+        companions: CompanionPolicy::None,
+        destination: Destination::SameDirectory,
+        collision_policy: CollisionPolicy::Block,
+        metadata_changes: vec![],
+    };
+    let request = RenameRequestDto {
+        revision: 5,
+        selected_ids: selected,
+        rule: NamingRule::Keep,
+        fixed_stem: String::new(),
+        recipe_json: Some(serde_json::to_string(&recipe).unwrap()),
+        rebind_selection: true,
+        selection_filter: None,
+        numbering_scope: Default::default(),
+        row_overrides: vec![],
+    };
+    let result = wait(&state, preview_owned(&state, request).unwrap());
+    let reference = serde_json::from_value(result["planRef"].clone()).unwrap();
+    let rows = page_owned(
+        &state,
+        PageRequest {
+            plan_ref: reference,
+            query: PageQuery::new(5),
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.items[0]["newName"], "original-20240203.mp4");
+}

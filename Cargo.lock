@@ -4441,10 +4441,13 @@ dependencies = [
 name = "vidlib-tauri"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "fs4",
+ "libc",
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tempfile",
@@ -4452,6 +4455,7 @@ dependencies = [
  "vidlib-fileops",
  "vidlib-inventory",
  "vidlib-rename",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

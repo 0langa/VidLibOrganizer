@@ -10,6 +10,7 @@ use vidlib_rename::PlanStore;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub metadata_provider: Arc<dyn vidlib_rename::metadata::MetadataProvider>,
     pub rename: Arc<Mutex<crate::commands::rename::RenameState>>,
     pub(crate) jobs: Arc<Mutex<Jobs>>,
     pub plans: Arc<Mutex<PlanRegistry>>,
@@ -24,6 +25,7 @@ impl AppState {
     pub fn open(app_data: &Path, preferences: PathBuf) -> Result<Self, OpError> {
         let coordinator = Arc::new(Coordinator::open(app_data)?);
         Ok(Self {
+            metadata_provider: Arc::new(crate::metadata::DesktopMetadataProvider::unavailable()),
             rename: Arc::new(Mutex::new(crate::commands::rename::RenameState::new(
                 vidlib_inventory::ProtectedPolicy {
                     protected_roots: vec![coordinator

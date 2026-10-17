@@ -415,7 +415,13 @@ pub(crate) fn date_source(
                         && value.key == FieldKey::Date { source }
                 })
             });
-        return match frozen.map(|value| &value.value) {
+        if let Some(FrozenFieldValue::Metadata(value)) = frozen.map(|value| &value.value) {
+            if !matches!(value.value, crate::metadata::MetadataState::Value(_)) {
+                return Err(value.missing_issue());
+            }
+        }
+        let resolved = frozen.map(|value| value.value.resolved());
+        return match resolved.as_ref() {
             Some(FrozenFieldValue::Timestamp {
                 ns,
                 timezone: Some(_),

@@ -33,3 +33,8 @@ mod windows;
 pub(crate) use unix::{attributes, open_directory, physical_id};
 #[cfg(windows)]
 pub(crate) use windows::{attributes, open_directory, physical_id};
+
+#[cfg(unix)]
+pub(crate) use unix::open_directory as open_helper_directory;
+#[cfg(windows)]
+pub(crate) use windows::open_helper_directory;

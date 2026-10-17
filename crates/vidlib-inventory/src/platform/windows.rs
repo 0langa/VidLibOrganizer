@@ -31,9 +31,16 @@ use windows_sys::Win32::{
 };
 
 fn open_path(path: &Path, access: u32) -> io::Result<File> {
+    open_path_shared(
+        path,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    )
+}
+fn open_path_shared(path: &Path, access: u32, share: u32) -> io::Result<File> {
     OpenOptions::new()
         .access_mode(access)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .share_mode(share)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }
@@ -67,18 +74,32 @@ fn observation(file: &File) -> io::Result<FileObservation> {
     Ok(FileObservation { kind, stamp })
 }
 pub(crate) fn open_directory(path: &Path) -> io::Result<Box<dyn InventoryDirectory>> {
-    directory(open_path(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?)
+    directory(
+        open_path(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?,
+        false,
+    )
 }
-fn directory(file: File) -> io::Result<Box<dyn InventoryDirectory>> {
+pub(crate) fn open_helper_directory(path: &Path) -> io::Result<Box<dyn InventoryDirectory>> {
+    directory(
+        open_path_shared(
+            path,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )?,
+        true,
+    )
+}
+fn directory(file: File, helper: bool) -> io::Result<Box<dyn InventoryDirectory>> {
     if observation(&file)?.kind != EntryKind::Directory {
         return Err(io::Error::other(
             "directory listing requires a non-reparse directory",
         ));
     }
-    Ok(Box::new(WindowsDirectory { file }))
+    Ok(Box::new(WindowsDirectory { file, helper }))
 }
 struct WindowsDirectory {
     file: File,
+    helper: bool,
 }
 struct WindowsFile(File);
 impl std::io::Read for WindowsFile {
@@ -93,10 +114,15 @@ impl crate::InventoryFile for WindowsFile {
 }
 impl InventoryDirectory for WindowsDirectory {
     fn open_child_file(&self, name: &OsStr) -> io::Result<Box<dyn crate::InventoryFile + '_>> {
-        Ok(Box::new(WindowsFile(open_relative(
+        Ok(Box::new(WindowsFile(open_relative_shared(
             &self.file,
             name,
             windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+            if self.helper {
+                FILE_SHARE_READ
+            } else {
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            },
         )?)))
     }
     fn observation(&self) -> io::Result<FileObservation> {
@@ -109,14 +135,30 @@ impl InventoryDirectory for WindowsDirectory {
         observation(&open_relative(&self.file, name, FILE_READ_ATTRIBUTES)?)
     }
     fn open_child_directory(&self, name: &OsStr) -> io::Result<Box<dyn InventoryDirectory + '_>> {
-        directory(open_relative(
-            &self.file,
-            name,
-            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-        )?)
+        directory(
+            open_relative_shared(
+                &self.file,
+                name,
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                if self.helper {
+                    FILE_SHARE_READ | FILE_SHARE_WRITE
+                } else {
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                },
+            )?,
+            self.helper,
+        )
     }
 }
 fn open_relative(parent: &File, name: &OsStr, access: u32) -> io::Result<File> {
+    open_relative_shared(
+        parent,
+        name,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    )
+}
+fn open_relative_shared(parent: &File, name: &OsStr, access: u32, share: u32) -> io::Result<File> {
     crate::scan::validate_child_name(name)?;
     let mut units: Vec<_> = name.encode_wide().collect();
     let length = u16::try_from(units.len() * 2)
@@ -144,7 +186,7 @@ fn open_relative(parent: &File, name: &OsStr, access: u32) -> io::Result<File> {
             &mut status_block,
             std::ptr::null(),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            share,
             FILE_OPEN,
             FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
             std::ptr::null(),

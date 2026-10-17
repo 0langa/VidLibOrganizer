@@ -109,6 +109,9 @@ pub struct FrozenValue {
     deny_unknown_fields
 )]
 pub enum FrozenFieldValue {
+    /// Typed evidence retained by the producer; evaluation only consumes its value.
+    Metadata(Box<crate::metadata::MetadataValue>),
+    TextList(Vec<String>),
     Text(String),
     Integer(#[serde(with = "vidlib_inventory::exact::i128_decimal")] i128),
     Decimal {

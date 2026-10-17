@@ -67,9 +67,10 @@ impl InputRequirements {
         })
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FrozenInputCache {
-    retained: Option<FrozenInputs>,
+    pub(crate) retained: Option<FrozenInputs>,
+    pub(crate) metadata_cache: Vec<crate::metadata::CacheEntry>,
     /// Cumulative bytes read by this cache, including cancelled preparations.
     pub content_bytes_read: u64,
 }
@@ -79,11 +80,13 @@ impl FrozenInputCache {
         Self {
             retained: Some(inputs),
             content_bytes_read: 0,
+            metadata_cache: vec![],
         }
     }
     /// Explicit regeneration; inventory ID/generation changes also reset retention.
     pub fn regenerate(&mut self) {
         self.retained = None;
+        self.metadata_cache.clear();
     }
     pub fn prepare(
         &mut self,
@@ -273,6 +276,7 @@ fn needs_frozen(key: &FieldKey) -> bool {
             | FieldKey::Counter
             | FieldKey::Hash { .. }
             | FieldKey::Media { .. }
+            | FieldKey::WindowsProperty { .. }
             | FieldKey::Date {
                 source: DateSource::Recorded
             }

@@ -21,4 +21,4 @@ pub use scan::{
 };
 
 pub mod content;
-pub use content::{with_verified_content, InventoryFile};
+pub use content::{with_verified_content, with_verified_helper_path, InventoryFile};

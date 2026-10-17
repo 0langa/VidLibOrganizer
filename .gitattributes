@@ -1,0 +1,2 @@
+# Preserve pinned upstream resource hashes on every checkout, including Windows.
+src-tauri/resources/mediainfo/** -text whitespace=cr-at-eol
