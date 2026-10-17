@@ -255,16 +255,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Produces Journal, StepReceipt, OperationEventV1 and state machine from 4.3. Consumes ExecutionPlan/ExecutionStep from Task 03 and native codec; no filesystem mutation occurs in SQLite methods.
 
-- [ ] **Step 1 — Red:** Add `intent_survives_reopen`, `receipt_and_event_commit_together`, `commit_error_prevents_next_step`, `published_copy_without_source_removal_is_distinct_fact`, `unknown_schema_preserves_original`, and exact numeric/native-path persistence tests.
+- [x] **Step 1 — Red:** Add `intent_survives_reopen`, `receipt_and_event_commit_together`, `commit_error_prevents_next_step`, `published_copy_without_source_removal_is_distinct_fact`, `unknown_schema_preserves_original`, and exact numeric/native-path persistence tests.
   ```rust
   assert_eq!(reopened.pending()?.len(), 1);
   assert_eq!(events.items[0].phase, CompletedPhase::CopyPublished);
   assert!(!events.items.iter().any(|e| e.phase == CompletedPhase::SourceRemoved));
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test journal`.
-- [ ] **Step 3 — Implement:** Implement the specified local schema/PRAGMAs, checked migration transactions, explicit commit/error propagation, per-phase receipts, stable outbox IDs and pending-operation queries. Create a small private failpoint seam for commit failures; failpoints are fixture/development code, not a production IPC switch. Keep journal import impossible.
-- [ ] **Step 4 — Verify green:** Journal tests against real temporary database files (not in-memory WAL substitutes); inspect effective PRAGMA values after reopen and force SQLITE_BUSY/failed commit. Confirm the original migration fixture is retained.
-- [ ] **Step 5 — Commit:** `feat: persist operation intents receipts and outbox events`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test journal`.
+- [x] **Step 3 — Implement:** Implement the specified local schema/PRAGMAs, checked migration transactions, explicit commit/error propagation, per-phase receipts, stable outbox IDs and pending-operation queries. Create a small private failpoint seam for commit failures; failpoints are fixture/development code, not a production IPC switch. Keep journal import impossible.
+- [x] **Step 4 — Verify green:** Journal tests against real temporary database files (not in-memory WAL substitutes); inspect effective PRAGMA values after reopen and force SQLITE_BUSY/failed commit. Confirm the original migration fixture is retained.
+- [x] **Step 5 — Commit:** `feat: persist operation intents receipts and outbox events`.
 
 ### Task 05: App-wide and cross-process coordination
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–03 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks remain incomplete. Task 04 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–04 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks remain incomplete. Task 05 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -797,6 +797,7 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 01: `d734f55`, fixes `dfc7e4e`, `aff67d5` | Test-first native inventory, exact codecs, no-follow relative-handle traversal, per-binding evidence and coverage. 27 inventory +36 existing portable tests pass; Linux and Windows-target Clippy and fmt pass. Independent review and two scoped fix re-reviews completed. Windows runtime pending. Deferred Minor: overlap diagnostic paths need rebasing; final branch review must triage. Next eligible: Task 02. |
 | 2026-10-17 | Task 02: `7328356`, `8fe6590`, fix `f051627` | Test-first no-replace adapters, native per-parent facts and shared name validation. 88 portable tests pass; 18 platform tests passed on tmpfs and overlayfs; Linux/Windows-target Clippy and fmt pass. Independent review plus scoped fix re-review clean. Windows production mutations fail closed; native NTFS/exFAT/SMB, locking/case/reparse/metadata/flush qualification pending. Deferred Minor: Windows staging writer-sharing lifecycle (Task 19/final review). Next eligible: Task 03. |
 | 2026-10-17 | Task 03: `07f9a50` | Test-first strict recipes, typed template/frozen inputs, backend-owned execution models and session-scoped PlanStore with revoked references/nonces. 18 contracts and 106 total portable tests pass; Clippy, fmt and Windows-target compile pass. Independent review approved. Deferred Minor: duplicated plan/provenance grants consistency at publication, for final review. Future rule evaluation, Task 06 graph and Task 10 invalidation wiring remain open. Next eligible: Task 04. |
+| 2026-10-17 | Task 04: `16c5def`, fix `16fdb4b`; evidence `3f589ec`, `39f166c` | Real-file WAL/FULL journal, exact native compiled steps, atomic receipts/outbox, pending states and checked migrations. 126 portable tests passed before review; all 25 covering journal tests pass after the performance fix, with scoped Clippy/fmt. Indexed hot-path work scales with batch size; v1→v2 migration preserves existing evidence. Independent review and scoped fix review clean. Task 03 action-model omission corrected. Task 08 owns audited non-application recovery; Task 19 owns separately durable staging creation/streaming phases. Windows runtime pending. Next eligible: Task 05. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -807,3 +808,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Desktop baseline tests: workspace-local GTK/WebKit dependencies compile; baseline `generate_context!` fails because `src-tauri/icons/icon.png` is missing. Task 05 desktop integration will add the supporting asset and rerun tests.
 
 - [ ] Windows Task 02 red/green qualification: NTFS file/folder/case-only and late-target collision, locked files, per-parent case-sensitive/insensitive siblings, reparse ancestry, metadata setters/flush; exFAT/removable and SMB. Native fixtures are written/compiled, runtime pending; production mutations remain gated. Linux tmpfs/overlayfs evidence is recorded in `docs/verification/filesystem-capabilities.md`; other Linux mutation filesystems remain unsupported until qualified.
+
+- [ ] Windows Task 04 journal runtime: app-local WAL/FULL reopen, commit/Busy failures, checked migrations and receipt/outbox atomicity. GNU-target bundled-SQLite compile passed for the initial implementation; actual Windows runtime remains pending.
