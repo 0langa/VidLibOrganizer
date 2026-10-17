@@ -3,8 +3,10 @@ pub mod error;
 pub mod events;
 pub mod journal;
 pub mod platform;
+pub mod rename;
 pub use error::{ErrorCode, OpError, Phase};
 pub use platform::{Filesystem, PlatformFs};
+pub use rename::{execute, OperationReport};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

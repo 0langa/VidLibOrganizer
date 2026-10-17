@@ -39,10 +39,44 @@ pub struct StagingFile {
     pub file: File,
 }
 
+/// Unforgeable outside this crate; minted only after the compiled intent commits.
+/// Exact operation/step paths and identity, not a general staging exemption.
+#[derive(Debug)]
+pub struct RenameReservation {
+    pub(crate) operation: vidlib_inventory::ids::OperationId,
+    pub(crate) step: vidlib_inventory::ids::StepId,
+    pub(crate) source: PathBuf,
+    pub(crate) target: PathBuf,
+    pub(crate) expected: FileStamp,
+    pub(crate) reserved_source: bool,
+    pub(crate) reserved_target: bool,
+}
+impl RenameReservation {
+    pub fn operation_id(&self) -> vidlib_inventory::ids::OperationId {
+        self.operation
+    }
+    pub fn step_id(&self) -> vidlib_inventory::ids::StepId {
+        self.step
+    }
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+}
+
 /// Every implementation must reject uncertain capability, preserve a conflicting
 /// destination, and verify fresh native identity before an operation.
 /// Journal/coordinator authorization is the caller's responsibility.
 pub trait Filesystem {
+    fn rename_reserved(
+        &mut self,
+        _authority: &RenameReservation,
+    ) -> Result<MutationOutcome, OpError> {
+        Err(OpError::unsupported(Phase::Rename))
+    }
+
     fn capture_namespace(
         &self,
         grants: &GrantSet,
@@ -214,32 +248,11 @@ impl PlatformFs {
         })?;
         self.permit(parent)?;
         validate_path(path)?;
-        let mut explicit_policy = self.policy.clone();
-        explicit_policy
-            .staging_prefixes
-            .retain(|prefix| prefix != vidlib_inventory::STAGING_NAME_PREFIX);
-        if explicit_policy.excludes(path) {
+        if !self.policy.allows_owned_staging(path) {
             return Err(OpError::new(
                 ErrorCode::ProtectedEntry,
                 Phase::Create,
-                "staging cannot bypass explicit protection",
-            ));
-        }
-        // Only the canonical staging namespace is eligible for owned publication.
-        let name = path.file_name().ok_or_else(|| {
-            OpError::new(
-                ErrorCode::InvalidPath,
-                Phase::Create,
-                "staging name required",
-            )
-        })?;
-        let record = encode_path(Path::new(name));
-        let prefix = encode_path(Path::new(vidlib_inventory::STAGING_NAME_PREFIX));
-        if !record.bytes.starts_with(&prefix.bytes) {
-            return Err(OpError::new(
-                ErrorCode::InvalidPath,
-                Phase::Create,
-                "canonical staging prefix required",
+                "owned staging cannot bypass cycle reservations or explicit protection",
             ));
         }
         Ok(())
@@ -323,6 +336,29 @@ fn combine_flush(a: Durability, b: Durability) -> Durability {
 }
 #[cfg(any(target_os = "linux", windows))]
 impl Filesystem for PlatformFs {
+    fn rename_reserved(
+        &mut self,
+        authority: &RenameReservation,
+    ) -> Result<MutationOutcome, OpError> {
+        for (path, reserved) in [
+            (&authority.source, authority.reserved_source),
+            (&authority.target, authority.reserved_target),
+        ] {
+            if reserved {
+                validate_path(path)?;
+                if !self.policy.allows_rename_reservation(path) {
+                    return Err(OpError::new(
+                        ErrorCode::ProtectedEntry,
+                        Phase::Verify,
+                        "compiled reservation violates protected policy",
+                    ));
+                }
+            } else {
+                self.permit(path)?;
+            }
+        }
+        self.move_entry(&authority.source, &authority.target, &authority.expected)
+    }
     fn capture_namespace(
         &self,
         grants: &GrantSet,

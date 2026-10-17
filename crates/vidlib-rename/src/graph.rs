@@ -517,8 +517,16 @@ fn compile(
             });
             receipt.insert(rows[i].entry_id, id);
             let relocate = |path: &Path| {
-                path.strip_prefix(&from)
-                    .map_or_else(|_| path.to_owned(), |relative| target.join(relative))
+                path.strip_prefix(&from).map_or_else(
+                    |_| path.to_owned(),
+                    |relative| {
+                        if relative.as_os_str().is_empty() {
+                            target.clone()
+                        } else {
+                            target.join(relative)
+                        }
+                    },
+                )
             };
             occupancy = occupancy
                 .into_iter()

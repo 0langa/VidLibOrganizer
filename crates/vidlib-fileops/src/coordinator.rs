@@ -176,6 +176,9 @@ impl Coordinator {
     }
 }
 impl Lease {
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.database
+    }
     pub fn begin_legacy_mutation(&self) -> Result<LegacyMutation<'_>, OpError> {
         if self.kind != LeaseKind::Write {
             return Err(OpError::new(

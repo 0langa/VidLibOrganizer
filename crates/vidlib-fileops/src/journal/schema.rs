@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 3;
+pub(super) const VERSION: i64 = 4;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -30,6 +30,12 @@ pub(super) const V3_SQL: &str = r#"
 CREATE TABLE coordination(singleton INTEGER PRIMARY KEY CHECK(singleton=1), namespace_epoch TEXT NOT NULL, policy_epoch TEXT NOT NULL, interrupted_write INTEGER NOT NULL CHECK(interrupted_write IN (0,1)));
 INSERT INTO coordination VALUES(1,'0','0',0);
 CREATE INDEX pending_operations ON operations(state) WHERE state IN ('Prepared','Running','RecoveryRequired');
+"#;
+
+// Old records retain inspection version 1: missing namespace is unknown, never
+// reconstructed from current disk state. New records require lossless version 2.
+pub(super) const V4_SQL: &str = r#"
+ALTER TABLE operations ADD COLUMN inspection_version INTEGER NOT NULL DEFAULT 1 CHECK(inspection_version IN (1,2));
 "#;
 
 #[derive(Serialize, Deserialize)]
@@ -175,6 +181,7 @@ pub(super) fn inspection(plan: &ExecutionPlan) -> Result<serde_json::Value, OpEr
     // The inventory's public Serialize intentionally omits absolute paths. Keep
     // exact native supplements here for inspection; never reconstruct from UI text.
     Ok(json!({
+        "expected_namespace": namespace_inspection(&plan.expected_namespace)?,
         "approved_plan": p.approved_plan, "inventory": p.inventory, "recipe": p.recipe,
         "frozen_inputs": p.frozen_inputs, "namespace_epoch": p.namespace_epoch.to_string(), "policy_epoch": p.policy_epoch.to_string(),
         "grants": p.grants.grants.iter().map(|g| json!({"id": g.id, "path": encode_path(&g.path), "source": g.source})).collect::<Vec<_>>(),
@@ -182,6 +189,53 @@ pub(super) fn inspection(plan: &ExecutionPlan) -> Result<serde_json::Value, OpEr
         "native_entries": p.inventory.entries.iter().map(|e| json!({"id": e.id, "path": encode_path(&e.absolute_path)})).collect::<Vec<_>>(),
         "native_coverage": p.inventory.coverage.iter().map(|c| encode_path(&c.directory)).collect::<Vec<_>>()
     }))
+}
+
+/// Private inspection codec. Public namespace serde intentionally omits native
+/// paths; supplement every omitted path using the lossless native-unit codec.
+fn namespace_inspection(
+    namespace: &vidlib_inventory::NamespaceSnapshot,
+) -> Result<serde_json::Value, OpError> {
+    use serde_json::json;
+    use vidlib_inventory::encode_path;
+    let mut value = serde_json::to_value(namespace).map_err(|e| invalid(e.to_string()))?;
+    for (stored, parent) in value["parents"]
+        .as_array_mut()
+        .ok_or_else(|| invalid("invalid namespace codec"))?
+        .iter_mut()
+        .zip(&namespace.parents)
+    {
+        stored["parent_path"] = json!(encode_path(&parent.parent_path));
+        for (stored, entry) in stored["entries"]
+            .as_array_mut()
+            .ok_or_else(|| invalid("invalid entry codec"))?
+            .iter_mut()
+            .zip(&parent.entries)
+        {
+            stored["absolute_path"] = json!(encode_path(&entry.absolute_path));
+        }
+    }
+    for (stored, grant) in value["grants"]["grants"]
+        .as_array_mut()
+        .ok_or_else(|| invalid("invalid grant codec"))?
+        .iter_mut()
+        .zip(&namespace.grants.grants)
+    {
+        stored["path"] = json!(encode_path(&grant.path));
+    }
+    value["policy"]["guarded_roots"] = json!(namespace
+        .policy
+        .guarded_roots
+        .iter()
+        .map(|p| encode_path(p))
+        .collect::<Vec<_>>());
+    value["policy"]["protected_roots"] = json!(namespace
+        .policy
+        .protected_roots
+        .iter()
+        .map(|p| encode_path(p))
+        .collect::<Vec<_>>());
+    Ok(value)
 }
 
 pub(super) fn source(action: &ExecutionAction) -> Option<&EntryPrestate> {

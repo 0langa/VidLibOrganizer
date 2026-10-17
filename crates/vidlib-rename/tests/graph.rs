@@ -1209,3 +1209,34 @@ fn unavailable_carried_parent_facts_block_responsible_directory() {
                 && issue.code == RenameErrorCode::InvalidNamespace));
     }
 }
+
+#[test]
+fn cycle_receipt_paths_preserve_exact_native_units_without_trailing_separator() {
+    let (inventory, mut batch, namespace, version) =
+        fixture(&[("a", EntryKind::File), ("b", EntryKind::File)]);
+    target(&mut batch, 0, "b");
+    target(&mut batch, 1, "a");
+    let planned = plan(&inventory, &batch, &namespace, version).unwrap();
+    let steps = steps(&planned);
+    for step in &steps {
+        if let ExecutionAction::RenameEntry {
+            source:
+                EntryPrestate {
+                    path,
+                    identity: ExpectedIdentity::FromReceipt { step_id },
+                },
+            ..
+        } = &step.action
+        {
+            let creator = steps.iter().find(|s| s.id == *step_id).unwrap();
+            let ExecutionAction::RenameEntry { target, .. } = &creator.action else {
+                panic!("rename expected")
+            };
+            assert_eq!(
+                encode_path(path),
+                encode_path(target),
+                "receipt paths must preserve exact native units, including separators"
+            );
+        }
+    }
+}

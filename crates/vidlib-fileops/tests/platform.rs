@@ -491,3 +491,70 @@ fn staging_refresh_rejects_a_path_replaced_while_content_handle_is_open() {
     );
     assert_eq!(fs::read(stage).unwrap(), b"foreign");
 }
+
+#[test]
+fn internal_owned_staging_keeps_ordinary_namespace_protection() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join(".vidlib-staging-owned-contract");
+    let mut adapter = PlatformFs::default();
+    assert!(adapter.policy.excludes(&stage));
+    let staging = adapter
+        .create_staging(&stage)
+        .expect("owned create-new staging remains supported");
+    let ordinary = dir.path().join("ordinary");
+    assert_eq!(
+        adapter
+            .rename_no_replace(&stage, &ordinary, &staging.ownership.stamp)
+            .unwrap_err()
+            .code,
+        ErrorCode::ProtectedEntry
+    );
+    adapter.remove_owned(&staging.ownership).unwrap();
+    assert!(!stage.exists());
+}
+#[test]
+fn owned_staging_cannot_borrow_cycle_or_explicit_policy_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    for mode in 0..5 {
+        let mut adapter = PlatformFs::default();
+        let stage = dir.path().join(if mode == 0 {
+            ".vidlib-staging-rename-unowned-0"
+        } else {
+            ".vidlib-staging-explicit"
+        });
+        match mode {
+            1 => adapter.policy.marker_name = ".vidlib-staging-explicit".into(),
+            2 => adapter.policy.guarded_roots.push(stage.clone()),
+            3 => adapter.policy.protected_roots.push(stage.clone()),
+            4 => adapter
+                .policy
+                .staging_prefixes
+                .push(".vidlib-staging-explicit".into()),
+            _ => {}
+        }
+        assert_eq!(
+            adapter.create_staging(&stage).unwrap_err().code,
+            ErrorCode::ProtectedEntry
+        );
+        // Even a caller-supplied ownership record cannot turn an unowned cycle
+        // reservation into copy publication or cleanup authority.
+        fs::write(&stage, b"unowned").unwrap();
+        let owned = vidlib_fileops::platform::OwnedEntry {
+            path: stage.clone(),
+            stamp: stamp(&stage),
+        };
+        assert_eq!(
+            adapter
+                .publish_staging(&owned, &dir.path().join("published"))
+                .unwrap_err()
+                .code,
+            ErrorCode::ProtectedEntry
+        );
+        assert_eq!(
+            adapter.remove_owned(&owned).unwrap_err().code,
+            ErrorCode::ProtectedEntry
+        );
+        assert_eq!(fs::read(&stage).unwrap(), b"unowned");
+        fs::remove_file(stage).unwrap();
+    }
+}

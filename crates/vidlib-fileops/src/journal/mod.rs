@@ -67,6 +67,9 @@ pub struct Journal {
     thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 impl Journal {
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.path
+    }
     pub fn open(path: &Path) -> Result<Self, OpError> {
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             return Err(invalid("journal requires a real local database file"));
@@ -131,7 +134,7 @@ impl Journal {
             .collect();
         let op = OperationId::new();
         self.write(Some(op), None, |tx| {
-            tx.execute("INSERT INTO operations(id,state,inspection,groups_json,approved_plan) VALUES(?1,'Prepared',?2,?3,?4)", params![op.to_string(), json(&inspection)?, json(&groups)?, json(&plan.provenance.approved_plan)?]).map_err(sql_error)?;
+            tx.execute("INSERT INTO operations(id,state,inspection,groups_json,approved_plan,inspection_version) VALUES(?1,'Prepared',?2,?3,?4,2)", params![op.to_string(), json(&inspection)?, json(&groups)?, json(&plan.provenance.approved_plan)?]).map_err(sql_error)?;
             tx.execute("INSERT INTO history_visibility(operation_id) VALUES(?1)", [op.to_string()]).map_err(sql_error)?;
             for (sequence, step) in plan.groups.iter().flat_map(|g| &g.steps).enumerate() {
                 let sequence = i64::try_from(sequence).map_err(|_| invalid("too many steps"))?;

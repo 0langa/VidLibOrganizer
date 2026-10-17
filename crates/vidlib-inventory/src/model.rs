@@ -322,10 +322,23 @@ impl ProtectedPolicy {
     /// This is not mutation authority: the executor must additionally require the
     /// exact owned step, fresh identity and an absent target under its write lease.
     pub fn allows_rename_reservation(&self, path: &Path) -> bool {
+        self.allows_operation_path(path, RENAME_TEMP_PREFIX)
+    }
+
+    /// Path-policy eligibility only. Create-new/identity ownership remains the
+    /// native caller's responsibility. Copy staging cannot claim cycle paths.
+    pub fn allows_owned_staging(&self, path: &Path) -> bool {
+        self.allows_operation_path(path, STAGING_NAME_PREFIX)
+            && path.file_name().is_some_and(|name| {
+                !crate::path::conservative_name_matches(name, RENAME_TEMP_PREFIX.as_ref(), true)
+            })
+    }
+
+    fn allows_operation_path(&self, path: &Path, prefix: &str) -> bool {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return false;
         };
-        crate::path::conservative_name_matches(name, RENAME_TEMP_PREFIX.as_ref(), true)
+        crate::path::conservative_name_matches(name, prefix.as_ref(), true)
             && !self.excludes(parent)
             && !crate::path::conservative_name_matches(name, self.marker_name.as_ref(), false)
             && !self
