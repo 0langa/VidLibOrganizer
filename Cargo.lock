@@ -4145,6 +4145,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vidlib-rename"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vidlib-inventory",
+]
+
+[[package]]
 name = "vidlib-tauri"
 version = "0.2.0"
 dependencies = [
