@@ -1,43 +1,57 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VidLibOrganizer</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <h1>VidLibOrganizer</h1>
-        <p>Windows-first local video library manager.</p>
-        <button id="refresh">Refresh Dashboard</button>
-      </aside>
-      <main class="content">
-        <section class="panel stats">
-          <h2>Library Overview</h2>
-          <div id="stats">Loading...</div>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>VidLibOrganizer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Application sidebar">
+      <a class="brand" href="#finder" aria-label="VidLibOrganizer home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M8 6h16v20H8zM5 10h3m-3 6h3m-3 6h3m16-12h3m-3 6h3m-3 6h3"/><path class="play" d="m14 12 7 4-7 4z"/></svg></span><span>VidLib<span class="brand-light">Organizer</span><small>YOUR LIBRARY. IN ORDER.</small></span></a>
+      <p class="nav-caption">WORKSPACE</p>
+      <nav aria-label="Main navigation"><button class="nav-item" data-view="libraries"><span data-icon="folder"></span>Library folders<span class="nav-count" id="library-count">0</span></button><button class="nav-item active" data-view="finder" aria-current="page"><span data-icon="duplicate"></span>Duplicate finder</button></nav>
+      <div class="sidebar-bottom"><button class="nav-item" data-view="about"><span data-icon="info"></span>About this app</button><div class="local-status"><span class="status-dot"></span><span>Local &amp; private<small>Your files stay on your drives</small></span></div></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><span>Workspace <span class="crumb-divider">/</span> <strong id="breadcrumb">Duplicate finder</strong></span><span class="review-badge"><span data-icon="shield"></span> You stay in control</span></header>
+      <main id="main-content" tabindex="-1">
+        <div id="desktop-notice" class="notice preview-notice" hidden><span data-icon="monitor"></span><div><strong>Desktop app required</strong><p>Open VidLibOrganizer on Windows to browse your drives and scan files.</p></div><button id="preview-toggle" class="button button-small">Preview sample results</button></div>
+        <div id="message" class="notice" role="status" hidden><span id="message-text"></span><button id="dismiss-message" class="icon-button" aria-label="Dismiss message">×</button></div>
+        <section id="view-finder" class="page" aria-labelledby="finder-title">
+          <div class="page-heading"><div><p class="eyebrow">MAKE ROOM FOR WHAT MATTERS</p><h1 id="finder-title">Find your duplicates.</h1><p>Compare videos across your drives. Review every match before you act.</p></div><span class="page-symbol" data-icon="duplicate" aria-hidden="true"></span></div>
+          <section class="panel scan-setup" aria-labelledby="scan-heading">
+            <div class="section-header"><div class="section-title"><span class="step-number">01</span><h2 id="scan-heading">Choose your folders</h2></div><button class="text-button" data-go="libraries">Manage folders <span aria-hidden="true">↗</span></button></div>
+            <div id="scan-roots" class="scan-roots"></div>
+            <div class="section-divider"></div>
+            <fieldset class="mode-fieldset"><legend><span class="step-number">02</span> Choose how to compare</legend><div class="mode-grid">
+              <label class="mode-card"><input type="radio" name="mode" value="size" checked><span class="mode-icon" data-icon="bolt"></span><span class="mode-copy"><strong>Exact file size <span class="tag">QUICK SCAN</span></strong><span>Find videos with the same byte length.</span><small>Size matches are candidates for review.</small></span></label>
+              <label class="mode-card"><input type="radio" name="mode" value="md5"><span class="mode-icon" data-icon="fingerprint"></span><span class="mode-copy"><strong>Full-content MD5</strong><span>Hash complete files with matching sizes.</span><small>More thorough. Reads from your drives.</small></span></label>
+            </div></fieldset>
+            <div class="scan-action"><p><span data-icon="layers"></span> Includes subfolders · Video files only</p><button id="start-scan" class="button button-primary"><span data-icon="scan"></span>Start scan</button></div>
+          </section>
+          <section id="scan-progress" class="panel progress-panel" aria-labelledby="progress-title" hidden><div class="section-header"><div><p class="eyebrow" id="progress-phase">SCAN IN PROGRESS</p><h2 id="progress-title">Discovering your videos…</h2></div><button id="cancel-scan" class="button button-small">Cancel scan</button></div><div class="progress-stats"><strong id="progress-main">0 videos found</strong><span id="progress-secondary">Checking folders and subfolders</span></div><progress id="progress-bar" aria-label="Scan progress"></progress><p id="progress-path" class="mono current-path"></p><p id="progress-live" class="sr-only" aria-live="polite"></p></section>
+          <section id="results-section" class="results-section" aria-labelledby="results-title">
+            <div class="section-header results-heading"><div><p class="eyebrow">A CLEARER PICTURE</p><h2 id="results-title">Scan results</h2></div><button id="export-report" class="button button-small" hidden><span data-icon="download"></span>Export JSON</button></div>
+            <div id="results-empty" class="empty-state"><div class="empty-art" aria-hidden="true"><span data-icon="film"></span><span class="empty-art-small" data-icon="search"></span></div><h3>A little clarity for your library.</h3><p>Add your folders and start a scan to see which videos<br class="desktop-break"> might be taking up space twice.</p><span class="empty-footnote"><span data-icon="shield"></span>Your files are never changed by a scan</span></div>
+            <div id="results-content" hidden><div id="results-banner" class="notice" hidden></div><div id="result-stats" class="result-stats"></div><div class="result-toolbar"><label class="search-field"><span data-icon="search"></span><input id="result-search" type="search" aria-label="Search result filenames and paths" placeholder="Search filenames or paths…"></label><label class="sort-field"><span>Sort by</span><select id="result-sort"><option value="space">Most redundant bytes</option><option value="size">Largest file size</option><option value="count">Most copies</option><option value="name">File name A–Z</option></select></label></div><div id="result-context" class="result-context" aria-live="polite"></div><div id="result-groups"></div><div id="result-pagination" class="pagination"></div><div id="scan-issues"></div></div>
+          </section>
+          <div id="selection-bar" class="selection-bar" hidden><div><strong id="selection-count" aria-live="polite"></strong><span id="selection-bytes"></span></div><button id="clear-selection" class="text-button">Clear</button><button id="move-selected" class="button"><span data-icon="folder"></span>Move selected</button><button id="delete-selected" class="button button-danger">Delete selected</button></div>
         </section>
-        <section class="panel actions">
-          <h2>Add Library</h2>
-          <input id="libraryPath" placeholder="C:\\Videos" />
-          <button id="addLibrary">Add</button>
-          <button id="scanLibrary">Scan Path</button>
+        <section id="view-libraries" class="page" aria-labelledby="libraries-title" hidden>
+          <div class="page-heading"><div><p class="eyebrow">A HOME FOR YOUR COLLECTION</p><h1 id="libraries-title">Library folders</h1><p>Bring your local and external drives together in one workspace.</p></div><span class="page-symbol" data-icon="folder" aria-hidden="true"></span></div>
+          <section class="panel" aria-labelledby="add-folder-title"><div class="section-header"><h2 id="add-folder-title">Add a folder</h2><span class="quiet-tag">SAVED ON THIS DEVICE</span></div><p class="section-description">Choose a video folder or the root of an external drive. Subfolders are included automatically.</p><form id="add-folder-form" class="folder-form"><label class="sr-only" for="folder-path">Folder path</label><input id="folder-path" type="text" placeholder="E:\Videos" spellcheck="false" autocomplete="off"><button id="add-folder" class="button" type="submit"><span data-icon="plus"></span>Add path</button><span class="form-or">or</span><button id="browse-folder" class="button button-primary" type="button"><span data-icon="folder"></span>Browse folders</button></form></section>
+          <div class="section-header library-heading"><h2>Saved folders <span id="saved-count" class="count-label">0</span></h2><button class="text-button" data-go="finder">Go to duplicate finder <span aria-hidden="true">→</span></button></div><div id="library-list"></div><div class="library-note"><span data-icon="info"></span><p>Disconnecting a drive keeps its folder in this list. Connect it again before scanning. Removing a folder here only removes it from your saved list.</p></div>
         </section>
-        <section class="panel search">
-          <h2>Search</h2>
-          <input id="searchText" placeholder="Search videos" />
-          <button id="runSearch">Search</button>
-          <pre id="searchResults"></pre>
-        </section>
-        <section class="panel plan">
-          <h2>Restructure Preview</h2>
-          <input id="destinationRoot" placeholder="C:\\Videos\\Organized" />
-          <button id="generatePlan">Generate Plan</button>
-          <pre id="planResults"></pre>
-        </section>
+        <section id="view-about" class="page" aria-labelledby="about-title" hidden><div class="page-heading"><div><p class="eyebrow">LESS CLUTTER. MORE COLLECTION.</p><h1 id="about-title">Built for your library.</h1><p>A focused, local workspace for video collections of every size.</p></div></div><div class="panel about-panel"><div class="about-brand"><span data-icon="film"></span><h2>VidLibOrganizer</h2></div><p>Find duplicate video files across local folders and external drives, then review the evidence at your own pace. Your collection stays where it belongs: with you.</p><dl class="about-details"><div><dt>Exact file size</dt><dd>Groups files with identical byte lengths. Different videos can share a size, so these matches are candidates.</dd></div><div><dt>Full-content MD5</dt><dd>Compares MD5 hashes of complete files in matching size groups. Designed to find accidental duplicates, not to authenticate untrusted files.</dd></div><div><dt>Local by design</dt><dd>No accounts, uploads, metadata services, or background network requests. Saved folder paths stay on this computer.</dd></div><div><dt>You choose what happens</dt><dd>Scanning never changes files. Keep all copies, move selected files to another folder, or explicitly confirm permanent deletion. At least one file in each group must remain.</dd></div><div><dt>Interpreting space</dt><dd>Redundant bytes assume keeping one file per group. This is a logical estimate; hard links may already share disk space. Review size-only candidates before making any changes.</dd></div></dl></div></section>
       </main>
+      <footer class="statusbar"><span id="connection-status"><span class="status-dot"></span>Connecting to desktop…</span><span>VIDLIBORGANIZER <span class="footer-divider">/</span> LOCAL WORKSPACE</span></footer>
     </div>
-    <script type="module" src="main.js"></script>
-  </body>
-  </html>
+  </div>
+  <dialog id="action-dialog" aria-labelledby="action-title" aria-describedby="action-description"><form method="dialog"><div class="dialog-header"><h2 id="action-title">Review selected files</h2><button class="icon-button" value="cancel" aria-label="Close confirmation">×</button></div><p id="action-description"></p><div id="action-warning" class="notice warning"></div><p id="action-destination" class="mono"></p><ul id="action-files" class="action-files"></ul><div class="dialog-actions"><button id="action-cancel" class="button" value="cancel" autofocus>Cancel</button><button id="action-confirm" class="button button-danger" value="confirm">Delete permanently</button></div></form></dialog>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

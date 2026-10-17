@@ -3,16 +3,11 @@ name = "vidlib-fileops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-authors.workspace = true
-repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-chrono.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
-vidlib-core = { path = "../vidlib-core" }
+vidlib-engine = { path = "../vidlib-engine" }
+serde = { version = "1.0", features = ["derive"] }
+md5 = "0.8"
 
 [dev-dependencies]
-tempfile.workspace = true
+tempfile = "3.23"

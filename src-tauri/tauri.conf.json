@@ -1,29 +1,22 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VidLibOrganizer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.vidliborganizer.app",
-  "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
-    "frontendDist": "../ui"
-  },
+  "build": { "frontendDist": "../ui" },
   "app": {
-    "windows": [
-      {
-        "title": "VidLibOrganizer",
-        "width": 1280,
-        "height": 860,
-        "resizable": true
-      }
-    ],
+    "withGlobalTauri": true,
+    "windows": [{
+      "title": "VidLibOrganizer",
+      "width": 1360,
+      "height": 900,
+      "minWidth": 800,
+      "minHeight": 600,
+      "backgroundColor": "#101417"
+    }],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
     }
   },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.ico"]
-  }
+  "bundle": { "active": true, "targets": ["nsis"], "icon": ["icons/icon.ico"] }
 }

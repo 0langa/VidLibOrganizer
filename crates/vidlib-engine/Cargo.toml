@@ -1,0 +1,13 @@
+[package]
+name = "vidlib-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+walkdir = "2.5"
+md5 = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

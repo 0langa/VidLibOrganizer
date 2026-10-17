@@ -1,277 +1,48 @@
 # VidLibOrganizer
 
-VidLibOrganizer is a Windows-first, local-first Rust workspace for organizing, indexing, searching, analyzing, and safely restructuring large video libraries.
+A local Windows desktop app for organizing large video libraries. Add folders from your computer or external drives, scan their subfolders, review duplicate groups, and decide which copies to keep, move or delete.
 
-The repository already includes:
+## Run
 
-- a Rust CLI for power users and automation
-- a Tauri desktop shell
-- SQLite-backed local persistence
-- filesystem scanning and indexing
-- `ffprobe`-based metadata extraction
-- duplicate grouping support
-- safe restructure planning, apply, and undo flows
-- an early local ML abstraction for future premium analysis features
+Double-click `Launch.cmd`, or run:
 
-The long-term goal is a premium all-in-one desktop application for video library organization, labeling, review, analysis, browsing, playback, and safe operational workflows.
+```powershell
+cargo run --release -p vidlib-tauri
+```
 
-## Project status
+The first launch compiles the application. Rust with the MSVC toolchain, Visual Studio C++ Build Tools, and Microsoft Edge WebView2 are required. Once built, `target\release\vidlib-tauri.exe` runs directly without Cargo. No Node.js, ffmpeg, accounts or cloud service is required. The release build optimizes MD5 throughput; for development use `cargo run -p vidlib-tauri`.
 
-Current maturity: **MVP / early platform stage**
+## Find duplicates
 
-This project already has a strong architecture foundation, but it is still early in product maturity. Core workflows exist, yet many advanced product features described in `EXPANSION_PLAN.md` are still planned rather than finished.
+1. Add one or more folders in **Library folders**, using Browse or a full path. Folders are remembered locally, including paths on disconnected drives.
+2. Open **Duplicate finder**, select folders and choose a mode.
+3. **Fast / file size** compares exact byte lengths without reading video contents. It finds candidates: different videos can have the same size.
+4. **Deep / MD5** reads the complete contents of same-sized candidates. Files with unique sizes are skipped because they cannot be exact duplicates. Memory use is bounded; files are read sequentially to suit external drives.
+5. Review groups, search by filename/path and open files in their containing folder. Reports can be exported as JSON.
+6. Select unwanted copies explicitly, then **Move selected** or **Delete selected**. The final confirmation lists the affected files and bytes. **Keep all** leaves a group untouched.
 
-## Core characteristics
+A group always retains at least one copy. The app checks that selected files and a retained copy still match the scan before changing anything. MD5 scans recheck hashes before actions. Move verifies the destination copy before removing the original; existing destination files are never overwritten. Permanent deletion bypasses the Recycle Bin.
 
-- local-first and offline-first
-- Windows-first desktop focus
-- safe-by-default file operations
-- shared Rust crate architecture
-- designed to grow into a premium video library management platform
+Scans show discovery counts and hashing progress and can be cancelled. Unavailable drives, unreadable files and files that change during hashing are reported. Partial results are labelled. Symbolic links, Windows reparse points/junctions and zero-byte files are skipped. Overlapping folders are scanned once. Supported video extensions are defined in `crates/vidlib-engine/src/lib.rs`.
 
-## Current capabilities
+## Scope and limits
 
-### Library management
+This release finds exact copies, not visually similar videos, alternate encodes or different resolutions. MD5 is for ordinary accidental duplicates, not authentication of adversarial files. Redundant byte totals are estimates: hard links, sparse files and filesystem compression can mean less disk space is reclaimed. Source files should remain unchanged during scans and file actions; metadata and hash checks reduce stale-result risks but are not filesystem snapshots.
 
-- add and list library roots
-- persist library information in SQLite
+Scan results and Keep-all decisions last for the current session. Saved folders live in the app configuration directory (`%APPDATA%\com.vidliborganizer.app\libraries.json` on Windows). Files stay on your computer. No telemetry or network requests are used by the running application.
 
-### Scanning and indexing
+## Development
 
-- recursively scan common video formats
-- skip selected extensions
-- collect warnings without aborting the entire scan
-- persist scan checkpoints and summaries
+```powershell
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo build -p vidlib-tauri
+```
 
-### Metadata extraction
+- `crates/vidlib-engine`: traversal, size/MD5 grouping and cancellation.
+- `crates/vidlib-fileops`: validated move/delete operations.
+- `src-tauri`: background jobs, saved folders and desktop integration.
+- `ui`: accessible, dependency-free HTML/CSS/JavaScript interface.
 
-- extract width, height, codec, and duration via local `ffprobe`
-- fall back gracefully when `ffprobe` is unavailable
-
-### Duplicate analysis
-
-- exact-hash grouping
-- chunk-hash grouping
-- placeholder perceptual-hash path for future evolution
-
-### Search
-
-- search by text
-- search by tag
-- search by extension
-
-### File operations
-
-- generate restructure plans
-- preview conflict state
-- apply plans with explicit confirmation
-- create undo manifests
-- undo from manifests
-
-### Desktop shell
-
-- dashboard summary
-- add library
-- run scan
-- persisted scan job history
-- search
-- plan generation preview
-
-### CLI
-
-- add library
-- list libraries
-- list jobs
-- scan
-- search
-- duplicates
-- plan move
-- apply plan
-- undo
-
-## What is not finished yet
-
-Important planned but not yet complete areas include:
-
-- true cancellation ownership in the desktop app
-- full persistent multi-job runtime beyond the current scan job record foundation
-- FTS-backed search and browse UX
-- thumbnails and preview pipeline
-- duplicate review UI and canonical resolution workflow
-- structured tag taxonomy and rules engine
-- integrated playback
-- richer local ML analysis
-- premium UX polish, diagnostics, packaging, and updater flows
-
-## Workspace structure
-
-### Main crates and folders
-
-- `crates/vidlib-core`
-	- shared domain models, error types, progress types
-- `crates/vidlib-db`
-	- SQLite persistence, schema bootstrapping, queries
-- `crates/vidlib-scanner`
-	- filesystem scanning and scan result assembly
-- `crates/vidlib-metadata`
-	- local media metadata extraction
-- `crates/vidlib-duplicates`
-	- duplicate analysis helpers
-- `crates/vidlib-fileops`
-	- safe filesystem planning, apply, and undo
-- `crates/vidlib-ml`
-	- local ML abstraction and future inference path
-- `crates/vidlib-workflows`
-	- shared business workflow orchestration
-- `crates/vidlib-cli`
-	- command-line interface
-- `src-tauri`
-	- Tauri backend and desktop app wiring
-- `ui/`
-	- frontend shell assets
-- `docs/`
-	- long-term project documentation
-
-For authoritative crate ownership rules, see `docs/crate-contracts.md`.
-
-## Documentation index
-
-The `docs/` folder is intended to be the long-term reference set for the repository.
-
-- `docs/architecture.md`
-	- system architecture, layering, trust boundaries, and runtime flow
-- `docs/codemap.md`
-	- where code lives and where changes should be made
-- `docs/development_progress.md`
-	- current maturity, implemented areas, partial areas, and gaps
-- `docs/full_project_documentation.md`
-	- broad project reference document
-- `docs/crate-contracts.md`
-	- crate ownership and dependency rules
-
-For long-term roadmap planning, see `EXPANSION_PLAN.md`.
-
-## Architecture summary
-
-The workspace follows a layered model:
-
-1. `vidlib-core`
-	 - shared domain contracts
-2. feature crates
-	 - database, scanner, metadata, duplicates, fileops, ML
-3. `vidlib-workflows`
-	 - shared orchestration layer
-4. application entrypoints
-	 - CLI and Tauri backend
-5. frontend shell
-	 - `ui/`
-
-Intended dependency direction:
-
-`vidlib-core` <- feature crates <- `vidlib-workflows` <- application entrypoints
-
-## Security and safety model
-
-- local-only by default
-- no required cloud services
-- no hidden telemetry in the current design
-- media paths are treated as untrusted input
-- metadata extraction is subprocess-based and should remain defensive
-- restructure operations are preview-first and confirmation-gated
-- undo manifests and audit records are part of the product safety model
-- SQLite runs in WAL mode for safer local access patterns
-
-## Requirements and prerequisites
-
-### Runtime and tooling
-
-- Rust stable toolchain
-- Windows environment
-- `ffprobe` on `PATH` for rich metadata extraction
-- WebView2 runtime for Tauri on Windows
-- Tauri prerequisites for desktop builds
-
-### Windows prerequisites
-
-- install Rust stable with the MSVC toolchain
-- install WebView2 Runtime
-- install Visual Studio Build Tools with Desktop C++ workload
-- install `ffmpeg` / `ffprobe` and ensure `ffprobe.exe` is on `PATH`
-- install Tauri prerequisites required for Windows builds
-
-## Build and run
-
-## CLI examples
-
-- `cargo run -p vidlib-cli -- add-library C:\\Videos`
-- `cargo run -p vidlib-cli -- list-libraries`
-- `cargo run -p vidlib-cli -- list-jobs`
-- `cargo run -p vidlib-cli -- scan C:\\Videos --exact-hash --skip-extension tmp`
-- `cargo run -p vidlib-cli -- search --text holiday --tag family`
-- `cargo run -p vidlib-cli -- duplicates --json`
-- `cargo run -p vidlib-cli -- plan-move C:\\Videos\\Organized --output plan.json`
-- `cargo run -p vidlib-cli -- apply-plan plan.json --manifest undo.json --confirm`
-- `cargo run -p vidlib-cli -- undo undo.json`
-
-## Desktop app
-
-- `cargo tauri dev`
-- `cargo tauri build`
-
-Frontend assets live in `ui/`. The desktop backend lives in `src-tauri/`.
-
-## Validation
-
-Recommended workspace-level validation:
-
-- `cargo fmt --all --check`
-- `cargo check --workspace`
-- `cargo test`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
-## Testing coverage today
-
-The repository already includes tests for important current behavior, including:
-
-- SQLite persistence and search behavior
-- batch update/upsert behavior
-- `ffprobe` JSON parsing
-- duplicate grouping logic
-- scanner filtering and skip behavior
-- safe plan/apply/undo file workflows
-
-## Development priorities
-
-The recommended near-term priorities are:
-
-1. persistent workflow runtime and job model
-2. indexed search and browse improvements
-3. richer metadata and thumbnail pipeline
-4. duplicate review workflow
-5. taxonomy and rules-based organization
-
-For the full long-range sequencing, see `EXPANSION_PLAN.md`.
-
-## Contribution guidance
-
-When making changes:
-
-- keep business logic in reusable crates
-- keep `vidlib-core` free of runtime-specific concerns
-- keep CLI and Tauri entrypoints thin
-- prefer updating shared models before duplicating types in feature crates
-- preserve preview-first and rollback-aware file operation behavior
-- update `docs/` when architecture, ownership, or project maturity materially changes
-
-## Known limitations
-
-- rich metadata currently depends on `ffprobe`
-- the GUI is still an MVP shell
-- desktop cancellation is not yet a full persistent job system
-- search is still basic for large-library use cases
-- playback is not implemented yet
-- ML is still early and mostly future-facing
-
-## License and open-source posture
-
-The workspace uses open-source crates and local tools. The project is suitable for open-source development and is intentionally designed to keep user media analysis on the local machine.
+Open `ui/index.html` through a static HTTP server to inspect the interface; its explicit preview uses example data and cannot touch files. The desktop application is required for real library access. The old metadata/ML prototype has been retired; its history remains in Git. See `docs/spec.md` and `docs/implementation-plan.md` for the current design.
