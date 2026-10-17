@@ -133,6 +133,14 @@ pub fn select(
     inventory: &Inventory,
     filter: &SelectionFilter,
 ) -> Result<Vec<EntryId>, RenameError> {
+    select_controlled(inventory, filter, &vidlib_inventory::JobControl::default())
+}
+/// Prepared filters are compiled once before traversal; cancellation is checked per entry.
+pub fn select_controlled(
+    inventory: &Inventory,
+    filter: &SelectionFilter,
+    control: &vidlib_inventory::JobControl,
+) -> Result<Vec<EntryId>, RenameError> {
     use std::collections::{BTreeMap, BTreeSet};
     use unicode_segmentation::UnicodeSegmentation;
     let entries = inventory
@@ -159,7 +167,14 @@ pub fn select(
     }
     let mut seen = BTreeSet::new();
     let mut selected = vec![];
-    for entry in &inventory.entries {
+    for (ordinal, entry) in inventory.entries.iter().enumerate() {
+        crate::evaluate::checkpoint(
+            control,
+            vidlib_inventory::ProgressPhase::Selecting,
+            ordinal,
+            inventory.entries.len(),
+            Some(entry.id),
+        )?;
         if excluded_paths.contains(&entry.absolute_path) {
             continue;
         }

@@ -5,7 +5,7 @@ export function desktopBridge(fixture) {
   const counts = { changed: '1', unchanged: '0', blocked: '0', needsReview: '0' };
   const bridge = window.testBridge = {
     appliedTargets: [], calls: [], delayPreview: false, pending: [], cancelled: [], terminalReads: 0,
-    pageRows: 1, history: null, historyRevision: '1', historyStaleOnce: false,
+    pageRows: 1, summary: { selected:'1', files:'1', folders:'0', carriedDescendants:'0', companions:'0', metadataActions:'0', destinationMode:'inPlace', destinationCount:'1', destinations:['Library'], isUndo:false, createdCopyRemovals:'0', ownedDirectoryRemovals:'0' }, history: null, historyRevision: '1', historyStaleOnce: false,
     pendingConfirm: [], delayConfirm: false, finishedConfirm: 0,
     delayStartOnce: false, pendingStarts: [], releasedStarts: 0,
     delayStatusOnce: false, pendingStatuses: [], releasedStatuses: 0,
@@ -20,7 +20,7 @@ export function desktopBridge(fixture) {
     return {
       items: Array.from({ length: end - start }, (_, i) => ({
         stepId: '30000000-0000-4000-8000-' + String(start + i).padStart(12, '0'),
-        disposition: 'planned', beforeDisplay: 'before-' + String(start + i).padStart(3, '0'),
+        metadata: bridge.recoveryMetadata || null, disposition: 'planned', beforeDisplay: 'before-' + String(start + i).padStart(3, '0'),
         afterDisplay: 'after-' + String(start + i).padStart(3, '0'),
       })),
       nextCursor: end < bridge.recoveryActions ? String(end) : null, revision: request.query.expectedRevision,
@@ -41,12 +41,12 @@ export function desktopBridge(fixture) {
       const jobId = id(); complete(jobId, { inventoryId: '00000000-0000-4000-8000-000000000005', revision: r.revision, itemCount: '1' }); return jobId;
     }
     if (command === 'inventory_page') return { items: [{ itemId: fixture.row.itemId, displayName: 'original.mp4', sizeBytes: fixture.row.sizeBytes }], nextCursor: null, revision: r.query.expectedRevision };
-    if (command === 'start_rename_preview') {
+    if (command === 'start_rename_preview' || command === 'start_undo') {
       if (r.revision !== revision) throw fixture.error;
       const jobId = id();
       const reference = { ...fixture.planRef, planId: '20000000-0000-4000-8000-' + String(++planSerial).padStart(12, '0'), revision: String(planSerial) };
-      lastPlan = reference; lastInputRevision = r.revision;
-      const done = () => complete(jobId, { planRef: reference, counts, inputRevision: r.revision });
+      lastPlan = reference; lastInputRevision = r.revision; if(command==='start_undo') bridge.summary={...bridge.summary,isUndo:true,createdCopyRemovals:'1',ownedDirectoryRemovals:'1'};
+      const done = () => complete(jobId, { planRef: reference, counts, summary:command==='start_undo'?{...bridge.summary,isUndo:true,createdCopyRemovals:'1',ownedDirectoryRemovals:'1'}:bridge.summary, inputRevision: r.revision });
       if (bridge.delayPreview) { jobs.set(jobId, { state: 'running', result: null, error: null, progress: null }); bridge.pending.push(done); }
       else done();
       if (bridge.delayStartOnce) {
@@ -65,13 +65,14 @@ export function desktopBridge(fixture) {
       return value;
     }
     if (command === 'cancel_job') { bridge.cancelled.push(r.jobId); jobs.set(r.jobId, { state: 'cancelled', result: null, error: null, progress: null }); return; }
+    if (command === 'export_rename_plan') return {text: r.mode === 'exactMapping' ? 'old_path,new_path\r\noriginal.mp4,renamed.mp4\r\n' : 'status,old_name,new_name\r\nchanged,original.mp4,renamed.mp4\r\n',rowCount:'1'};
     if (command === 'rename_page') {
       const start = Number(r.query.cursor || 0), end = Math.min(start + r.query.limit, bridge.pageRows);
       return { items: Array.from({ length: end - start }, () => fixture.row), nextCursor: end < bridge.pageRows ? String(end) : null, revision: r.query.expectedRevision };
     }
     if (command === 'confirm_rename') {
       if (lastInputRevision !== revision || r.planRef.planId !== lastPlan.planId) throw fixture.error;
-      const value = { nonce: 'reviewed-nonce', summary: counts };
+      const value = { nonce: 'reviewed-nonce', summary: {...counts,...bridge.summary} };
       if (bridge.delayConfirm) return new Promise(resolve => bridge.pendingConfirm.push(() => { bridge.finishedConfirm++; resolve(value); }));
       return value;
     }

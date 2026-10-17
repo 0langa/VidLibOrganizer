@@ -42,6 +42,19 @@ pub fn assign_numbers(
     order: &NumberingOrder,
     rule: &NumberRule,
 ) -> Result<NumberAssignments, RenameError> {
+    assign_numbers_controlled(
+        entries,
+        order,
+        rule,
+        &vidlib_inventory::JobControl::default(),
+    )
+}
+pub fn assign_numbers_controlled(
+    entries: &[vidlib_inventory::EntrySnapshot],
+    order: &NumberingOrder,
+    rule: &NumberRule,
+    control: &vidlib_inventory::JobControl,
+) -> Result<NumberAssignments, RenameError> {
     validate_number_rule(rule)?;
     let inventory_len = entries.len();
     let entries: BTreeMap<_, _> = entries.iter().map(|entry| (entry.id, entry)).collect();
@@ -54,6 +67,13 @@ pub fn assign_numbers(
     let mut assigned = BTreeMap::new();
     let mut folder_ordinals = BTreeMap::new();
     for (ordinal, id) in order.iter().enumerate() {
+        crate::evaluate::checkpoint(
+            control,
+            vidlib_inventory::ProgressPhase::Evaluating,
+            ordinal,
+            order.len(),
+            Some(*id),
+        )?;
         let entry = entries.get(id).ok_or_else(|| {
             RenameError::new(RenameErrorCode::UnknownEntry, "numbering entry is absent")
         })?;

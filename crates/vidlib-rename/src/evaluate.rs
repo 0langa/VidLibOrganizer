@@ -12,6 +12,27 @@ pub fn evaluate(
     recipe: &RecipeV1,
     inputs: &FrozenInputs,
 ) -> Result<EvaluatedBatch, RenameError> {
+    evaluate_controlled(
+        inventory,
+        recipe,
+        inputs,
+        &vidlib_inventory::JobControl::default(),
+    )
+}
+/// Same evaluator with a caller-owned job lifetime, never a per-row evaluator.
+pub fn evaluate_controlled(
+    inventory: &Inventory,
+    recipe: &RecipeV1,
+    inputs: &FrozenInputs,
+    control: &vidlib_inventory::JobControl,
+) -> Result<EvaluatedBatch, RenameError> {
+    checkpoint(
+        control,
+        vidlib_inventory::ProgressPhase::Evaluating,
+        0,
+        recipe.selection.len(),
+        None,
+    )?;
     let entries = inventory
         .entries
         .iter()
@@ -21,7 +42,7 @@ pub fn evaluate(
     let compiled_regex = recipe.validate_and_compile_regex()?;
     validate_inputs(inventory, recipe, inputs)?;
     if let Some(filter) = &recipe.selection_filter {
-        let allowed = select(inventory, filter)?
+        let allowed = select_controlled(inventory, filter, control)?
             .into_iter()
             .collect::<BTreeSet<_>>();
         if recipe.selection.iter().any(|id| !allowed.contains(id)) {
@@ -85,8 +106,13 @@ pub fn evaluate(
         .filter_map(|rule| {
             if let RuleParameters::Number { rule: parameters } = &rule.parameters {
                 Some(
-                    assign_numbers(&inventory.entries, &counter_order, parameters)
-                        .map(|values| (rule.id.as_str(), values)),
+                    assign_numbers_controlled(
+                        &inventory.entries,
+                        &counter_order,
+                        parameters,
+                        control,
+                    )
+                    .map(|values| (rule.id.as_str(), values)),
                 )
             } else {
                 None
@@ -120,7 +146,14 @@ pub fn evaluate(
     }
     row_order.extend(unresolved);
     let mut rows = Vec::with_capacity(recipe.selection.len());
-    for id in &row_order {
+    for (ordinal, id) in row_order.iter().enumerate() {
+        checkpoint(
+            control,
+            vidlib_inventory::ProgressPhase::Evaluating,
+            ordinal,
+            row_order.len(),
+            Some(*id),
+        )?;
         let entry = entries[id];
         let native_name = entry.absolute_path.file_name().and_then(|n| n.to_str());
         // Unsupported native names remain visible and blocked without lossy reconstruction.
@@ -508,4 +541,27 @@ fn valid_frozen_value(key: &FieldKey, value: &FrozenFieldValue) -> bool {
         FieldKey::Parent { level: 0 } => false,
         _ => matches!(value, FrozenFieldValue::Text(_)),
     }
+}
+
+/// CPU work checks cancellation on every item; the bounded sink throttles only reporting.
+pub(crate) fn checkpoint(
+    control: &vidlib_inventory::JobControl,
+    phase: vidlib_inventory::ProgressPhase,
+    done: usize,
+    total: usize,
+    current_entry: Option<EntryId>,
+) -> Result<(), RenameError> {
+    if control.is_cancelled() {
+        return Err(RenameError::new(
+            RenameErrorCode::Cancelled,
+            "Preview cancelled between items",
+        ));
+    }
+    control.report_progress(vidlib_inventory::Progress {
+        phase,
+        done: done as u64,
+        total: Some(total as u64),
+        current_entry,
+    });
+    Ok(())
 }

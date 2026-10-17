@@ -425,7 +425,24 @@ pub fn evaluate_with_mappings(
     mappings: &MappingSet,
     overrides: &[RowOverride],
 ) -> Result<EvaluatedBatch, RenameError> {
-    let mut batch = evaluate(inventory, recipe, inputs)?;
+    evaluate_with_mappings_controlled(
+        inventory,
+        recipe,
+        inputs,
+        mappings,
+        overrides,
+        &vidlib_inventory::JobControl::default(),
+    )
+}
+pub fn evaluate_with_mappings_controlled(
+    inventory: &Inventory,
+    recipe: &RecipeV1,
+    inputs: &FrozenInputs,
+    mappings: &MappingSet,
+    overrides: &[RowOverride],
+    control: &vidlib_inventory::JobControl,
+) -> Result<EvaluatedBatch, RenameError> {
+    let mut batch = crate::evaluate::evaluate_controlled(inventory, recipe, inputs, control)?;
     validate_mappings(mappings, inventory, &batch.grants, Some(&recipe.selection))?;
     let mut targets = mappings
         .rows
@@ -447,7 +464,14 @@ pub fn evaluate_with_mappings(
         .collect::<BTreeMap<_, _>>();
     let selected = recipe.selection.iter().copied().collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
-    for edit in overrides {
+    for (ordinal, edit) in overrides.iter().enumerate() {
+        crate::evaluate::checkpoint(
+            control,
+            vidlib_inventory::ProgressPhase::Evaluating,
+            ordinal,
+            overrides.len(),
+            Some(edit.entry_id),
+        )?;
         let entry = entries.get(&edit.entry_id).ok_or_else(|| {
             RenameError::new(RenameErrorCode::UnknownEntry, "override has unknown ID")
         })?;
@@ -476,7 +500,15 @@ pub fn evaluate_with_mappings(
             "unbind companion ownership before editing an asset independently",
         ));
     }
-    for row in &mut batch.rows {
+    let total = batch.rows.len();
+    for (ordinal, row) in batch.rows.iter_mut().enumerate() {
+        crate::evaluate::checkpoint(
+            control,
+            vidlib_inventory::ProgressPhase::Evaluating,
+            ordinal,
+            total,
+            Some(row.entry_id),
+        )?;
         let Some(target) = targets.get(&row.entry_id) else {
             continue;
         };

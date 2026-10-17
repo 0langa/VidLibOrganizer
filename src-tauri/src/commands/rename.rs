@@ -103,6 +103,8 @@ impl From<UiPlanRef> for PlanRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     pub cursor: Option<String>,
     pub limit: usize,
     pub sort: String,
@@ -113,6 +115,7 @@ pub struct PageQuery {
 impl PageQuery {
     pub fn new(revision: u64) -> Self {
         Self {
+            status: None,
             cursor: None,
             limit: 200,
             sort: "name".into(),
@@ -150,6 +153,8 @@ pub struct InventoryPageRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameRequestDto {
     #[serde(default)]
+    pub mapping: Option<MappingInputDto>,
+    #[serde(default)]
     pub metadata_changes: Option<MetadataChangeSetDto>,
     #[serde(default)]
     pub destination: Option<DestinationDto>,
@@ -172,6 +177,46 @@ pub struct RenameRequestDto {
     pub row_overrides: Vec<RowOverrideDto>,
     #[serde(default)]
     pub companions: Option<CompanionPolicyDto>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MappingInputDto {
+    pub format: MappingInputFormat,
+    pub text: String,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MappingInputFormat {
+    Csv,
+    Tab,
+    Names,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportPlanRequest {
+    pub plan_ref: UiPlanRef,
+    pub mode: ExportPlanMode,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportPlanMode {
+    SpreadsheetSafe,
+    ExactMapping,
+}
+pub fn export_plan_owned(state: &AppState, request: ExportPlanRequest) -> Result<Value> {
+    let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
+    let r = lock(state)?;
+    let plan = plans(state)?.snapshot(request.plan_ref.into(), &lease)?;
+    drop(r);
+    let bytes = export_report(
+        &plan,
+        match request.mode {
+            ExportPlanMode::SpreadsheetSafe => ExportMode::SpreadsheetSafe,
+            ExportPlanMode::ExactMapping => ExportMode::ExactMapping,
+        },
+    )?;
+    let text = String::from_utf8(bytes).map_err(|_| stale("Mapping export is not UTF-8"))?;
+    Ok(json!({"text":text,"rowCount":plan.rows.len().to_string()}))
 }
 #[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
@@ -386,6 +431,7 @@ struct RecoveryReview {
     choices: Vec<Choice>,
     binding: InputBinding,
     actions: Arc<Vec<RecoveryAction>>,
+    metadata: Arc<BTreeMap<StepId, Value>>,
 }
 #[derive(Default)]
 pub struct RenameState {
@@ -540,22 +586,70 @@ pub fn inventory_owned(state: &AppState, request: InventoryRequestDto) -> Result
         Ok(result)
     })
 }
+fn natural_cmp(mut a: &str, mut b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    while !a.is_empty() && !b.is_empty() {
+        let ac = a.chars().next().unwrap();
+        let bc = b.chars().next().unwrap();
+        if ac.is_ascii_digit() && bc.is_ascii_digit() {
+            let ae = a.find(|c: char| !c.is_ascii_digit()).unwrap_or(a.len());
+            let be = b.find(|c: char| !c.is_ascii_digit()).unwrap_or(b.len());
+            let an = a[..ae].trim_start_matches('0');
+            let bn = b[..be].trim_start_matches('0');
+            let order = an.len().cmp(&bn.len()).then_with(|| an.cmp(bn));
+            if order != Ordering::Equal {
+                return order;
+            }
+            a = &a[ae..];
+            b = &b[be..];
+        } else {
+            let order = ac.cmp(&bc);
+            if order != Ordering::Equal {
+                return order;
+            }
+            a = &a[ac.len_utf8()..];
+            b = &b[bc.len_utf8()..];
+        }
+    }
+    a.len().cmp(&b.len())
+}
 fn page_items<T>(
     mut rows: Vec<&T>,
     q: &PageQuery,
     revision: u64,
-    key: impl Fn(&T, bool) -> (String, String),
+    key: impl Fn(&T, &str) -> (String, String),
     project: impl Fn(&T) -> Value,
 ) -> Result<Page> {
     if q.expected_revision != revision {
         return Err(stale("Page revision expired"));
     }
-    if !["name", "status"].contains(&q.sort.as_str()) || q.filter.len() > 4096 {
+    if !["name", "natural", "path", "size", "status"].contains(&q.sort.as_str())
+        || q.filter.len() > 4096
+    {
         return Err(stale("Unsupported page query"));
     }
+    if q.status
+        .as_ref()
+        .is_some_and(|s| !["changed", "unchanged", "needsReview", "blocked"].contains(&s.as_str()))
+    {
+        return Err(stale("Unsupported status filter"));
+    }
     let filter = q.filter.to_lowercase();
-    rows.retain(|v| key(v, false).0.to_lowercase().contains(&filter));
-    rows.sort_by_cached_key(|v| key(v, q.sort == "status"));
+    rows.retain(|v| {
+        key(v, "search").0.to_lowercase().contains(&filter)
+            && q.status
+                .as_ref()
+                .is_none_or(|status| key(v, "status").0 == *status)
+    });
+    if q.sort == "natural" {
+        rows.sort_by(|a, b| {
+            let a = key(a, "name");
+            let b = key(b, "name");
+            natural_cmp(&a.0, &b.0).then_with(|| a.1.cmp(&b.1))
+        });
+    } else {
+        rows.sort_by_cached_key(|v| key(v, &q.sort));
+    }
     let offset = q
         .cursor
         .as_deref()
@@ -589,11 +683,30 @@ pub fn inventory_page_owned(state: &AppState, request: InventoryPageRequest) -> 
         rows,
         &request.query,
         revision,
-        |e, _| (e.display_name.clone(), e.id.to_string()),
-        |e| json!({"itemId":e.id,"displayName":e.display_name,"displayPath":e.display_path,"kind":format!("{:?}",e.kind),"sizeBytes":e.stamp.size.map(|n|n.to_string())}),
+        |e, sort| {
+            (
+                match sort {
+                    "path" => e.display_path.clone(),
+                    "search" => format!("{} {}", e.display_name, e.display_path),
+                    "size" => format!("{:020}", e.stamp.size.unwrap_or(0)),
+                    _ => e.display_name.clone(),
+                },
+                e.id.to_string(),
+            )
+        },
+        |e| json!({"itemId":e.id,"displayName":e.display_name,"displayPath":e.display_path,"kind":camel_tag(&format!("{:?}",e.kind)),"sizeBytes":e.stamp.size.map(|n|n.to_string())}),
     )
 }
 pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobId> {
+    if request
+        .mapping
+        .as_ref()
+        .is_some_and(|m| m.text.len() as u64 > MAPPING_BYTE_LIMIT)
+    {
+        return Err(
+            RenameError::new(RenameErrorCode::ImportLimit, "mapping exceeds 64 MiB").into(),
+        );
+    }
     if request.selected_ids.len() > 1_000_000
         || request.fixed_stem.len() > 16_384
         || request.row_overrides.len() > MAPPING_ROW_LIMIT
@@ -711,7 +824,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             .map(Into::into)
             .or_else(|| recipe.selection_filter.clone())
         {
-            let allowed = select(&inventory, &filter)?
+            let allowed = select_controlled(&inventory, &filter, &control)?
                 .into_iter()
                 .collect::<BTreeSet<_>>();
             recipe.selection.retain(|id| allowed.contains(id));
@@ -729,18 +842,37 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
                 &control,
                 metadata_provider.as_ref(),
             )?;
-        let mappings = MappingSet {
-            inventory_id: inventory.id,
-            generation: inventory.generation,
-            rows: vec![],
+        let mappings = if let Some(mapping) = request.mapping {
+            let format = match mapping.format {
+                MappingInputFormat::Csv => MappingFormat::Csv,
+                MappingInputFormat::Tab => MappingFormat::Delimited { delimiter: b'\t' },
+                MappingInputFormat::Names => MappingFormat::NameList {
+                    order: recipe.selection.clone(),
+                },
+            };
+            let grants = GrantSet {
+                grants: inventory
+                    .roots
+                    .iter()
+                    .map(|r| r.source_grant.clone())
+                    .collect(),
+            };
+            import_mappings(mapping.text.as_bytes(), format, &inventory, &grants)?
+        } else {
+            MappingSet {
+                inventory_id: inventory.id,
+                generation: inventory.generation,
+                rows: vec![],
+            }
         };
         let overrides = request
             .row_overrides
             .into_iter()
             .map(Into::into)
             .collect::<Vec<RowOverride>>();
-        let evaluated =
-            evaluate_with_mappings(&inventory, &recipe, &inputs, &mappings, &overrides)?;
+        let evaluated = evaluate_with_mappings_controlled(
+            &inventory, &recipe, &inputs, &mappings, &overrides, &control,
+        )?;
         let mut grants = evaluated.grants.clone();
         if matches!(
             recipe.destination,
@@ -757,6 +889,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             &destination::capture_candidates(&evaluated),
         )?;
         let plan = vidlib_rename::plan(&inventory, &evaluated, &namespace, version)?;
+        let result = json!({"planRef":UiPlanRef::from(version),"counts":counts(&plan.counts),"summary":summary(&plan),"inputRevision":request.revision.to_string()});
         if control.is_cancelled() {
             return Err(stale("Preview cancelled"));
         }
@@ -766,7 +899,6 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         if r.revision != request.revision || r.selection_generation != selection_generation {
             return Err(stale("Preview superseded"));
         }
-        let result = json!({"planRef":UiPlanRef::from(version),"counts":counts(&plan.counts),"inputRevision":request.revision.to_string()});
         registry
             .lock()
             .map_err(|_| stale("Plan state unavailable"))?
@@ -776,6 +908,156 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
 }
 fn counts(c: &PlanCounts) -> Value {
     json!({"changed":c.changed.to_string(),"unchanged":c.unchanged.to_string(),"blocked":c.blocked.to_string(),"needsReview":c.needs_review.to_string()})
+}
+fn summary(plan: &RenamePlan) -> Value {
+    let entries = plan
+        .execution
+        .provenance
+        .inventory
+        .entries
+        .iter()
+        .map(|e| (e.id, e))
+        .collect::<BTreeMap<_, _>>();
+    let files = plan
+        .rows
+        .iter()
+        .filter(|r| {
+            entries
+                .get(&r.entry_id)
+                .is_some_and(|e| e.kind == EntryKind::File)
+        })
+        .count();
+    let folders = plan
+        .rows
+        .iter()
+        .filter(|r| {
+            entries
+                .get(&r.entry_id)
+                .is_some_and(|e| e.kind == EntryKind::Directory)
+        })
+        .count();
+    let steps = plan
+        .execution
+        .groups
+        .iter()
+        .flat_map(|g| &g.steps)
+        .collect::<Vec<_>>();
+    let destinations = plan
+        .rows
+        .iter()
+        .map(|r| {
+            r.target_path
+                .parent()
+                .unwrap_or(&r.target_path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    let mut value = counts(&plan.counts);
+    value["selected"] = json!(plan.rows.len().to_string());
+    value["files"] = json!(files.to_string());
+    value["folders"] = json!(folders.to_string());
+    let moved_directories = plan
+        .rows
+        .iter()
+        .filter(|r| {
+            r.source_path != r.target_path
+                && entries
+                    .get(&r.entry_id)
+                    .is_some_and(|e| e.kind == EntryKind::Directory)
+        })
+        .map(|r| r.source_path.as_path())
+        .collect::<BTreeSet<_>>();
+    let selected = plan
+        .rows
+        .iter()
+        .map(|r| r.entry_id)
+        .collect::<BTreeSet<_>>();
+    let carried = entries
+        .values()
+        .filter(|e| {
+            e.absolute_path
+                .ancestors()
+                .skip(1)
+                .any(|path| moved_directories.contains(path))
+        })
+        .collect::<Vec<_>>();
+    value["carriedDescendants"] = json!(carried.len().to_string());
+    value["unselectedDescendants"] = json!(carried
+        .iter()
+        .filter(|e| !selected.contains(&e.id))
+        .count()
+        .to_string());
+    value["companions"] = json!(plan
+        .rows
+        .iter()
+        .filter(|r| r.entry_id != r.primary_id)
+        .count()
+        .to_string());
+    value["metadataActions"] = json!(steps
+        .iter()
+        .filter(|s| matches!(s.action, ExecutionAction::SetMetadata { .. }))
+        .count()
+        .to_string());
+    value["createdCopyRemovals"] = json!(steps
+        .iter()
+        .filter(|s| matches!(s.action, ExecutionAction::RemoveOwnedCopy { .. }))
+        .count()
+        .to_string());
+    value["ownedDirectoryRemovals"] = json!(steps
+        .iter()
+        .filter(|s| matches!(s.action, ExecutionAction::RemoveOwnedEmptyDirectory { .. }))
+        .count()
+        .to_string());
+    value["destinationCount"] = json!(destinations.len().to_string());
+    value["destinations"] = json!(destinations.into_iter().take(200).collect::<Vec<_>>());
+    value["destinationMode"] = json!(match plan.execution.provenance.recipe.destination {
+        Destination::SameDirectory => "inPlace",
+        Destination::CopyTo { .. } => "copyTo",
+        Destination::MoveTo { .. } => "moveTo",
+        Destination::Granted { .. } => "legacy",
+    });
+    value["isUndo"] = json!(plan.inverse_of.is_some());
+    value
+}
+// Review projections are data only. They never grant paths or update journal evidence.
+fn stamp_dto(stamp: &FileStamp) -> Value {
+    json!({"createdNs":stamp.created_ns.map(|v|v.to_string()),"modifiedNs":stamp.modified_ns.map(|v|v.to_string()),"accessedNs":stamp.accessed_ns.map(|v|v.to_string()),"windowsAttributes":stamp.windows_attributes})
+}
+fn metadata_change_dto(change: &MetadataChange) -> Value {
+    match change {
+        MetadataChange::Timestamp { field, value_ns } => {
+            json!({"type":"timestamp","field":field,"valueNs":value_ns.to_string()})
+        }
+        MetadataChange::TimestampOffset { field, offset_ns } => {
+            json!({"type":"timestampOffset","field":field,"offsetNs":offset_ns.to_string()})
+        }
+        MetadataChange::TimestampIncrement {
+            field,
+            start_ns,
+            step_ns,
+        } => {
+            json!({"type":"timestampIncrement","field":field,"startNs":start_ns.to_string(),"stepNs":step_ns.to_string()})
+        }
+        MetadataChange::WindowsAttributes { set, clear } => {
+            json!({"type":"windowsAttributes","setBits":set,"clearBits":clear})
+        }
+    }
+}
+fn reviewed_row_dto(plan: &RenamePlan, row: &PlanRow) -> Value {
+    let mut value = row_dto(row);
+    let entry = plan
+        .execution
+        .provenance
+        .inventory
+        .entries
+        .iter()
+        .find(|e| e.id == row.entry_id);
+    value["kind"] = json!(entry.map(|e| camel_tag(&format!("{:?}", e.kind))));
+    value["metadata"] = json!(plan.execution.groups.iter().flat_map(|g|&g.steps).filter(|s|s.entry_id==row.entry_id).filter_map(|s|if let ExecutionAction::SetMetadata{changes,..}=&s.action {
+        Some(json!({"requested":changes.iter().map(metadata_change_dto).collect::<Vec<_>>(),"original":stamp_dto(&row.stamp)}))
+    }else{None}).collect::<Vec<_>>());
+    value
 }
 fn row_dto(row: &PlanRow) -> Value {
     let warnings = row
@@ -819,28 +1101,39 @@ pub fn page_owned(state: &AppState, request: PageRequest) -> Result<Page> {
         revision,
         |row, status| {
             (
-                if status {
-                    camel_tag(&format!("{:?}", row.status))
-                } else {
-                    row.old_display_name.clone()
+                match status {
+                    "status" => camel_tag(&format!("{:?}", row.status)),
+                    "path" => row.old_display_path.clone(),
+                    "search" => format!(
+                        "{} {} {} {}",
+                        row.old_display_name,
+                        row.new_display_name,
+                        row.old_display_path,
+                        row.new_display_path
+                    ),
+                    "size" => format!("{:020}", row.stamp.size.unwrap_or(0)),
+                    _ => row.old_display_name.clone(),
                 },
                 row.entry_id.to_string(),
             )
         },
-        row_dto,
+        |row| reviewed_row_dto(&plan, row),
     )
 }
 pub fn confirm_owned(state: &AppState, request: PlanRequest) -> Result<Confirmation> {
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
-    let _r = lock(state)?;
-    let mut registry = plans(state)?;
-    let plan = registry.current(request.plan_ref.into(), &lease)?;
+    let plan = {
+        let _r = lock(state)?;
+        plans(state)?.snapshot(request.plan_ref.into(), &lease)?
+    };
     if plan.counts.changed == 0 || plan.counts.blocked != 0 || plan.counts.needs_review != 0 {
         return Err(stale("Preview has no executable changes or needs review"));
     }
-    let summary = counts(&plan.counts);
+    let summary = summary(&plan);
     let nonce = StepId::new().to_string();
-    registry.confirm(request.plan_ref.into(), nonce.clone(), &lease)?;
+    // Revalidate the reference after projection: an edit may have revoked it.
+    let _r = lock(state)?;
+    plans(state)?.confirm(request.plan_ref.into(), nonce.clone(), &lease)?;
     Ok(Confirmation { nonce, summary })
 }
 fn report_dto(report: vidlib_fileops::OperationReport) -> Value {
@@ -992,7 +1285,7 @@ fn action_page(actions: &[RecoveryAction], query: &PageQuery, revision: u64) -> 
         query,
         revision,
         |action, status| {
-            let name = if status {
+            let name = if status == "status" {
                 camel_tag(&format!("{:?}", action.disposition))
             } else {
                 action
@@ -1006,6 +1299,37 @@ fn action_page(actions: &[RecoveryAction], query: &PageQuery, revision: u64) -> 
         },
         action_dto,
     )
+}
+fn recovery_metadata(
+    record: &vidlib_fileops::journal::PendingOperation,
+) -> BTreeMap<StepId, Value> {
+    let originals = record.inspection["inventory"]["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some((
+                serde_json::from_value::<EntryId>(entry["id"].clone()).ok()?,
+                serde_json::from_value::<FileStamp>(entry["stamp"].clone()).ok()?,
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    record.steps.iter().chain(record.recovery_effects.iter().map(|effect|&effect.inverse)).filter_map(|pending| {
+        let ExecutionAction::SetMetadata{changes,..} = &pending.step.action else {return None};
+        let after = pending.receipts.iter().rev().find(|receipt|receipt.phase==vidlib_fileops::events::CompletedPhase::MetadataSet).and_then(|receipt|receipt.after.as_ref());
+        Some((pending.step.id,json!({"original":originals.get(&pending.step.entry_id).map(stamp_dto),"factualBefore":pending.metadata_prestate.as_ref().map(stamp_dto),"observedAfter":after.map(stamp_dto),"requested":changes.iter().map(metadata_change_dto).collect::<Vec<_>>()})))
+    }).collect()
+}
+fn decorate_recovery_page(mut page: Page, metadata: &BTreeMap<StepId, Value>) -> Page {
+    for row in &mut page.items {
+        if let Some(value) = serde_json::from_value::<StepId>(row["stepId"].clone())
+            .ok()
+            .and_then(|id| metadata.get(&id))
+        {
+            row["metadata"] = value.clone();
+        }
+    }
+    page
 }
 pub fn publish_recovery_owned(state: &AppState, inspection: RecoveryInspection) -> Result<Value> {
     let RecoveryInspection {
@@ -1026,11 +1350,15 @@ pub fn publish_recovery_owned(state: &AppState, inspection: RecoveryInspection) 
         vec![Choice::Resume, Choice::Restore]
     };
     let actions = Arc::new(preview.actions.clone());
-    let page = action_page(
-        &actions,
-        &PageQuery::new(binding.revision),
-        binding.revision,
-    )?;
+    let metadata = Arc::new(recovery_metadata(&record));
+    let page = decorate_recovery_page(
+        action_page(
+            &actions,
+            &PageQuery::new(binding.revision),
+            binding.revision,
+        )?,
+        &metadata,
+    );
     let result = json!({"recoveryRef":reference,"nonce":nonce,"operationId":record.operation_id,"revision":binding.revision.to_string(),"choices":choices,"continuingRestore":record.restore_context.is_some(),"unresolvedGroups":preview.unresolved_groups.len().to_string(),"page":page,"actionCount":actions.len().to_string()});
     let mut r = lock(state)?;
     if InputBinding::capture(&r) != binding {
@@ -1046,6 +1374,7 @@ pub fn publish_recovery_owned(state: &AppState, inspection: RecoveryInspection) 
             choices,
             binding,
             actions,
+            metadata,
         },
     );
     Ok(result)
@@ -1069,9 +1398,13 @@ pub fn recovery_page_owned(state: &AppState, request: RecoveryPageRequest) -> Re
         return Err(stale("Recovery review expired"));
     }
     let actions = review.actions.clone();
+    let metadata = review.metadata.clone();
     let revision = review.binding.revision;
     drop(r);
-    action_page(&actions, &request.query, revision)
+    Ok(decorate_recovery_page(
+        action_page(&actions, &request.query, revision)?,
+        &metadata,
+    ))
 }
 pub fn recovery_owned(state: &AppState, request: RecoveryRequest) -> Result<JobId> {
     let lease = state.coordinator.try_acquire(LeaseKind::Recovery)?;
@@ -1142,6 +1475,7 @@ pub fn undo_owned(state: &AppState, request: UndoRequest) -> Result<JobId> {
         let fs = fs_for(&lease, &policy)?;
         let namespace = fs.capture_namespace(&context.grants, &context.candidates)?;
         let plan = vidlib_fileops::undo::plan_undo(&completed, &namespace, version)?;
+        let result = json!({"planRef":UiPlanRef::from(version),"counts":counts(&plan.counts),"summary":summary(&plan),"inputRevision":request.revision.to_string()});
         if control.is_cancelled() {
             return Err(stale("Undo preview cancelled"));
         }
@@ -1151,7 +1485,6 @@ pub fn undo_owned(state: &AppState, request: UndoRequest) -> Result<JobId> {
         if r.revision != request.revision || r.selection_generation != selection_generation {
             return Err(stale("Undo preview superseded"));
         }
-        let result = json!({"planRef":UiPlanRef::from(version),"counts":counts(&plan.counts),"inputRevision":request.revision.to_string()});
         registry
             .lock()
             .map_err(|_| stale("Plan state unavailable"))?
@@ -1194,6 +1527,12 @@ command!(start_rename_preview, RenameRequestDto, JobId, preview_owned);
 command!(job_status, JobRequest, JobStatusDto, status_owned);
 command!(cancel_job, JobRequest, (), cancel_owned);
 command!(rename_page, PageRequest, Page, page_owned);
+command!(
+    export_rename_plan,
+    ExportPlanRequest,
+    Value,
+    export_plan_owned
+);
 command!(confirm_rename, PlanRequest, Confirmation, confirm_owned);
 command!(apply_rename, ApplyRequest, JobId, apply_owned);
 command!(operation_history, HistoryRequest, Value, history_owned);
@@ -1270,6 +1609,207 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         panic!("job timeout")
+    }
+    #[test]
+    fn desktop_mapping_and_review_query_wire_are_supported() {
+        let id = EntryId::new();
+        let mapping = serde_json::from_value::<RenameRequestDto>(
+            json!({"revision":"1","selectedIds":[id],"mapping":{"format":"names","text":"new.mkv"}}),
+        );
+        assert!(
+            mapping.is_ok(),
+            "bounded mapping input must reach the native importer: {:?}",
+            mapping.err()
+        );
+        let query = serde_json::from_value::<PageQuery>(
+            json!({"cursor":null,"limit":200,"sort":"natural","filter":"movie","status":"changed","expectedRevision":"1"}),
+        );
+        assert!(
+            query.is_ok(),
+            "status filter must be a typed independent display query"
+        );
+    }
+    #[test]
+    fn desktop_cpu_preview_reports_between_items_and_can_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir(&media).unwrap();
+        for i in 0..1200 {
+            std::fs::write(
+                media.join(format!("movie-{}-{i:04}.mkv", "1234567890".repeat(20))),
+                b"a",
+            )
+            .unwrap();
+        }
+        let state =
+            AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+        crate::selection::install_selection(&state, vec![media]).unwrap();
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+        );
+        let ids = lock(&state)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .map(|e| e.id)
+            .collect::<Vec<_>>();
+        let rules=(0..100).map(|i|json!({"id":format!("r{i}"),"enabled":true,"segment":{"type":"stem"},"parameters":{"type":"regex","rule":{"pattern":"[0-9]","replacement":"0","scope":"all","case_sensitive":true}}})).collect::<Vec<_>>();
+        let recipe = json!({"schema_version":1,"revision":"2","selection":ids,"numbering_order":ids,"rules":rules,"companions":{"type":"none"},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"},"metadata_changes":[]});
+        let request = serde_json::from_value(
+            json!({"revision":"2","selectedIds":ids,"recipeJson":recipe.to_string()}),
+        )
+        .unwrap();
+        let job = preview_owned(&state, request).unwrap();
+        let mut observed = false;
+        for _ in 0..5000 {
+            let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+            if status.progress.as_ref().is_some_and(|p| {
+                p["phase"] == "evaluating"
+                    && p["done"]
+                        .as_str()
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .is_some_and(|done| done > 0 && done < 1200)
+            }) {
+                observed = true;
+                cancel_owned(&state, JobRequest { job_id: job }).unwrap();
+                break;
+            }
+            if status.state != "running" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            observed,
+            "actual CPU preview must expose between-item evaluation progress before completion"
+        );
+        for _ in 0..1000 {
+            let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+            if status.state != "running" {
+                assert_eq!(status.state, "cancelled");
+                assert!(status.result.is_none());
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("CPU cancellation did not finish between items");
+    }
+    #[test]
+    fn desktop_cpu_selection_reports_between_items_and_can_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir(&media).unwrap();
+        for i in 0..1200 {
+            std::fs::write(
+                media.join(format!("movie-{}-{i:04}.mkv", "1234567890".repeat(20))),
+                b"a",
+            )
+            .unwrap();
+        }
+        let state =
+            AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+        crate::selection::install_selection(&state, vec![media]).unwrap();
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+        );
+        let ids = lock(&state)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .map(|e| e.id)
+            .collect::<Vec<_>>();
+        let rules=(0..100).map(|i|json!({"id":format!("r{i}"),"enabled":true,"segment":{"type":"stem"},"parameters":{"type":"regex","rule":{"pattern":"[0-9]","replacement":"0","scope":"all","case_sensitive":true}}})).collect::<Vec<_>>();
+        let mut recipe = json!({"schema_version":1,"revision":"2","selection":ids,"numbering_order":ids,"rules":rules,"companions":{"type":"none"},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"},"metadata_changes":[]});
+        recipe["selection_filter"] = json!({"exclude":(0..100).map(|_|json!({"field":"name","syntax":"regex","value":"^[a-z0-9-]+x$","case_sensitive":true})).collect::<Vec<_>>()});
+        let request = serde_json::from_value(
+            json!({"revision":"2","selectedIds":ids,"recipeJson":recipe.to_string()}),
+        )
+        .unwrap();
+        let job = preview_owned(&state, request).unwrap();
+        let mut observed = false;
+        for _ in 0..5000 {
+            let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+            if status.progress.as_ref().is_some_and(|p| {
+                p["phase"] == "selecting"
+                    && p["done"]
+                        .as_str()
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .is_some_and(|done| done > 0 && done < 1200)
+            }) {
+                observed = true;
+                cancel_owned(&state, JobRequest { job_id: job }).unwrap();
+                break;
+            }
+            if status.state != "running" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            observed,
+            "actual CPU preview must expose between-item selection progress before completion"
+        );
+        for _ in 0..1000 {
+            let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+            if status.state != "running" {
+                assert_eq!(status.state, "cancelled");
+                assert!(status.result.is_none());
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("CPU cancellation did not finish between items");
+    }
+    #[test]
+    fn desktop_summary_includes_hidden_rows_and_native_inventory_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir(&media).unwrap();
+        for i in 0..205 {
+            std::fs::write(media.join(format!("movie{i}.mkv")), b"x").unwrap();
+        }
+        let state =
+            AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+        crate::selection::install_selection(&state, vec![media]).unwrap();
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+        );
+        let page = inventory_page_owned(
+            &state,
+            InventoryPageRequest {
+                query: PageQuery::new(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(page.items[0]["kind"], "file");
+        let ids = lock(&state)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .map(|e| e.id)
+            .collect::<Vec<_>>();
+        let request =
+            serde_json::from_value(json!({"revision":"2","selectedIds":ids,"rule":"keep"}))
+                .unwrap();
+        let result = await_job(&state, preview_owned(&state, request).unwrap());
+        assert_eq!(result["summary"]["selected"], "205");
+        assert_eq!(result["summary"]["files"], "205");
+        assert_eq!(result["summary"]["folders"], "0");
     }
     #[test]
     fn desktop_filter_override_and_scope_changes_revoke_previous_plan() {
@@ -1359,6 +1899,7 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        mapping: None,
                         metadata_changes: None,
                         destination: None,
                         recipe_json: None,
@@ -1546,6 +2087,7 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        mapping: None,
                         metadata_changes: None,
                         destination: None,
                         recipe_json: None,

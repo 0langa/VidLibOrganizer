@@ -29,6 +29,7 @@ fn history_request(state: &AppState) -> HistoryRequest {
         .unwrap();
     HistoryRequest {
         query: PageQuery {
+            status: None,
             sort: "oldest".into(),
             ..PageQuery::new(revision)
         },
@@ -56,6 +57,7 @@ fn preview(state: &AppState) -> UiPlanRef {
         preview_owned(
             state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -119,6 +121,7 @@ fn page_never_returns_native_paths() {
         PageRequest {
             plan_ref,
             query: PageQuery {
+                status: None,
                 limit: 1000,
                 ..PageQuery::new(2)
             },
@@ -353,6 +356,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         &state,
         InventoryPageRequest {
             query: PageQuery {
+                status: None,
                 limit: usize::MAX,
                 ..PageQuery::new(1)
             },
@@ -365,6 +369,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         &state,
         InventoryPageRequest {
             query: PageQuery {
+                status: None,
                 cursor: first.next_cursor.clone(),
                 ..PageQuery::new(1)
             },
@@ -383,6 +388,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -406,6 +412,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         PageRequest {
             plan_ref: reference,
             query: PageQuery {
+                status: None,
                 limit: usize::MAX,
                 ..PageQuery::new(2)
             },
@@ -453,6 +460,7 @@ fn directory_capture_preserves_unselected_nested_children_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -597,6 +605,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -620,6 +629,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -701,6 +711,7 @@ fn empty_directory_rename_retains_complete_namespace_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -892,6 +903,7 @@ fn recovery_all_actions_are_reachable_through_one_review() {
         &state,
         InventoryPageRequest {
             query: PageQuery {
+                status: None,
                 cursor: first.next_cursor,
                 ..PageQuery::new(1)
             },
@@ -909,6 +921,7 @@ fn recovery_all_actions_are_reachable_through_one_review() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -955,6 +968,7 @@ fn recovery_all_actions_are_reachable_through_one_review() {
         RecoveryPageRequest {
             recovery_ref: reference,
             query: PageQuery {
+                status: None,
                 cursor: serde_json::from_value(review["page"]["nextCursor"].clone()).unwrap(),
                 ..PageQuery::new(2)
             },
@@ -1060,6 +1074,7 @@ fn history_query_pages_filter_sort_and_reject_changed_data_revision() {
         &state,
         HistoryRequest {
             query: PageQuery {
+                status: None,
                 limit: usize::MAX,
                 ..request.query.clone()
             },
@@ -1074,6 +1089,7 @@ fn history_query_pages_filter_sort_and_reject_changed_data_revision() {
         &state,
         HistoryRequest {
             query: PageQuery {
+                status: None,
                 cursor: cursor.clone(),
                 ..request.query.clone()
             },
@@ -1086,6 +1102,7 @@ fn history_query_pages_filter_sort_and_reject_changed_data_revision() {
         &state,
         HistoryRequest {
             query: PageQuery {
+                status: None,
                 limit: 1,
                 filter: ids[7].to_string(),
                 sort: "state".into(),
@@ -1113,6 +1130,7 @@ fn history_query_pages_filter_sort_and_reject_changed_data_revision() {
         &state,
         HistoryRequest {
             query: PageQuery {
+                status: None,
                 cursor,
                 ..current.query
             },
@@ -1143,6 +1161,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
         preview_owned(
             &state,
             RenameRequestDto {
+                mapping: None,
                 metadata_changes: None,
                 destination: None,
                 recipe_json: None,
@@ -1162,6 +1181,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
     assert!(preview_owned(
         &state,
         RenameRequestDto {
+            mapping: None,
             metadata_changes: None,
             destination: None,
             recipe_json: None,
@@ -1675,6 +1695,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
             metadata_changes: vec![],
         };
         let request = RenameRequestDto {
+            mapping: None,
             metadata_changes: None,
             destination: None,
             revision,
@@ -1707,6 +1728,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         );
     }
     let request = RenameRequestDto {
+        mapping: None,
         metadata_changes: None,
         destination: None,
         revision: 4,
@@ -1783,6 +1805,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         metadata_changes: vec![],
     };
     let request = RenameRequestDto {
+        mapping: None,
         metadata_changes: None,
         destination: None,
         revision: 5,
@@ -2270,6 +2293,10 @@ fn metadata_request_is_strict_exact_and_changes_backend_preview() {
         },
     )
     .unwrap();
+    assert_eq!(
+        rows.items[0]["metadata"][0]["requested"][0]["valueNs"],
+        "1600000000123456700"
+    );
     assert_eq!(rows.items[0]["status"], "changed");
     assert!(rows.items[0]["explanations"]
         .as_array()
@@ -2286,4 +2313,174 @@ fn metadata_request_is_strict_exact_and_changes_backend_preview() {
         bad["metadataChanges"] = changes;
         assert!(serde_json::from_value::<RenameRequestDto>(bad).is_err());
     }
+    // Read a real pending journal; review must not manufacture missing receipts.
+    use vidlib_fileops::{coordinator::LeaseKind, journal::Journal};
+    let plan = {
+        let lease = state.coordinator.try_acquire(LeaseKind::Read).unwrap();
+        state
+            .plans
+            .lock()
+            .unwrap()
+            .current(plan_ref.into(), &lease)
+            .unwrap()
+            .clone()
+    };
+    let step = &plan.execution.groups[0].steps[0];
+    let frozen = &plan.rows[0].stamp;
+    let operation_id = {
+        let _lease = state.coordinator.try_acquire(LeaseKind::Write).unwrap();
+        let mut journal = Journal::open(&state.operations).unwrap();
+        let op = journal.begin(&plan.execution).unwrap();
+        journal.intent_metadata(op, step, frozen).unwrap();
+        op
+    };
+    let review = recovery_preview_owned(&state, OperationRequest { operation_id }).unwrap();
+    let metadata = &review["page"]["items"][0]["metadata"];
+    assert_eq!(
+        metadata["original"]["modifiedNs"],
+        json!(frozen.modified_ns.map(|v| v.to_string()))
+    );
+    assert_eq!(
+        metadata["factualBefore"]["modifiedNs"],
+        metadata["original"]["modifiedNs"]
+    );
+    assert_eq!(metadata["requested"][0]["valueNs"], "1600000000123456700");
+    assert!(
+        metadata["observedAfter"].is_null(),
+        "no setter receipt exists yet"
+    );
+    let recorded = Journal::open(&state.operations)
+        .unwrap()
+        .operation(operation_id)
+        .unwrap();
+    assert_eq!(recorded.steps[0].metadata_prestate.as_ref(), Some(frozen));
+    assert!(
+        recorded.steps[0].receipts.is_empty(),
+        "presentation must not refresh journal facts"
+    );
+}
+
+#[test]
+fn mapping_import_export_and_display_queries_use_current_native_plan() {
+    let (dir, state) = fixture();
+    std::fs::write(dir.path().join("media/movie2.mkv"), b"two").unwrap();
+    std::fs::write(dir.path().join("media/movie10.mkv"), b"ten").unwrap();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let inventory = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let ids = inventory
+        .items
+        .iter()
+        .map(|v| v["itemId"].clone())
+        .collect::<Vec<_>>();
+    let request:RenameRequestDto=serde_json::from_value(json!({"revision":"2","selectedIds":ids,"mapping":{"format":"names","text":"ten.mkv\ntwo.mkv\nrenamed.mp4"}})).unwrap();
+    let result = wait(&state, preview_owned(&state, request).unwrap());
+    let reference: UiPlanRef = serde_json::from_value(result["planRef"].clone()).unwrap();
+    assert_eq!(result["summary"]["selected"], "3");
+    let page = page_owned(
+        &state,
+        PageRequest {
+            plan_ref: reference,
+            query: PageQuery {
+                sort: "natural".into(),
+                status: Some("changed".into()),
+                ..PageQuery::new(2)
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|v| v["oldName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["movie2.mkv", "movie10.mkv", "original.mp4"]
+    );
+    assert_eq!(page.items[0]["newName"], "two.mkv"); // Display sorting never reassigned pasted order.
+    let report = export_plan_owned(
+        &state,
+        ExportPlanRequest {
+            plan_ref: reference,
+            mode: ExportPlanMode::ExactMapping,
+        },
+    )
+    .unwrap();
+    assert_eq!(report["rowCount"], "3");
+    assert!(report["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("old_path,new_path\n"));
+    let query = PageQuery {
+        filter: "renamed".into(),
+        status: Some("changed".into()),
+        ..PageQuery::new(2)
+    };
+    let searched = page_owned(
+        &state,
+        PageRequest {
+            plan_ref: reference,
+            query,
+        },
+    )
+    .unwrap();
+    assert_eq!(searched.items.len(), 1);
+    assert_eq!(searched.items[0]["oldName"], "original.mp4");
+    let csv = report["text"].clone();
+    let request = serde_json::from_value(
+        json!({"revision":"3","selectedIds":ids,"mapping":{"format":"csv","text":csv}}),
+    )
+    .unwrap();
+    let again = wait(&state, preview_owned(&state, request).unwrap());
+    assert_eq!(again["counts"]["changed"], "3");
+    assert!(export_plan_owned(
+        &state,
+        ExportPlanRequest {
+            plan_ref: reference,
+            mode: ExportPlanMode::SpreadsheetSafe
+        }
+    )
+    .is_err());
+    assert!(dir.path().join("media/original.mp4").exists());
+    assert!(!dir.path().join("media/renamed.mp4").exists());
+}
+
+#[test]
+fn summary_counts_nested_carried_descendants_once_and_identifies_unselected_items() {
+    let (dir, state) = fixture();
+    std::fs::create_dir_all(dir.path().join("media/A/B")).unwrap();
+    std::fs::write(dir.path().join("media/A/B/payload.txt"), b"content").unwrap();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let inventory = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let ids = inventory
+        .items
+        .iter()
+        .filter(|v| v["kind"] == "directory")
+        .map(|v| v["itemId"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    let request = serde_json::from_value(
+        json!({"revision":"2","selectedIds":ids,"rule":"fixedStem","fixedStem":"renamed"}),
+    )
+    .unwrap();
+    let result = wait(&state, preview_owned(&state, request).unwrap());
+    assert_eq!(result["summary"]["carriedDescendants"], "2");
+    assert_eq!(result["summary"]["unselectedDescendants"], "1");
+    assert_eq!(result["summary"]["folders"], "2");
 }

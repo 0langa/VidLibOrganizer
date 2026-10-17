@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProgressPhase {
     Scanning,
+    Selecting,
+    Evaluating,
     Complete,
     Cancelled,
 }

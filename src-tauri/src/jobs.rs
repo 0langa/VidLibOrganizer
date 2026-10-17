@@ -233,7 +233,7 @@ impl RenameJob {
     pub fn status(&mut self) -> crate::commands::rename::JobStatusDto {
         if let Some(progress) = self.progress.try_iter().last() {
             self.status.progress = Some(serde_json::json!({
-                "phase": match progress.phase { vidlib_inventory::ProgressPhase::Scanning => "scanning", vidlib_inventory::ProgressPhase::Complete => "complete", vidlib_inventory::ProgressPhase::Cancelled => "cancelled" },
+                "phase": match progress.phase { vidlib_inventory::ProgressPhase::Scanning => "scanning", vidlib_inventory::ProgressPhase::Selecting => "selecting", vidlib_inventory::ProgressPhase::Evaluating => "evaluating", vidlib_inventory::ProgressPhase::Complete => "complete", vidlib_inventory::ProgressPhase::Cancelled => "cancelled" },
                 "done": progress.done.to_string(), "total": progress.total.map(|n| n.to_string()), "currentEntry": progress.current_entry,
             }));
         }
