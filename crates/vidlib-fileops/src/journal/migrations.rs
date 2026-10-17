@@ -3,7 +3,7 @@ use super::{schema, OpError};
 use crate::{ErrorCode, Phase};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub(super) fn check(conn: &Connection) -> Result<bool, OpError> {
+pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(super::sql_error)?;
@@ -15,7 +15,7 @@ pub(super) fn check(conn: &Connection) -> Result<bool, OpError> {
         )
         .map_err(super::sql_error)?;
     if version == 0 && tables == 0 {
-        return Ok(true);
+        return Ok(0);
     }
     let unsupported = || {
         OpError::new(
@@ -24,10 +24,13 @@ pub(super) fn check(conn: &Connection) -> Result<bool, OpError> {
             "unknown or inconsistent operation journal schema; original retained",
         )
     };
-    if version != schema::VERSION {
+    if !(1..=schema::VERSION).contains(&version) {
         return Err(unsupported());
     }
-    let expected = format!("{:x}", md5::compute(schema::SQL));
+    let mut expected = vec![(1, format!("{:x}", md5::compute(schema::SQL)))];
+    if version >= 2 {
+        expected.push((2, format!("{:x}", md5::compute(schema::V2_SQL))));
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -35,7 +38,7 @@ pub(super) fn check(conn: &Connection) -> Result<bool, OpError> {
                 .collect::<Result<Vec<_>, _>>()
         })
         .map_err(|_| unsupported())?;
-    if migrations != vec![(schema::VERSION, expected)] {
+    if migrations != expected {
         return Err(unsupported());
     }
     for table in [
@@ -57,18 +60,38 @@ pub(super) fn check(conn: &Connection) -> Result<bool, OpError> {
             return Err(unsupported());
         }
     }
-    Ok(false)
+    Ok(version)
 }
 pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(super::sql_error)?;
-    // Recheck under the writer lock: a concurrent initialization may have won.
-    if check(&tx)? {
+    // Recheck under the writer lock: a concurrent migration may have won.
+    let version = check(&tx)?;
+    if version == 0 {
         tx.execute_batch(schema::SQL).map_err(super::sql_error)?;
         tx.execute(
-            "INSERT INTO schema_migrations(version,checksum) VALUES(?1,?2)",
-            rusqlite::params![schema::VERSION, format!("{:x}", md5::compute(schema::SQL))],
+            "INSERT INTO schema_migrations(version,checksum) VALUES(1,?1)",
+            [format!("{:x}", md5::compute(schema::SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 2 {
+        tx.execute_batch(schema::V2_SQL).map_err(super::sql_error)?;
+        // Validate extracted references before committing any schema/data change.
+        // This is a one-time migration read, never a per-effect inventory decode.
+        let mut statement = tx
+            .prepare("SELECT approved_plan FROM operations")
+            .map_err(super::sql_error)?;
+        let rows = statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(super::sql_error)?;
+        for row in rows {
+            super::from_json::<vidlib_rename::PlanRef>(&row.map_err(super::sql_error)?)?;
+        }
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(2,?1)",
+            [format!("{:x}", md5::compute(schema::V2_SQL))],
         )
         .map_err(super::sql_error)?;
         tx.pragma_update(None, "user_version", schema::VERSION)

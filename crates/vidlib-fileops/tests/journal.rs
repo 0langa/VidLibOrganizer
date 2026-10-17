@@ -798,3 +798,52 @@ fn owned_cleanup_requires_the_creators_actual_native_identity() {
     );
     assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 1);
 }
+
+// Indexed mutation reads must retain exact provenance and ordering after reopen,
+// even with a large inspection snapshot and unrelated receipts in the same store.
+#[test]
+fn many_steps_keep_exact_provenance_and_order_after_reopen() {
+    let (dir, mut plan) = fixture();
+    plan.provenance.inventory.issues.push(InventoryIssue {
+        code: IssueCode::StatFailed,
+        relative_path: None,
+        message: "inspection".repeat(32768),
+    });
+    let template = plan.groups[0].steps[0].clone();
+    for _ in 1..24 {
+        let mut step = template.clone();
+        step.id = StepId::new();
+        plan.groups[0].steps.push(step);
+    }
+    let path = dir.path().join("operations.sqlite3");
+    let mut journal = Journal::open(&path).unwrap();
+    let other = journal.begin(&plan).unwrap();
+    journal.intent(other, &template).unwrap();
+    journal
+        .complete(other, &receipt(&template, CompletedPhase::Renamed))
+        .unwrap();
+    let op = journal.begin(&plan).unwrap();
+    drop(journal);
+    let mut journal = Journal::open(&path).unwrap();
+    for (ordinal, step) in plan.groups[0].steps.iter().enumerate() {
+        if let Some(next) = plan.groups[0].steps.get(ordinal + 1) {
+            assert!(journal.intent(op, next).is_err());
+        }
+        journal.intent(op, step).unwrap();
+        journal
+            .complete(op, &receipt(step, CompletedPhase::Renamed))
+            .unwrap();
+    }
+    journal.set_state(op, OperationState::Completed).unwrap();
+    let events = journal.events_after(0, 200).unwrap().items;
+    assert_eq!(events.len(), 25);
+    for (event, step) in events
+        .iter()
+        .filter(|e| e.operation_id == op)
+        .zip(&plan.groups[0].steps)
+    {
+        assert_eq!(event.step_id, step.id);
+        assert_eq!(event.approved_plan, plan.provenance.approved_plan);
+    }
+    assert_eq!(journal.pending().unwrap().len(), 1);
+}

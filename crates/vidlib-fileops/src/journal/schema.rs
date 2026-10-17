@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 1;
+pub(super) const VERSION: i64 = 2;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -15,6 +15,14 @@ CREATE TABLE receipts(operation_id TEXT NOT NULL, step_id TEXT NOT NULL, payload
 CREATE TABLE operation_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, operation_id TEXT NOT NULL, step_id TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(operation_id,step_id), FOREIGN KEY(operation_id,step_id) REFERENCES receipts(operation_id,step_id));
 CREATE TABLE outbox_ack(event_id TEXT PRIMARY KEY REFERENCES operation_events(id));
 CREATE TABLE history_visibility(operation_id TEXT PRIMARY KEY REFERENCES operations(id), visible INTEGER NOT NULL DEFAULT 1 CHECK(visible IN (0,1)));
+"#;
+
+// Keep v1 SQL/checksum immutable so existing journals can upgrade transactionally.
+pub(super) const V2_SQL: &str = r#"
+ALTER TABLE operations ADD COLUMN approved_plan TEXT NOT NULL DEFAULT '';
+UPDATE operations SET approved_plan = json_extract(inspection, '$.approved_plan');
+CREATE INDEX operation_effect_header ON operations(id,state,approved_plan);
+CREATE INDEX unfinished_steps ON steps(operation_id,sequence) WHERE state IN ('Planned','IntentDurable','Unresolved');
 "#;
 
 #[derive(Serialize, Deserialize)]

@@ -73,9 +73,9 @@ impl Journal {
         }
         let mut connection = Connection::open(path).map_err(sql_error)?;
         // Inspect before WAL or migrations: unknown evidence stays untouched.
-        let fresh = migrations::check(&connection)?;
+        let version = migrations::check(&connection)?;
         configure(&connection, true)?;
-        if fresh {
+        if version < schema::VERSION {
             migrations::migrate(&mut connection)?;
         }
         Ok(Self {
@@ -98,7 +98,7 @@ impl Journal {
             .collect();
         let op = OperationId::new();
         self.write(Some(op), None, |tx| {
-            tx.execute("INSERT INTO operations(id,state,inspection,groups_json) VALUES(?1,'Prepared',?2,?3)", params![op.to_string(), json(&inspection)?, json(&groups)?]).map_err(sql_error)?;
+            tx.execute("INSERT INTO operations(id,state,inspection,groups_json,approved_plan) VALUES(?1,'Prepared',?2,?3,?4)", params![op.to_string(), json(&inspection)?, json(&groups)?, json(&plan.provenance.approved_plan)?]).map_err(sql_error)?;
             tx.execute("INSERT INTO history_visibility(operation_id) VALUES(?1)", [op.to_string()]).map_err(sql_error)?;
             for (sequence, step) in plan.groups.iter().flat_map(|g| &g.steps).enumerate() {
                 let sequence = i64::try_from(sequence).map_err(|_| invalid("too many steps"))?;
@@ -109,32 +109,30 @@ impl Journal {
     }
     pub fn intent(&mut self, op: OperationId, step: &ExecutionStep) -> Result<(), OpError> {
         self.write(Some(op), Some(step.id), |tx| {
-            let record = load_operation(tx, op)?;
-            if !matches!(
-                record.state,
-                OperationState::Prepared | OperationState::Running
-            ) {
+            let (state, _) = operation_header(tx, op)?;
+            if !matches!(state, OperationState::Prepared | OperationState::Running) {
                 return Err(recovery("operation is not ready for an intent"));
             }
-            let next = record
-                .steps
-                .iter()
-                .find(|s| !finished(s.state))
-                .ok_or_else(|| invalid("operation has no remaining steps"))?;
+            let next = load_next_step(tx, op)?;
             if next.step != *step || next.state != StepState::Planned {
                 return Err(invalid("step is not the next immutable planned effect"));
             }
-            validate_resolved_inputs(step, &record)?;
+            let prerequisites = load_prerequisites(tx, op, step)?;
+            validate_resolved_inputs(step, &prerequisites)?;
             tx.execute(
                 "UPDATE steps SET state='IntentDurable' WHERE operation_id=?1 AND id=?2",
                 params![op.to_string(), step.id.to_string()],
             )
             .map_err(sql_error)?;
-            tx.execute(
-                "UPDATE operations SET state='Running' WHERE id=?1",
-                [op.to_string()],
-            )
-            .map_err(sql_error)?;
+            // The operation row owns the large inspection snapshot. Avoid
+            // rebuilding it for an unchanged Running state on every effect.
+            if state == OperationState::Prepared {
+                tx.execute(
+                    "UPDATE operations SET state='Running' WHERE id=?1",
+                    [op.to_string()],
+                )
+                .map_err(sql_error)?;
+            }
             Ok(())
         })
         .map_err(|mut e| {
@@ -145,18 +143,14 @@ impl Journal {
     pub fn complete(&mut self, op: OperationId, receipt: &StepReceipt) -> Result<(), OpError> {
         let mut item_id = None;
         let result = self.write(Some(op), Some(receipt.step_id), |tx| {
-            let record = load_operation(tx, op)?;
+            let (state, approved_plan) = operation_header(tx, op)?;
             if !matches!(
-                record.state,
+                state,
                 OperationState::Running | OperationState::RecoveryRequired
             ) {
                 return Err(invalid("operation cannot record a completion"));
             }
-            let pending = record
-                .steps
-                .iter()
-                .find(|s| s.step.id == receipt.step_id)
-                .ok_or_else(|| invalid("unknown step"))?;
+            let pending = load_current_step(tx, op, receipt.step_id)?;
             item_id = Some(pending.step.entry_id);
             if !matches!(
                 pending.state,
@@ -164,7 +158,8 @@ impl Journal {
             ) {
                 return Err(invalid("completion requires a durable unresolved intent"));
             }
-            validate_receipt(&pending.step, receipt, &record)?;
+            let prerequisites = load_prerequisites(tx, op, &pending.step)?;
+            validate_receipt(&pending.step, receipt, &prerequisites)?;
             tx.execute(
                 "INSERT INTO receipts(operation_id,step_id,payload) VALUES(?1,?2,?3)",
                 params![
@@ -186,8 +181,6 @@ impl Journal {
             .map_err(sql_error)?;
             let sequence = u64::try_from(tx.last_insert_rowid())
                 .map_err(|_| recovery("event sequence overflow"))?;
-            let approved_plan: PlanRef =
-                from_json_value(record.inspection["approved_plan"].clone())?;
             let event = OperationEventV1 {
                 schema_version: 1,
                 event_id,
@@ -311,13 +304,13 @@ impl Journal {
     }
     pub fn set_state(&mut self, op: OperationId, state: OperationState) -> Result<(), OpError> {
         self.write(Some(op), None, |tx| {
-            let record = load_operation(tx, op)?;
-            let unresolved = record
-                .steps
-                .iter()
-                .any(|s| matches!(s.state, StepState::IntentDurable | StepState::Unresolved));
+            let (current_state, _) = operation_header(tx, op)?;
+            let (unfinished, unresolved): (bool, bool) = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM steps WHERE operation_id=?1 AND state IN ('Planned','IntentDurable','Unresolved')), EXISTS(SELECT 1 FROM steps WHERE operation_id=?1 AND state IN ('Planned','IntentDurable','Unresolved') AND state!='Planned')",
+                [op.to_string()], |r| Ok((r.get(0)?,r.get(1)?))
+            ).map_err(sql_error)?;
             let transition = matches!(
-                (record.state, state),
+                (current_state, state),
                 (
                     OperationState::Prepared,
                     OperationState::Cancelled
@@ -334,7 +327,7 @@ impl Journal {
             if !transition
                 || (unresolved && state != OperationState::RecoveryRequired)
                 || (state == OperationState::Completed
-                    && record.steps.iter().any(|s| !finished(s.state)))
+                    && unfinished)
             {
                 return Err(invalid("invalid operation state transition"));
             }
@@ -349,11 +342,11 @@ impl Journal {
     /// Persist an inconclusive reconciliation without granting permission to retry.
     pub fn mark_unresolved(&mut self, op: OperationId, step: StepId) -> Result<(), OpError> {
         self.write(Some(op), Some(step), |tx| {
-            let record = load_operation(tx, op)?;
-            if !record.steps.iter().any(|s| {
-                s.step.id == step
-                    && matches!(s.state, StepState::IntentDurable | StepState::Unresolved)
-            }) {
+            let current = load_current_step(tx, op, step)?;
+            if !matches!(
+                current.state,
+                StepState::IntentDurable | StepState::Unresolved
+            ) {
                 return Err(invalid("only a durable action gap can become unresolved"));
             }
             tx.execute(
@@ -445,6 +438,91 @@ fn commit(tx: Transaction<'_>) -> Result<(), OpError> {
 }
 #[cfg(test)]
 thread_local! { static FAIL_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Bounded effect context. Large inspection snapshots are accessed only by
+/// load_operation for explicit history/recovery reads.
+struct CurrentStep {
+    step: ExecutionStep,
+    state: StepState,
+}
+type Prerequisites = std::collections::BTreeMap<StepId, StepReceipt>;
+fn operation_header(
+    connection: &Connection,
+    op: OperationId,
+) -> Result<(OperationState, PlanRef), OpError> {
+    // Read the compact covering index rather than traversing overflow pages in
+    // the operation row to reach a column after its large inspection payload.
+    let (state, plan): (String, String) = connection
+        .query_row(
+            "SELECT state,approved_plan FROM operations INDEXED BY operation_effect_header WHERE id=?1",
+            [op.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| missing_or_sql(e, "unknown operation"))?;
+    Ok((from_json(&format!("\"{state}\""))?, from_json(&plan)?))
+}
+fn current_step(row: (String, String)) -> Result<CurrentStep, OpError> {
+    Ok(CurrentStep {
+        state: from_json(&format!("\"{}\"", row.0))?,
+        step: from_json::<schema::StoredStep>(&row.1)?.into(),
+    })
+}
+fn load_next_step(connection: &Connection, op: OperationId) -> Result<CurrentStep, OpError> {
+    let row = connection.query_row("SELECT state,compiled FROM steps WHERE operation_id=?1 AND state IN ('Planned','IntentDurable','Unresolved') ORDER BY sequence LIMIT 1", [op.to_string()], |r| Ok((r.get(0)?,r.get(1)?))).map_err(|e| missing_or_sql(e,"operation has no remaining steps"))?;
+    current_step(row)
+}
+fn load_current_step(
+    connection: &Connection,
+    op: OperationId,
+    step: StepId,
+) -> Result<CurrentStep, OpError> {
+    let row = connection
+        .query_row(
+            "SELECT state,compiled FROM steps WHERE operation_id=?1 AND id=?2",
+            params![op.to_string(), step.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| missing_or_sql(e, "unknown step"))?;
+    current_step(row)
+}
+fn missing_or_sql(error: rusqlite::Error, message: &str) -> OpError {
+    if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+        invalid(message)
+    } else {
+        sql_error(error)
+    }
+}
+fn load_prerequisites(
+    connection: &Connection,
+    op: OperationId,
+    step: &ExecutionStep,
+) -> Result<Prerequisites, OpError> {
+    let mut ids = std::collections::BTreeSet::new();
+    if let Some(EntryPrestate {
+        identity: ExpectedIdentity::FromReceipt { step_id },
+        ..
+    }) = schema::source(&step.action)
+    {
+        ids.insert(*step_id);
+    }
+    if let Some(owned) = schema::owned(&step.action) {
+        ids.insert(owned.created_by);
+    }
+    match &step.action {
+        ExecutionAction::PublishCopy { verified_by, .. } => {
+            ids.insert(*verified_by);
+        }
+        ExecutionAction::RemoveSource { published_by, .. } => {
+            ids.insert(*published_by);
+        }
+        _ => {}
+    }
+    let mut prerequisites = Prerequisites::new();
+    for id in ids {
+        let payload: String = connection.query_row("SELECT r.payload FROM receipts r JOIN steps s ON s.operation_id=r.operation_id AND s.id=r.step_id WHERE r.operation_id=?1 AND r.step_id=?2 AND s.state IN ('CompletionDurable','Compensated')", params![op.to_string(),id.to_string()], |r| r.get(0)).map_err(|e| if matches!(e,rusqlite::Error::QueryReturnedNoRows) { recovery("required durable receipt is missing; reconcile by identity") } else { sql_error(e) })?;
+        prerequisites.insert(id, from_json::<schema::StoredReceipt>(&payload)?.0);
+    }
+    Ok(prerequisites)
+}
 fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationRecord, OpError> {
     let (state, inspection, groups): (String, String, String) = connection
         .query_row(
@@ -507,16 +585,17 @@ fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationR
         groups: from_json(&groups)?,
     })
 }
-fn finished(state: StepState) -> bool {
-    matches!(state, StepState::CompletionDurable | StepState::Compensated)
-}
 fn state_name(state: OperationState) -> Result<String, OpError> {
     from_json_value(serde_json::to_value(state).map_err(|e| recovery(e.to_string()))?)
 }
 fn json(value: &impl Serialize) -> Result<String, OpError> {
     serde_json::to_string(value).map_err(|e| recovery(e.to_string()))
 }
+#[cfg(test)]
+thread_local! { static DECODED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 fn from_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, OpError> {
+    #[cfg(test)]
+    DECODED_BYTES.with(|count| count.set(count.get() + s.len()));
     serde_json::from_str(s).map_err(|e| recovery(format!("invalid journal record: {e}")))
 }
 fn from_json_value<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<T, OpError> {
@@ -558,17 +637,14 @@ fn event_kind(phase: CompletedPhase) -> EventKind {
     }
 }
 
-fn earlier_receipt(record: &OperationRecord, id: StepId) -> Result<&StepReceipt, OpError> {
+fn earlier_receipt(record: &Prerequisites, id: StepId) -> Result<&StepReceipt, OpError> {
     record
-        .steps
-        .iter()
-        .find(|s| s.step.id == id && finished(s.state))
-        .and_then(|s| s.receipts.first())
+        .get(&id)
         .ok_or_else(|| recovery("required durable receipt is missing; reconcile by identity"))
 }
 fn resolved_stamp<'a>(
     entry: &'a EntryPrestate,
-    record: &'a OperationRecord,
+    record: &'a Prerequisites,
 ) -> Result<&'a FileStamp, OpError> {
     let stamp = match &entry.identity {
         ExpectedIdentity::Observed(stamp) => stamp,
@@ -589,7 +665,7 @@ fn resolved_stamp<'a>(
     }
     Ok(stamp)
 }
-fn validate_resolved_inputs(step: &ExecutionStep, record: &OperationRecord) -> Result<(), OpError> {
+fn validate_resolved_inputs(step: &ExecutionStep, record: &Prerequisites) -> Result<(), OpError> {
     if let Some(entry) = schema::source(&step.action) {
         resolved_stamp(entry, record)?;
     }
@@ -629,7 +705,7 @@ fn valid_digest(digest: Option<&ContentDigest>) -> bool {
 fn validate_receipt(
     step: &ExecutionStep,
     receipt: &StepReceipt,
-    record: &OperationRecord,
+    record: &Prerequisites,
 ) -> Result<(), OpError> {
     validate_resolved_inputs(step, record)?;
     if schema::phase(&step.action) != receipt.phase {
@@ -751,6 +827,186 @@ mod tests {
         assert_eq!(
             journal.write(None, None, |_| Ok(())).unwrap_err().code,
             ErrorCode::RecoveryRequired
+        );
+    }
+    // Real persisted v1 evidence, including a large inspection-only snapshot.
+    // It exercises migrations as well as the public intent/completion boundary.
+    fn measured_execution(count: usize, padding: usize) -> (u64, usize, u64) {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operations.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(schema::SQL).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations VALUES(1,?1)",
+                [format!("{:x}", md5::compute(schema::SQL))],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        let op = OperationId::new();
+        let group = GroupId::new();
+        let approved = PlanRef {
+            session_id: SessionId::new(),
+            plan_id: PlanId::new(),
+            revision: u64::MAX,
+        };
+        let inspection =
+            serde_json::json!({"approved_plan":approved, "inventory_notes":"x".repeat(padding)});
+        connection.execute("INSERT INTO operations(id,state,inspection,groups_json) VALUES(?1,'Prepared',?2,'[]')", params![op.to_string(),json(&inspection).unwrap()]).unwrap();
+        let mut steps = Vec::new();
+        for sequence in 0..count {
+            let step = ExecutionStep {
+                id: StepId::new(),
+                entry_id: EntryId::new(),
+                group_id: group,
+                action: ExecutionAction::CreateDirectory {
+                    target: dir.path().join(sequence.to_string()),
+                },
+            };
+            connection.execute("INSERT INTO steps(operation_id,id,group_id,sequence,state,compiled) VALUES(?1,?2,?3,?4,'Planned',?5)", params![op.to_string(),step.id.to_string(),group.to_string(),sequence as i64,json(&schema::StoredStep::from(&step)).unwrap()]).unwrap();
+            steps.push(step);
+        }
+        drop(connection);
+        let mut journal = Journal::open(&path).unwrap();
+        let work = Arc::new(AtomicU64::new(0));
+        let counter = work.clone();
+        journal
+            .connection
+            .progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+        let operation_writes = Arc::new(AtomicU64::new(0));
+        let updates = operation_writes.clone();
+        journal
+            .connection
+            .update_hook(Some(
+                move |action: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+                    if action == rusqlite::hooks::Action::SQLITE_UPDATE && table == "operations" {
+                        updates.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+            ))
+            .unwrap();
+        DECODED_BYTES.with(|bytes| bytes.set(0));
+        for step in &steps {
+            journal.intent(op, step).unwrap();
+            let receipt = StepReceipt {
+                step_id: step.id,
+                phase: CompletedPhase::DirectoryCreated,
+                before_path: None,
+                after_path: schema::output(&step.action).map(vidlib_inventory::encode_path),
+                before: None,
+                after: Some(FileStamp {
+                    physical_id: Some(vidlib_inventory::PhysicalId {
+                        platform: if cfg!(windows) {
+                            vidlib_inventory::PathPlatform::WindowsUtf16Le
+                        } else {
+                            vidlib_inventory::PathPlatform::UnixBytes
+                        },
+                        volume_identity: vec![1],
+                        file_identity: step.id.to_string().into_bytes(),
+                    }),
+                    ..Default::default()
+                }),
+                digest: None,
+                observed_ns: 42,
+                durability: Durability::Synced,
+            };
+            journal.complete(op, &receipt).unwrap();
+        }
+        let work = work.load(Ordering::Relaxed);
+        let bytes = DECODED_BYTES.with(|count| count.get());
+        assert_eq!(journal.events_after(0, 200).unwrap().items.len(), count);
+        assert_eq!(journal.operation(op).unwrap().inspection, inspection);
+        (work, bytes, operation_writes.load(Ordering::Relaxed))
+    }
+    // Counting SQLite VM instructions catches N receipt SELECTs and unindexed
+    // scans per effect without relying on disk or wall-clock speed.
+    #[test]
+    fn effect_work_growth_is_bounded_as_batch_size_rises() {
+        let small = measured_execution(16, 0);
+        let large = measured_execution(64, 0);
+        eprintln!("16 steps: {small:?}; 64 steps: {large:?}");
+        assert!(large.0 <= small.0 * 4 + 1024, "SQLite work grew faster than the 4x batch with index allowance: small={small:?}, large={large:?}");
+        assert!(
+            large.1 <= small.1 * 4 + 4096,
+            "decoded JSON grew faster than batch size: small={small:?}, large={large:?}"
+        );
+    }
+    // Inspection size must not affect per-effect JSON decoding. History still
+    // reconstructs it explicitly after measurement.
+    #[test]
+    fn effect_reads_do_not_decode_inspection_snapshots() {
+        let small = measured_execution(16, 0);
+        let large = measured_execution(16, 262144);
+        eprintln!("empty inspection: {small:?}; padded inspection: {large:?}");
+        assert!(
+            large.1 <= small.1 + 1024,
+            "effect path decoded inspection-only payload: small={small:?}, large={large:?}"
+        );
+    }
+
+    // An already-Running operation's large inspection row must not be rebuilt
+    // by a redundant state UPDATE for every subsequent effect.
+    #[test]
+    fn effect_writes_operation_header_only_on_state_change() {
+        let counts = measured_execution(16, 262144);
+        assert_eq!(
+            counts.2, 1,
+            "only Prepared -> Running should update the operation row"
+        );
+    }
+    // A malformed legacy reference must roll back both schema and extracted
+    // provenance, retaining the original evidence for diagnosis/recovery.
+    #[test]
+    fn failed_v1_header_migration_retains_original_schema_and_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operations.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(schema::SQL).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations VALUES(1,?1)",
+                [format!("{:x}", md5::compute(schema::SQL))],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection.execute("INSERT INTO operations(id,state,inspection,groups_json) VALUES('legacy','Prepared',?1,'[]')",[r#"{"approved_plan":{},"inventory_notes":"retain original evidence"}"#]).unwrap();
+        drop(connection);
+        assert!(Journal::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(connection.query_row("SELECT count(*) FROM pragma_table_info('operations') WHERE name='approved_plan'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT inspection FROM operations WHERE id='legacy'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            r#"{"approved_plan":{},"inventory_notes":"retain original evidence"}"#
         );
     }
 }
