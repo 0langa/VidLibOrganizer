@@ -2,7 +2,9 @@
 
 Status: DONE. Review base: `eb026edfaf31384fa378da4ae7efddb5c8542557`.
 
-Implementation commit: `16c5def19586638df38153606e39b4d39d12abaf` — `feat: persist operation intents receipts and outbox events`.
+Initial implementation commit: `16c5def19586638df38153606e39b4d39d12abaf` — `feat: persist operation intents receipts and outbox events`.
+
+Review round 1 fix: `16fdb4b2fbb35658caa7891a8959346847a93c48` — `perf: bound journal work per execution step`; fix base `3f589ec`. The current schema and hot path below include this correction; original red/green evidence is retained, and covering fix evidence is appended.
 
 ## Delivered scope
 
@@ -56,7 +58,9 @@ No Serialize/Deserialize was added to execution authority. The journal uses priv
 
 ## Persistence and failure invariants
 
-Schema tables: `schema_migrations`, `operations`, `steps`, `receipts`, `operation_events`, `outbox_ack`, `history_visibility`. The current schema is version 1; initialization from an empty version-0 database is transactional. Version/checksum/table checks reject unknown or inconsistent schemas before persistent PRAGMA changes. Original unknown/malformed fixture bytes are preserved. No existing supported schema upgrade is needed at v1; the requested backup feature is enabled for future checked upgrades.
+Schema tables: `schema_migrations`, `operations`, `steps`, `receipts`, `operation_events`, `outbox_ack`, `history_visibility`. The current schema is version 2. The v1 SQL/checksum remains immutable. A checked BEGIN IMMEDIATE migration adds the separately persisted approved PlanRef, a compact covering operation-header index and a partial index over unfinished steps; it extracts and validates legacy PlanRefs once, then commits the v2 migration row and user_version together. Initialization from an empty database passes through both versions in the same transaction. Version/checksum/table checks reject unknown or inconsistent schemas before persistent PRAGMA changes. Original unknown/malformed fixture bytes remain preserved; a failed known-v1 migration rolls back the schema, version and evidence rows. The requested backup feature remains enabled.
+
+Intent/completion now read only the compact indexed operation header, next unfinished/current compiled step, and deduplicated prerequisite receipts referenced by that action. The covering header index avoids traversing overflow pages belonging to the inspection snapshot. Intent updates the operation row only for Prepared -> Running, avoiding repeated reconstruction of that large row. State changes/unresolved marking also use targeted reads. Only explicit `pending()`/`operation()` history/recovery reads reconstruct whole operations.
 
 Writer and reader connections set and verify WAL, synchronous=FULL, foreign_keys=ON and busy_timeout=5000 ms. Migration and journal writes use BEGIN IMMEDIATE and explicit commit. A receipt, its completed step state, and its outbox event commit together. A failed statement or COMMIT rolls back the complete transaction. Busy/commit failures poison that writer handle so the next intent is rejected; the previous durable Prepared/Running/IntentDurable evidence remains visible to the startup recovery gate. The commit fixture hook is private, cfg(test), thread-local and one-shot; it is absent from production/IPC.
 
@@ -93,7 +97,7 @@ Test break descriptions were written in comments before their test bodies. Initi
 
 The actual-COMMIT failure test installs a deferred foreign-key violation triggered by event insertion: receipt/event INSERTs succeed, COMMIT fails, both are absent after rollback, and the next step remains Planned. A separate event INSERT-abort test proves rollback before COMMIT too. SQLITE_BUSY uses a second real connection holding BEGIN IMMEDIATE. Unknown-schema and invalid-checksum fixtures compare original file bytes after rejected open. Native path fixtures include non-UTF8 Unix bytes (and unpaired Windows UTF16 in the Windows build), u64::MAX sizes/revisions and i128::MIN/MAX timestamps.
 
-## Final validation
+## Initial implementation validation (before review round 1)
 
 Only one broad portable workspace run was performed, after implementation and self-review corrections:
 
@@ -109,6 +113,64 @@ Only one broad portable workspace run was performed, after implementation and se
 
 Read the complete implementation/model diff, receipt/state boundaries, migration code, tests and lockfile. Corrected transitive group dependency deduplication, restricted compensation ownership to its group, supplied known EntryId error context, and added the durable Unresolved transition with named red/green evidence. Strengthened fixtures to distinguish copy/source native identities, persist metadata change parameters, and prove a mixed known/unknown acknowledgment batch rolls back without losing events. The full action family and persistence semantics are covered through the real journal consumer; existing Rename contract tests remain green without trivial model-construction tests.
 
-The implementation adds no media effects, executable imports, UI recovery authority, coordinator or epoch-store mutation. Task05 still owns absolute app-local placement/local-filesystem validation, cross-instance coordination, startup pending gate and persisted namespace/policy epoch. Task07 owns actual effects and must stop when intent/receipt fails. Task08 owns filesystem reconciliation; this journal retains missing action/receipt evidence and refuses blind retries rather than attempting that reconciliation. No full Rename/Blueprint release claim is made.
+The implementation adds no media effects, executable imports, UI recovery authority, coordinator or epoch-store mutation. Task05 still owns absolute app-local placement/local-filesystem validation, cross-instance coordination, startup pending gate and persisted namespace/policy epoch. Task07 owns actual effects and must stop when intent/receipt fails. Task08 owns filesystem reconciliation and the controller-defined versioned non-application audit/reset with fresh Recovery-lease proof and no fabricated completion. Task19 owns splitting staging creation/streaming into individually journaled phases/steps with durable creation identity before streaming. The present combined StageCopy is not claimed to be partial-copy recovery ready. This journal retains missing action/receipt evidence and refuses blind retries rather than implementing those later protocols. No full Rename/Blueprint release claim is made.
 
 Windows evidence is compile-only. Windows runtime, MSVC packaging, NTFS/exFAT/share behavior, Explorer/property/helper execution remain pending. The portable workspace run excludes `vidlib-tauri` exactly as instructed because the known missing PNG baseline is owned by Task05. No new unexplained test failure remains.
+
+
+## Review round 1 — bounded per-effect journal work
+
+Finding addressed: **“Every effect performs whole-operation reconstruction inside both write transactions, making execution quadratic in batch size.”** Review source: `/workspace/scratch/task04-review.md`. Fix base: `3f589ec`; implementation commit: `16fdb4b2fbb35658caa7891a8959346847a93c48`.
+
+Changes:
+
+- Removed `load_operation` from all mutation paths. Intent gets the indexed next unfinished step and compares it to the immutable supplied step. Completion gets only its exact `(operation_id, step_id)` row. The existing phase, identity, ownership, receipt-state, ordering and transaction checks still run.
+- Loads the action's bounded set of unique receipt references using compound keys scoped to the same operation, including receipt-producing step state checks. It does not load unrelated receipts or inspection inventory.
+- Stores approved PlanRef independently in v2 and reads it through `operation_effect_header`, a covering index containing only ID/state/PlanRef. This prevents a large inspection column from affecting header reads even through SQLite overflow pages.
+- `unfinished_steps` is a partial ordered index over Planned/IntentDurable/Unresolved steps, so finding the next step does not scan the completed prefix.
+- A Running operation is no longer redundantly updated on each intent. Prepared -> Running is the one normal execution transition; terminal/failure transitions remain explicit.
+- The v1 -> v2 migration preserves the original v1 SQL/checksum, copies and validates legacy approved references once, and commits schema/metadata changes atomically. Failure retains original evidence, schema and version. Full reconstruction remains available for explicit history/recovery reads.
+- Added test-only rusqlite hooks as a dev dependency feature and private cfg(test) JSON decode accounting. No production counter, public testing switch or IPC option was added. No Cargo.lock package changes were needed.
+
+Covering test files:
+
+- `crates/vidlib-fileops/src/journal/mod.rs` private unit fixtures: deterministic SQLite VM instruction counts, JSON bytes decoded, operation-row update counts, migration rollback/evidence retention, existing PRAGMA/commit-failure tests. All use real temporary SQLite files. The performance fixture starts with actual v1 schema/evidence, opens/migrates it, executes public journal effects, then confirms explicit history still reconstructs the inspection snapshot.
+- `crates/vidlib-fileops/tests/journal.rs`: adds `many_steps_keep_exact_provenance_and_order_after_reopen`, with a large inspection snapshot, 24 effects, duplicate step IDs in a different operation, rejection of out-of-order requests, and exact approved PlanRef preservation. The full existing journal integration binary covers every pre-existing state/identity/reference/commit invariant.
+
+RED, before changing the hot path:
+
+```sh
+cargo test -p vidlib-fileops --lib journal::tests::effect_ -- --nocapture
+```
+
+`/workspace/scratch/task04-fix1-red.log`: **0 passed, 2 failed**. `effect_work_growth_is_bounded_as_batch_size_rises` observed 16-step work `(15739 VM instructions, 293113 decoded bytes)` versus 64-step work `(188923, 4745149)`, exceeding the bounded-growth assertion. `effect_reads_do_not_decode_inspection_snapshots` observed `(15739, 294537)` for empty padding versus `(15739, 8682571)` for 256 KiB inspection padding, exceeding the decode bound. These are measured work/byte counts, not wall-clock thresholds.
+
+The first indexed implementation passed both tests (`/workspace/scratch/task04-fix1-green-attempt.log`). Self-review then identified a remaining redundant Running -> Running operation-row update, which would still rebuild the row containing the large inspection snapshot. Added a specific regression before fixing it:
+
+```sh
+cargo test -p vidlib-fileops --lib journal::tests::effect_writes_operation_header_only_on_state_change
+```
+
+`/workspace/scratch/task04-fix1-write-red.log`: **0 passed, 1 failed**, expected one operation-row update but observed **16**. Fixed by updating only the Prepared state; added the covering header index so scalar reads do not access inspection overflow pages.
+
+Final GREEN/verification for this fix, using the same Cargo environment as the initial report:
+
+```sh
+cargo test -p vidlib-fileops --lib journal::tests -- --nocapture
+cargo test -p vidlib-fileops --test journal
+cargo clippy -p vidlib-fileops --all-targets -- -D warnings
+cargo fmt -p vidlib-fileops -- --check
+git diff --check
+```
+
+Results:
+
+- `/workspace/scratch/task04-fix1-unit-final.log`: **6 passed, 0 failed**, 8 unrelated unit tests filtered. Actual output: 16 steps `(5849 VM instructions, 14021 decoded bytes, 1 operation update)`; 64 steps `(23225, 56133, 1)`. Four times the batch now produces approximately four times the work. The regression permits only `4 * small + 1024` VM instructions and `4 * small + 4096` decoded bytes. Empty versus 256 KiB padded inspection measured `(5849, 13957, 1)` and `(5849, 14085, 1)`; small native/UUID encoding differences are covered by a 1024-byte allowance, while the snapshot is absent from the effect decode path.
+- `/workspace/scratch/task04-fix1-integration-final.log`: **19 passed, 0 failed**, 5.02s, including the real SQLITE_BUSY/deferred-COMMIT/atomic-outbox fixtures.
+- `/workspace/scratch/task04-fix1-clippy-final.log`: **passed**, no warnings.
+- `/workspace/scratch/task04-fix1-fmt-final.log`: **passed**, no output.
+- `git diff --check`: **passed**.
+
+Self-review confirmed `load_operation` is now called only by explicit `pending()`/`operation()` reads; state and receipt checks remain inside BEGIN IMMEDIATE; no transaction boundary or public authority was broadened. The new test hooks are dev/cfg(test) only. The immutable v1 checksum is preserved, successful legacy migration is exercised by the performance fixtures, and the failure fixture proves no partial v2 migration is committed.
+
+No broad portable suite or Windows-target compile was repeated for this focused review correction. The earlier 126-test/Windows compile evidence remains historical to the initial implementation; the current correction is covered by the 25 journal tests and scoped checks above. Windows runtime, Task05 placement/coordination/epochs, Task08 non-application reconciliation and Task19 staging phase work remain as stated limitations, with no new release claim.
