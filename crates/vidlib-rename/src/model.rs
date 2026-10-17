@@ -225,24 +225,72 @@ pub struct ExecutionGroup {
     pub depends_on: Vec<GroupId>,
     pub steps: Vec<ExecutionStep>,
 }
-#[derive(Clone, Debug)]
+/// Backend-only compiled effect. Every target of a creating/moving action must
+/// be absent; no action permits replacement. Graph order owns temporary names.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionStep {
     pub id: StepId,
     pub entry_id: EntryId,
     pub group_id: GroupId,
-    pub source_path: PathBuf,
-    pub target_path: PathBuf,
-    pub expected_source: FileStamp,
     pub action: ExecutionAction,
+}
+/// An identity observed during planning, or the exact poststate of an earlier
+/// durable receipt. A missing receipt is unresolved, never authority to retry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpectedIdentity {
+    Observed(FileStamp),
+    FromReceipt { step_id: StepId },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryPrestate {
+    pub path: PathBuf,
+    pub identity: ExpectedIdentity,
+}
+/// Creation ownership is separate from identity: matching an arbitrary observed
+/// object does not authorize compensation. `created_by` names this operation's
+/// earlier creation receipt, whose physical identity must match `entry`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedEntryPrestate {
+    pub entry: EntryPrestate,
+    pub created_by: StepId,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExecutionAction {
-    RenameNoReplace,
-    CreateDirectory,
-    CopyNoReplace,
-    VerifyCopy,
-    RemoveVerifiedSource,
-    SetMetadata { changes: Vec<MetadataChange> },
+    RenameEntry {
+        source: EntryPrestate,
+        target: PathBuf,
+        /// Logical reservation belonging to this step/group, materialized only
+        /// by the no-replace rename (never by an empty placeholder).
+        temporary: bool,
+    },
+    CreateDirectory {
+        target: PathBuf,
+    },
+    /// Create-new staging and verified copying; the receipt records new native
+    /// identity plus verified digest. Publication is a separate effect.
+    StageCopy {
+        source: EntryPrestate,
+        staging: PathBuf,
+    },
+    PublishCopy {
+        staging: OwnedEntryPrestate,
+        target: PathBuf,
+        verified_by: StepId,
+    },
+    RemoveSource {
+        source: EntryPrestate,
+        published_by: StepId,
+    },
+    SetMetadata {
+        entry: EntryPrestate,
+        changes: Vec<MetadataChange>,
+    },
+    RemoveOwnedCopy {
+        owned: OwnedEntryPrestate,
+    },
+    RemoveOwnedEmptyDirectory {
+        owned: OwnedEntryPrestate,
+    },
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanCounts {

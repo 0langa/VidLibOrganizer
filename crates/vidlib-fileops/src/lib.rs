@@ -1,4 +1,6 @@
 pub mod error;
+pub mod events;
+pub mod journal;
 pub mod platform;
 pub use error::{ErrorCode, OpError, Phase};
 pub use platform::{Filesystem, PlatformFs};

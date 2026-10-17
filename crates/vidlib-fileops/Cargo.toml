@@ -9,6 +9,9 @@ vidlib-engine = { path = "../vidlib-engine" }
 serde = { version = "1.0", features = ["derive"] }
 md5 = "0.8"
 vidlib-inventory = { path = "../vidlib-inventory" }
+vidlib-rename = { path = "../vidlib-rename" }
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+serde_json = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }
