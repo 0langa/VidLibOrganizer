@@ -283,7 +283,7 @@ impl Scanner<'_> {
         directory: &Path,
         opened: io::Result<Box<dyn InventoryDirectory + '_>>,
         expected: &FileObservation,
-        ancestors: &[(PathBuf, PhysicalId)],
+        ancestors: &[(PathBuf, Option<PhysicalId>)],
     ) -> bool {
         if let Some(index) = self.seen_directories.get(directory) {
             return self.coverage[*index].subtree_complete;
@@ -319,24 +319,40 @@ impl Scanner<'_> {
                 return false;
             }
         };
-        let identity = handle
-            .observation()
-            .ok()
-            .filter(|observed| observed.kind == EntryKind::Directory)
-            .and_then(|observed| observed.stamp.physical_id)
-            .filter(|identity| Some(identity) == expected.stamp.physical_id.as_ref());
-        let Some(identity) = identity else {
-            self.finish_scope(
-                index,
-                false,
-                CoverageOutcome::Failed,
-                vec![issue(
-                    IssueCode::DirectoryChanged,
-                    relative(directory, base),
-                    "cannot keep directory identity consistent between stat and open",
-                )],
-            );
-            return false;
+        let observed = match handle.observation() {
+            Ok(observed) if observed.kind == EntryKind::Directory => observed,
+            _ => {
+                self.finish_scope(
+                    index,
+                    false,
+                    CoverageOutcome::Failed,
+                    vec![issue(
+                        IssueCode::DirectoryChanged,
+                        relative(directory, base),
+                        "invalid or non-directory retained handle",
+                    )],
+                );
+                return false;
+            }
+        };
+        let identity = match (&expected.stamp.physical_id, observed.stamp.physical_id) {
+            (Some(expected), Some(observed)) if expected != &observed => {
+                self.finish_scope(
+                    index,
+                    false,
+                    CoverageOutcome::Failed,
+                    vec![issue(
+                        IssueCode::DirectoryChanged,
+                        relative(directory, base),
+                        "directory identity changed between stat and open",
+                    )],
+                );
+                return false;
+            }
+            (Some(_), Some(observed)) => Some(observed),
+            // A valid handle still anchors child operations. Missing optional
+            // identity prevents complete coverage, not safe read-only observations.
+            _ => None,
         };
         let mut anchors = ancestors.to_vec();
         anchors.push((directory.to_path_buf(), identity));
@@ -377,12 +393,17 @@ impl Scanner<'_> {
             .map(|name| encode_path(Path::new(name)))
             .collect();
         self.coverage[index].children_complete = listing.errors.is_empty();
-        let mut complete = listing.errors.is_empty();
+        let identity_available = anchors.iter().all(|(_, identity)| identity.is_some());
+        let mut complete = listing.errors.is_empty() && identity_available;
         let mut issues: Vec<_> = listing
             .errors
             .into_iter()
             .map(|error| issue(IssueCode::ListingFailed, relative(directory, base), error))
             .collect();
+        if !identity_available {
+            issues.push(issue(IssueCode::IdentityUnavailable, relative(directory, base),
+                "optional directory or ancestor identity unavailable; safe handle observations retained with incomplete coverage"));
+        }
         for name in listing.names {
             if self.control.is_cancelled() {
                 complete = false;
@@ -455,10 +476,12 @@ impl Scanner<'_> {
         self.finish_scope(index, complete, outcome, issues);
         complete
     }
-    fn anchors_current(&self, anchors: &[(PathBuf, PhysicalId)]) -> bool {
-        anchors
-            .iter()
-            .all(|(path, identity)| self.fs.directory_is_current(path, identity))
+    fn anchors_current(&self, anchors: &[(PathBuf, Option<PhysicalId>)]) -> bool {
+        anchors.iter().all(|(path, identity)| {
+            identity
+                .as_ref()
+                .is_none_or(|identity| self.fs.directory_is_current(path, identity))
+        })
     }
     fn finish_scope(
         &mut self,

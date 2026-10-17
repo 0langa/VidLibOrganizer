@@ -529,3 +529,63 @@ fn failed_binding_observation_drops_previously_matched_evidence() {
     assert_eq!(binding.evidence.state, RootEvidenceState::Unavailable);
     assert!(binding.evidence.observed_identity.is_none());
 }
+
+#[test]
+fn unavailable_directory_identity_preserves_safe_entries_with_incomplete_coverage() {
+    use vidlib_inventory::{InventoryFs, RootEvidenceState};
+    let fixture = Fixture::new();
+    for (omit_root_identity, omit_handle_identity) in [(true, false), (false, true), (true, true)] {
+        let mut adapter = FaultFs::new(JobControl::default());
+        adapter.omit_root_identity = omit_root_identity;
+        adapter.omit_handle_identity = omit_handle_identity;
+        let mut request = fixture.request();
+        let metadata = fs::symlink_metadata(fixture.root()).unwrap();
+        request.roots[0].evidence.expected_identity =
+            vidlib_inventory::OsInventoryFs.physical_id(fixture.root(), &metadata);
+        let inventory =
+            vidlib_inventory::scan_with_fs(&request, &adapter.control, &adapter).unwrap();
+        assert_eq!(
+            inventory.entries.len(),
+            6,
+            "root missing={omit_root_identity}, handle missing={omit_handle_identity}"
+        );
+        assert!(inventory
+            .entries
+            .iter()
+            .any(|entry| entry.display_name == "c.mov"));
+        let scope = inventory
+            .coverage
+            .iter()
+            .find(|scope| scope.directory == fixture.root())
+            .unwrap();
+        assert_eq!(scope.listed_names.len(), 5);
+        assert!(scope.children_complete);
+        assert!(!scope.subtree_complete);
+        assert_eq!(scope.outcome, CoverageOutcome::Failed);
+        assert!(scope
+            .issues
+            .iter()
+            .any(|issue| issue.code == vidlib_inventory::IssueCode::IdentityUnavailable));
+        if omit_root_identity {
+            assert_eq!(
+                inventory.roots[0].evidence.state,
+                RootEvidenceState::Unavailable
+            );
+        }
+    }
+}
+
+#[test]
+fn mismatched_identity_or_invalid_directory_handle_still_rejects_traversal() {
+    let fixture = Fixture::new();
+    for invalid_kind in [false, true] {
+        let mut adapter = FaultFs::new(JobControl::default());
+        adapter.wrong_handle_identity = !invalid_kind;
+        adapter.invalid_directory_kind = invalid_kind;
+        let inventory = fault_scan(&fixture, &adapter);
+        assert!(inventory.entries.is_empty());
+        assert!(inventory.coverage[0].listed_names.is_empty());
+        assert!(!inventory.coverage[0].subtree_complete);
+        assert_eq!(inventory.coverage[0].outcome, CoverageOutcome::Failed);
+    }
+}

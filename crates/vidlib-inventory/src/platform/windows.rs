@@ -60,7 +60,7 @@ pub(crate) fn attributes(metadata: &Metadata) -> Option<u32> {
 fn observation(file: &File) -> io::Result<FileObservation> {
     let metadata = file.metadata()?;
     let kind = crate::scan::kind(&metadata);
-    let mut stamp = super::stamp(&metadata, Some(identity(file)?));
+    let mut stamp = super::stamp(&metadata, identity(file).ok());
     if kind != EntryKind::File {
         stamp.size = None;
     }

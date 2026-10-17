@@ -38,6 +38,10 @@ pub struct FaultFs {
     pub control: JobControl,
     pub stat_count: AtomicUsize,
     pub swap_after_listing: Option<(PathBuf, PathBuf, PathBuf)>,
+    pub omit_root_identity: bool,
+    pub omit_handle_identity: bool,
+    pub wrong_handle_identity: bool,
+    pub invalid_directory_kind: bool,
     swapped: AtomicBool,
 }
 impl FaultFs {
@@ -50,6 +54,10 @@ impl FaultFs {
             control,
             stat_count: AtomicUsize::new(0),
             swap_after_listing: None,
+            omit_root_identity: false,
+            omit_handle_identity: false,
+            wrong_handle_identity: false,
+            invalid_directory_kind: false,
             swapped: AtomicBool::new(false),
         }
     }
@@ -88,6 +96,17 @@ impl InventoryFs for FaultFs {
         self.before_stat(path)?;
         fs::symlink_metadata(path)
     }
+    fn physical_id(
+        &self,
+        path: &Path,
+        metadata: &fs::Metadata,
+    ) -> Option<vidlib_inventory::PhysicalId> {
+        if self.omit_root_identity {
+            None
+        } else {
+            vidlib_inventory::OsInventoryFs.physical_id(path, metadata)
+        }
+    }
     fn open_directory(
         &self,
         path: &Path,
@@ -106,7 +125,19 @@ struct FaultDirectory<'a> {
 }
 impl vidlib_inventory::InventoryDirectory for FaultDirectory<'_> {
     fn observation(&self) -> io::Result<vidlib_inventory::FileObservation> {
-        self.inner.observation()
+        let mut observed = self.inner.observation()?;
+        if self.adapter.omit_handle_identity {
+            observed.stamp.physical_id = None;
+        }
+        if self.adapter.wrong_handle_identity {
+            if let Some(identity) = &mut observed.stamp.physical_id {
+                identity.file_identity = vec![0];
+            }
+        }
+        if self.adapter.invalid_directory_kind {
+            observed.kind = vidlib_inventory::EntryKind::Other;
+        }
+        Ok(observed)
     }
     fn read_directory(&self) -> io::Result<DirectoryListing> {
         if self.adapter.fail_listing.as_deref() == Some(&self.path) {
@@ -121,7 +152,11 @@ impl vidlib_inventory::InventoryDirectory for FaultDirectory<'_> {
         name: &std::ffi::OsStr,
     ) -> io::Result<vidlib_inventory::FileObservation> {
         self.adapter.before_stat(&self.path.join(name))?;
-        self.inner.observe_child(name)
+        let mut observed = self.inner.observe_child(name)?;
+        if self.adapter.omit_handle_identity {
+            observed.stamp.physical_id = None;
+        }
+        Ok(observed)
     }
     fn open_child_directory(
         &self,

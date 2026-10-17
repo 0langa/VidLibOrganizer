@@ -41,6 +41,7 @@ pub enum IssueCode {
     ProtectedEntry,
     EvidenceMismatch,
     DirectoryChanged,
+    IdentityUnavailable,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryIssue {
