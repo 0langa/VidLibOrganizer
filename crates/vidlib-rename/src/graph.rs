@@ -30,6 +30,7 @@ pub fn plan(
         &evaluated.recipe.collision_policy,
     );
     validate_rows(inventory, &mut rows, &parents, namespace);
+    validate_carried_paths(inventory, &mut rows, namespace);
     let mut groups = Vec::new();
     if rows
         .iter()
@@ -150,20 +151,6 @@ fn refresh_row(row: &mut PlanRow) {
         };
     }
 }
-fn carried_path(path: &Path, rows: &[PlanRow], dirs: &BTreeSet<EntryId>) -> PathBuf {
-    rows.iter()
-        .filter(|r| {
-            dirs.contains(&r.entry_id) && path != r.source_path && path.starts_with(&r.source_path)
-        })
-        .max_by_key(|r| r.source_path.components().count())
-        .map_or_else(
-            || path.to_owned(),
-            |r| {
-                r.target_path
-                    .join(path.strip_prefix(&r.source_path).expect("prefix checked"))
-            },
-        )
-}
 fn resolve_collisions(
     inventory: &Inventory,
     rows: &mut [PlanRow],
@@ -188,7 +175,13 @@ fn resolve_collisions(
             .iter()
             .flat_map(|f| &f.entries)
             .filter(|e| !selected.contains(&e.absolute_path))
-            .map(|e| (carried_path(&e.absolute_path, rows, &dirs), None))
+            .map(|e| {
+                (
+                    carried_destination(&e.absolute_path, rows, &dirs)
+                        .map_or_else(|| e.absolute_path.clone(), |(_, path)| path),
+                    None,
+                )
+            })
             .collect();
         taken.extend(
             processed

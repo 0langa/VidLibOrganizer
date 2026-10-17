@@ -1104,3 +1104,108 @@ fn internal_temp_reservations_still_honor_marker_root_and_custom_policy() {
         .iter()
         .any(|issue| issue.message == "no legal temporary reservation available"));
 }
+
+// A directory's own target can fit while an unselected carried child's final
+// path exceeds the original child-parent policy. Approval must cover both.
+#[test]
+fn direct_directory_growth_validates_unselected_carried_child_path() {
+    let (inventory, mut batch, mut ns, version) = fixture(&[
+        ("old", EntryKind::Directory),
+        ("old/child", EntryKind::File),
+    ]);
+    batch.rows.truncate(1);
+    batch.recipe.selection.truncate(1);
+    batch.recipe.numbering_order.truncate(1);
+    batch.frozen_inputs.primary_order.truncate(1);
+    let native = encode_path(&path("old/child"));
+    ns.parents
+        .iter_mut()
+        .find(|facts| facts.parent_path == path("old"))
+        .unwrap()
+        .max_path_units = Some((native.bytes.len() / if cfg!(windows) { 2 } else { 1 }) as u64);
+    target(&mut batch, 0, "new");
+    assert_eq!(
+        plan(&inventory, &batch, &ns, version)
+            .unwrap()
+            .counts
+            .blocked,
+        0
+    );
+    target(&mut batch, 0, "longer");
+    let result = plan(&inventory, &batch, &ns, version).unwrap();
+    assert_eq!(result.counts.blocked, 1);
+    assert_eq!(result.rows[0].status, RowStatus::Blocked);
+    assert!(result.execution.groups.is_empty());
+    assert!(result
+        .issues
+        .iter()
+        .any(|issue| issue.entry_id == Some(batch.rows[0].entry_id)
+            && issue.code == RenameErrorCode::InvalidPath));
+}
+
+// Final suffixes can grow the inherited prefix even though the carried child
+// has no PlanRow and consumes no numbering ordinal.
+#[test]
+fn directory_suffix_growth_validates_unselected_carried_child_path() {
+    let (inventory, mut batch, mut ns, version) = fixture(&[
+        ("old", EntryKind::Directory),
+        ("old/child", EntryKind::File),
+        ("new", EntryKind::File),
+    ]);
+    batch.rows.truncate(1);
+    batch.recipe.selection.truncate(1);
+    batch.recipe.numbering_order.truncate(1);
+    batch.frozen_inputs.primary_order.truncate(1);
+    let native = encode_path(&path("new/child"));
+    ns.parents
+        .iter_mut()
+        .find(|facts| facts.parent_path == path("old"))
+        .unwrap()
+        .max_path_units = Some((native.bytes.len() / if cfg!(windows) { 2 } else { 1 }) as u64);
+    batch.recipe.collision_policy = CollisionPolicy::Suffix {
+        separator: "-".into(),
+        max_attempts: 2,
+    };
+    target(&mut batch, 0, "new");
+    let result = plan(&inventory, &batch, &ns, version).unwrap();
+    assert_eq!(result.rows[0].target_path, path("new-1"));
+    assert_eq!(result.counts.blocked, 1);
+    assert_eq!(result.rows[0].status, RowStatus::Blocked);
+    assert!(result.execution.groups.is_empty());
+}
+
+// Complete inventory coverage is not a substitute for captured native parent
+// identity and policy facts used to validate carried descendants' final paths.
+#[test]
+fn unavailable_carried_parent_facts_block_responsible_directory() {
+    for missing in 0..4 {
+        let (inventory, mut batch, mut ns, version) = fixture(&[
+            ("old", EntryKind::Directory),
+            ("old/child", EntryKind::File),
+        ]);
+        batch.rows.truncate(1);
+        batch.recipe.selection.truncate(1);
+        batch.recipe.numbering_order.truncate(1);
+        batch.frozen_inputs.primary_order.truncate(1);
+        target(&mut batch, 0, "new");
+        let parent = ns
+            .parents
+            .iter_mut()
+            .find(|facts| facts.parent_path == path("old"))
+            .unwrap();
+        match missing {
+            0 => ns.parents.retain(|facts| facts.parent_path != path("old")),
+            1 => parent.stamp.physical_id = None,
+            2 => parent.children_complete = false,
+            _ => parent.name_policy = NamePolicy::Unknown,
+        }
+        let result = plan(&inventory, &batch, &ns, version).unwrap();
+        assert_eq!(result.counts.blocked, 1, "unavailable fact case {missing}");
+        assert!(result.execution.groups.is_empty());
+        assert!(result
+            .issues
+            .iter()
+            .any(|issue| issue.entry_id == Some(batch.rows[0].entry_id)
+                && issue.code == RenameErrorCode::InvalidNamespace));
+    }
+}

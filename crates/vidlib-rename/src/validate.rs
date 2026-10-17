@@ -339,6 +339,94 @@ pub(crate) fn validate_rows(
     }
 }
 
+/// The nearest selected directory owns an unselected descendant's final location.
+/// Shared by collision occupancy and final carried-path validation so both use
+/// the same frozen directory targets after hierarchy resolution and suffixing.
+pub(crate) fn carried_destination(
+    path: &Path,
+    rows: &[PlanRow],
+    directories: &BTreeSet<EntryId>,
+) -> Option<(usize, PathBuf)> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            directories.contains(&row.entry_id)
+                && path != row.source_path
+                && path.starts_with(&row.source_path)
+        })
+        .max_by_key(|(_, row)| row.source_path.components().count())
+        .map(|(index, row)| {
+            (
+                index,
+                row.target_path
+                    .join(path.strip_prefix(&row.source_path).expect("prefix checked")),
+            )
+        })
+}
+
+/// Selected descendants have their own row/target-parent validation. Validate
+/// every other carried inventory entry under its original parent's observed
+/// identity and policy, after all directory destinations and suffixes are frozen.
+pub(crate) fn validate_carried_paths(
+    inventory: &Inventory,
+    rows: &mut [PlanRow],
+    ns: &NamespaceSnapshot,
+) {
+    let selected: BTreeSet<_> = rows.iter().map(|row| row.entry_id).collect();
+    let directories: BTreeSet<_> = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Directory)
+        .map(|entry| entry.id)
+        .collect();
+    for entry in inventory
+        .entries
+        .iter()
+        .filter(|entry| !selected.contains(&entry.id))
+    {
+        let Some((owner, final_path)) =
+            carried_destination(&entry.absolute_path, rows, &directories)
+        else {
+            continue;
+        };
+        if final_path == entry.absolute_path || rows[owner].status == RowStatus::Blocked {
+            continue;
+        }
+        let facts = ns
+            .parents
+            .iter()
+            .find(|facts| Some(facts.parent_path.as_path()) == entry.absolute_path.parent());
+        let Some(facts) = facts.filter(|facts| {
+            facts.stamp.physical_id.is_some()
+                && facts.children_complete
+                && facts.issues.is_empty()
+                && facts.name_policy != NamePolicy::Unknown
+                && facts.case_sensitivity != CaseSensitivity::Unknown
+                && facts.normalization == NameNormalization::Preserved
+        }) else {
+            issue(
+                &mut rows[owner],
+                RenameErrorCode::InvalidNamespace,
+                &format!(
+                    "original parent identity/name facts unavailable for carried entry {}",
+                    entry.id
+                ),
+            );
+            continue;
+        };
+        if facts.validate_path(&final_path).is_err() {
+            issue(
+                &mut rows[owner],
+                RenameErrorCode::InvalidPath,
+                &format!(
+                    "final path of carried entry {} violates its original parent policy",
+                    entry.id
+                ),
+            );
+        }
+    }
+}
+
 /// Pure preflight comparison; the executor supplies a fresh capture under its
 /// write lease, then enforces no-replace again at every native mutation.
 pub fn preflight(execution: &ExecutionPlan, fresh: &NamespaceSnapshot) -> Result<(), RenameError> {
