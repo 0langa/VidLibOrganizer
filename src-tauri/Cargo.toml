@@ -12,6 +12,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.12", features = [] }
 rfd = "0.16"
+vidlib-inventory = { path = "../crates/vidlib-inventory" }
+vidlib-rename = { path = "../crates/vidlib-rename" }
 vidlib-engine = { path = "../crates/vidlib-engine" }
 vidlib-fileops = { path = "../crates/vidlib-fileops" }
 

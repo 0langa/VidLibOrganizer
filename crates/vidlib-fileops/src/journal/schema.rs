@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 2;
+pub(super) const VERSION: i64 = 3;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -23,6 +23,13 @@ ALTER TABLE operations ADD COLUMN approved_plan TEXT NOT NULL DEFAULT '';
 UPDATE operations SET approved_plan = json_extract(inspection, '$.approved_plan');
 CREATE INDEX operation_effect_header ON operations(id,state,approved_plan);
 CREATE INDEX unfinished_steps ON steps(operation_id,sequence) WHERE state IN ('Planned','IntentDurable','Unresolved');
+"#;
+
+// Epochs stay in the operation store. Decimal text preserves the full u64 range.
+pub(super) const V3_SQL: &str = r#"
+CREATE TABLE coordination(singleton INTEGER PRIMARY KEY CHECK(singleton=1), namespace_epoch TEXT NOT NULL, policy_epoch TEXT NOT NULL, interrupted_write INTEGER NOT NULL CHECK(interrupted_write IN (0,1)));
+INSERT INTO coordination VALUES(1,'0','0',0);
+CREATE INDEX pending_operations ON operations(state) WHERE state IN ('Prepared','Running','RecoveryRequired');
 "#;
 
 #[derive(Serialize, Deserialize)]

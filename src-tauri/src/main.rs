@@ -1,23 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod app_state;
 mod jobs;
 mod preferences;
 
+use app_state::AppState;
 use jobs::{Jobs, Status};
 use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    path::Path,
+    sync::MutexGuard,
     time::{Duration, Instant},
 };
 use tauri::{Manager, State};
 use vidlib_engine::{ScanMode, ScanResult};
-use vidlib_fileops::{ActionReport, FileAction};
-
-struct AppState {
-    jobs: Arc<Mutex<Jobs>>,
-    preferences: PathBuf,
-    preferences_lock: Mutex<()>,
-}
+use vidlib_fileops::{ActionReport, ErrorCode, FileAction, OpError, Phase};
 
 fn lock_jobs(state: &AppState) -> Result<MutexGuard<'_, Jobs>, String> {
     state
@@ -52,15 +48,20 @@ fn start_scan(
     roots: Vec<String>,
     mode: ScanMode,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<String, OpError> {
     if roots.is_empty() || roots.iter().any(|root| root.trim().is_empty()) {
-        return Err("Choose at least one library folder to scan.".into());
+        return Err(OpError::new(
+            ErrorCode::InvalidPath,
+            Phase::Read,
+            "Choose at least one library folder to scan.",
+        ));
     }
-    let (id, cancel) = lock_jobs(&state)?.begin()?;
+    let (id, cancel, lease) = lock_jobs(&state).map_err(job_error)?.begin()?;
     let shared = state.jobs.clone();
     let spawned = std::thread::Builder::new()
         .name("video-scan".into())
         .spawn(move || {
+            let _lease = lease;
             let mut last_update = Instant::now();
             let mut phase = String::new();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -84,8 +85,10 @@ fn start_scan(
             }
         });
     if let Err(error) = spawned {
-        lock_jobs(&state)?.finish(Err(error.to_string()));
-        return Err(error.to_string());
+        lock_jobs(&state)
+            .map_err(job_error)?
+            .finish(Err(error.to_string()));
+        return Err(job_error(error.to_string()));
     }
     Ok(id)
 }
@@ -112,36 +115,18 @@ async fn apply_actions(
     action: FileAction,
     destination: Option<String>,
     state: State<'_, AppState>,
-) -> Result<ActionReport, String> {
-    let result = lock_jobs(&state)?.begin_action(&id)?;
+) -> Result<ActionReport, OpError> {
+    let (result, lease) = lock_jobs(&state).map_err(job_error)?.begin_action(&id)?;
     let shared = state.jobs.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vidlib_fileops::apply_actions(&result, &paths, action, destination.as_deref())
-        }))
-        .unwrap_or_else(|_| {
-            Err("The file operation stopped unexpectedly. Rescan before trying again.".into())
-        });
-        let completed = outcome
-            .as_ref()
-            .map(|report| report.completed.as_slice())
-            .unwrap_or_default();
+        let outcome = jobs::run_action(&lease, &result, &paths, action, destination.as_deref());
         if let Ok(mut jobs) = shared.lock() {
-            jobs.finish_action(completed);
-            match &outcome {
-                Ok(report) => {
-                    jobs.error = None;
-                    if let Some(result) = &mut jobs.result {
-                        result.issues.extend(report.issues.iter().cloned());
-                    }
-                }
-                Err(error) => jobs.error = Some(error.clone()),
-            }
+            jobs.finish_action_result(&outcome, &lease);
         }
         outcome
     })
     .await
-    .map_err(|error| format!("File operation failed: {error}"))?
+    .map_err(|error| job_error(format!("File operation failed: {error}")))?
 }
 
 #[tauri::command]
@@ -211,26 +196,27 @@ fn reveal_file(path: String, state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+fn job_error(message: String) -> OpError {
+    OpError::new(ErrorCode::Io, Phase::Read, message)
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let preferences = app.path().app_config_dir()?.join("libraries.json");
-            app.manage(AppState { jobs: Arc::new(Mutex::new(Jobs::default())), preferences, preferences_lock: Mutex::new(()) });
+            let app_data = app.path().app_local_data_dir()?;
+            app.manage(AppState::open(&app_data, preferences)?);
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                let acting = if let Ok(jobs) = state.jobs.lock() {
-                    if !jobs.acting { jobs.cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
-                    jobs.acting
-                } else { false };
-                    if acting {
-                        api.prevent_close();
-                        rfd::MessageDialog::new().set_title("File operation in progress")
-                            .set_description("Please wait for the current move or deletion to finish before closing VidLibOrganizer.")
-                            .set_level(rfd::MessageLevel::Info).show();
-                    }
+                if state.request_close() {
+                    api.prevent_close();
+                    rfd::MessageDialog::new().set_title("File operation in progress")
+                        .set_description("Please wait for the current file operation or recovery to finish before closing VidLibOrganizer.")
+                        .set_level(rfd::MessageLevel::Info).show();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![load_libraries, save_libraries, pick_folder, start_scan, scan_status, scan_result, cancel_scan, apply_actions, reveal_file, export_report])

@@ -2,7 +2,14 @@ const invoke = window.__TAURI__?.core?.invoke;
 export const isDesktop = typeof invoke === 'function';
 export async function call(command, args = {}) {
   if (!isDesktop) throw new Error('Open the desktop app to access your files.');
-  return invoke(command, args);
+  try {
+    return await invoke(command, args);
+  } catch (error) {
+    if (error && typeof error === 'object' && typeof error.message === 'string') {
+      throw Object.assign(new Error(error.message), error);
+    }
+    throw error;
+  }
 }
 // Sample data is available only via the explicit browser preview button.
 export function sampleResult() {

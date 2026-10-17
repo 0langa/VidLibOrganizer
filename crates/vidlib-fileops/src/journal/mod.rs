@@ -85,6 +85,39 @@ impl Journal {
             thread: std::marker::PhantomData,
         })
     }
+    // Coordinator opens this separate read-only connection on the calling thread.
+    pub(crate) fn coordination_status(
+        path: &Path,
+    ) -> Result<crate::coordinator::CoordinationStatus, OpError> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(sql_error)?;
+        if migrations::check(&connection)? != schema::VERSION {
+            return Err(OpError::new(
+                ErrorCode::Busy,
+                Phase::Read,
+                "operation store upgrade is pending",
+            ));
+        }
+        configure(&connection, false)?;
+        coordination_state(&connection)
+    }
+    pub(crate) fn change_coordination(
+        &mut self,
+        namespace: bool,
+        policy: bool,
+        interrupted: Option<bool>,
+    ) -> Result<crate::coordinator::Epochs, OpError> {
+        self.write(None, None, |tx| {
+            let mut epochs = coordination_state(tx)?.epochs;
+            if namespace { epochs.namespace = epochs.namespace.checked_add(1).ok_or_else(|| recovery("namespace epoch exhausted"))?; }
+            if policy { epochs.policy = epochs.policy.checked_add(1).ok_or_else(|| recovery("policy epoch exhausted"))?; }
+            tx.execute("UPDATE coordination SET namespace_epoch=?1,policy_epoch=?2,interrupted_write=COALESCE(?3,interrupted_write) WHERE singleton=1", params![epochs.namespace.to_string(), epochs.policy.to_string(), interrupted]).map_err(sql_error)?;
+            Ok(epochs)
+        })
+    }
     pub fn begin(&mut self, plan: &ExecutionPlan) -> Result<OperationId, OpError> {
         schema::validate_plan(plan)?;
         let inspection = schema::inspection(plan)?;
@@ -396,6 +429,29 @@ impl Journal {
         }
         result.map_err(|e| context(e, op, step))
     }
+}
+fn coordination_state(
+    connection: &Connection,
+) -> Result<crate::coordinator::CoordinationStatus, OpError> {
+    let (namespace, policy, interrupted, pending): (String, String, bool, bool) = connection.query_row(
+        "SELECT namespace_epoch,policy_epoch,interrupted_write,EXISTS(SELECT 1 FROM operations WHERE state IN ('Prepared','Running','RecoveryRequired')) FROM coordination WHERE singleton=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql_error)?;
+    let parse = |value: String| -> Result<u64, OpError> {
+        let epoch = value
+            .parse::<u64>()
+            .map_err(|_| recovery("invalid persisted epoch"))?;
+        if epoch.to_string() != value {
+            return Err(recovery("noncanonical persisted epoch"));
+        }
+        Ok(epoch)
+    };
+    Ok(crate::coordinator::CoordinationStatus {
+        epochs: crate::coordinator::Epochs {
+            namespace: parse(namespace)?,
+            policy: parse(policy)?,
+        },
+        pending_journal: pending,
+        interrupted_legacy_write: interrupted,
+    })
 }
 fn configure(connection: &Connection, writer: bool) -> Result<(), OpError> {
     connection
@@ -803,6 +859,111 @@ mod tests {
             );
         }
     }
+    // A v2 upgrade must retain all prior pending/effect evidence and index contracts.
+    #[test]
+    fn v2_epoch_migration_preserves_pending_operations_and_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operations.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(schema::SQL).unwrap();
+        connection.execute_batch(schema::V2_SQL).unwrap();
+        for (version, sql) in [(1, schema::SQL), (2, schema::V2_SQL)] {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations VALUES(?1,?2)",
+                    params![version, format!("{:x}", md5::compute(sql))],
+                )
+                .unwrap();
+        }
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection.execute_batch("INSERT INTO operations VALUES('op','Running','inspection evidence','[]','approved reference');
+            INSERT INTO steps VALUES('op','step','group',0,'IntentDurable','compiled evidence');
+            INSERT INTO receipts VALUES('op','step','receipt evidence');
+            INSERT INTO operation_events(id,operation_id,step_id,payload) VALUES('event','op','step','event evidence');").unwrap();
+        drop(connection);
+        let journal = Journal::open(&path).unwrap();
+        assert_eq!(
+            Journal::coordination_status(&path).unwrap(),
+            crate::coordinator::CoordinationStatus {
+                epochs: crate::coordinator::Epochs::default(),
+                pending_journal: true,
+                interrupted_legacy_write: false
+            }
+        );
+        let db = &journal.connection;
+        assert_eq!(
+            db.query_row(
+                "SELECT state || ':' || inspection FROM operations",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "Running:inspection evidence"
+        );
+        assert_eq!(
+            db.query_row("SELECT state || ':' || compiled FROM steps", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "IntentDurable:compiled evidence"
+        );
+        assert_eq!(
+            db.query_row("SELECT payload FROM receipts", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "receipt evidence"
+        );
+        assert_eq!(
+            db.query_row("SELECT payload FROM operation_events", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "event evidence"
+        );
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('operation_effect_header','unfinished_steps','pending_operations')", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn failed_v2_epoch_migration_rolls_back_without_losing_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operations.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(schema::SQL).unwrap();
+        connection.execute_batch(schema::V2_SQL).unwrap();
+        for (version, sql) in [(1, schema::SQL), (2, schema::V2_SQL)] {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations VALUES(?1,?2)",
+                    params![version, format!("{:x}", md5::compute(sql))],
+                )
+                .unwrap();
+        }
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection.execute_batch("CREATE TABLE coordination(conflicting_evidence TEXT); INSERT INTO coordination VALUES('retain me');").unwrap();
+        assert!(Journal::open(&path).is_err());
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT conflicting_evidence FROM coordination", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+            "retain me"
+        );
+    }
+
     // Private failpoint rollback must poison the writer; it cannot be selected
     // through a release build, public API or IPC.
     #[test]

@@ -31,6 +31,9 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
     if version >= 2 {
         expected.push((2, format!("{:x}", md5::compute(schema::V2_SQL))));
     }
+    if version >= 3 {
+        expected.push((3, format!("{:x}", md5::compute(schema::V3_SQL))));
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -59,6 +62,9 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
         if !exists {
             return Err(unsupported());
         }
+    }
+    if version >= 3 {
+        super::coordination_state(conn)?;
     }
     Ok(version)
 }
@@ -94,8 +100,16 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
             [format!("{:x}", md5::compute(schema::V2_SQL))],
         )
         .map_err(super::sql_error)?;
-        tx.pragma_update(None, "user_version", schema::VERSION)
-            .map_err(super::sql_error)?;
     }
+    if version < 3 {
+        tx.execute_batch(schema::V3_SQL).map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(3,?1)",
+            [format!("{:x}", md5::compute(schema::V3_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    tx.pragma_update(None, "user_version", schema::VERSION)
+        .map_err(super::sql_error)?;
     tx.commit().map_err(super::sql_error)
 }

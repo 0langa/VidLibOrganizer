@@ -1,3 +1,4 @@
+pub mod coordinator;
 pub mod error;
 pub mod events;
 pub mod journal;
