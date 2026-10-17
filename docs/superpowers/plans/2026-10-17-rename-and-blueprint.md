@@ -391,17 +391,17 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** `CompiledRegexRule::compile(rule: &RegexRule) -> Result<Self, RenameError>`; `apply(&self, input: &str) -> Result<String, RuleIssue>`. It integrates the existing segment/explanation pipeline and does not add a competing regex dialect for filters.
 
-- [ ] **Step 1 — Red:** Add `lookarounds_pattern_backrefs_and_capture_replacement`, `literal_dollar_and_unmatched_optional_capture`, `first_all_and_case_modes`, `disabled_and_repeated_rules`, and `resource_limits_are_real` in a subprocess fixture.
+- [x] **Step 1 — Red:** Add `lookarounds_pattern_backrefs_and_capture_replacement`, `literal_dollar_and_unmatched_optional_capture`, `first_all_and_case_modes`, `disabled_and_repeated_rules`, and `resource_limits_are_real` in a subprocess fixture.
   ```rust
   assert_eq!(actual, "Show - S02E03");
   assert_eq!(limits.match_limit, 1_000_000);
   assert_eq!(limits.heap_limit_kib, 8192); // PCRE2 uses KiB, not bytes
   assert_eq!(exhausted.code, RuleIssueCode::RegexLimit);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test regex`; the exhaustion fixture has a harness timeout solely to detect a hung test, not a promised regex timeout.
-- [ ] **Step 3 — Implement:** UTF/UCP, no JIT, 16 KiB pattern cap, match/depth/heap configuration, named/numbered replacement validation and literal escaping. Compile once per enabled rule; use RAII for native allocations and document each unsafe FFI invariant in this one adapter. Limits/failures are structured row/rule issues, not silent nonmatches.
-- [ ] **Step 4 — Verify green:** Regex tests plus text/graph regressions; inspect the effective binding calls for all limits and run the real native adapter on Windows CI.
-- [ ] **Step 5 — Commit:** `feat: add resource-bounded PCRE2 renaming rules`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test regex`; the exhaustion fixture has a harness timeout solely to detect a hung test, not a promised regex timeout.
+- [x] **Step 3 — Implement:** UTF/UCP, no JIT, 16 KiB pattern cap, match/depth/heap configuration, named/numbered replacement validation and literal escaping. Compile once per enabled rule; use RAII for native allocations and document each unsafe FFI invariant in this one adapter. Limits/failures are structured row/rule issues, not silent nonmatches.
+- [ ] **Step 4 — Verify green (portable complete; Windows CI pending):** Regex/text/graph and actual native match/depth/heap exhaustion pass on Linux; effective binding calls and exact units reviewed. Windows test executables compile/link and import no PCRE2 DLL, but the required real native Windows CI run is unavailable and remains pending.
+- [x] **Step 5 — Commit:** `feat: add resource-bounded PCRE2 renaming rules`.
 
 ### Task 13: Deterministic numbering and explicit dates
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–11 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–12 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -808,6 +808,8 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 10: `48b8984`, review fix `571475f`; evidence `cb30132` | Usable native-selection Rename preview/confirmation/jobs/history/recovery/Undo slice, testable desktop library and bounded exact IPC. Four review findings fixed: ordered pending requests, recovery revocation on edit/source replacement, full history PageQuery with checked v8 live-data revision, and all-action recovery paging under one review. Initial 306-test workspace run passed; final 218 affected Rust +15 real Chromium +4 Node tests, scoped static checks and core Windows compile pass. v1–v7 SQL/checksum preservation and v8 rollback/overflow tested. Independent review plus scoped re-review approved. Three minor findings deferred for final triage. Actual Windows runtime/packaging/hardware pending; this is Keep/FixedStem only, not the complete release. Next eligible: Task 11. |
 
 | 2026-10-17 | Task 11: `d3beffd`, review fix `c32ef33` | Backend Unicode text/case/extension rules, current-input grapheme and literal-pair segments, explicit transliteration, ordered operations and per-row explanations. Independent review plus scoped fix review approved; Unicode titlecase sentence-state defect corrected. Initial 330-workspace run passed; final 72 text/contract/graph tests plus scoped Clippy/fmt/diff pass, with earlier Windows compile evidence. Dotted-I exact title spelling remains a deferred minor for final triage. Delimited/Between semantics are documented; no unsupported frontend controls added. Next eligible: Task 12. |
+
+| 2026-10-17 | Task 12: `8ca48e1` | Native PCRE2 UTF/UCP/no-JIT adapter with exact 16 KiB pattern, 1,000,000 match, 1,000 depth and 8,192 KiB heap limits; validated capture replacement, current-segment reassembly, structured failures and compile-once preparation. 86 scoped and 345 distinct workspace tests pass, including real native match/depth/heap exhaustion. Clippy/fmt and Windows all-target compilation/test-executable linking/static-import checks pass. Independent review approved with no findings. Step 4 real native Windows CI remains pending; no runtime/release gate opened. Next eligible: Task 13. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -832,3 +834,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 09 Undo/history runtime: reviewed inverse execution, original/inverse process-crash recovery, native hierarchy/timestamp/material checks and history/outbox independence. Final Linux workspace and GNU-target compile pass; Windows runtime and hardware durability remain pending.
 
 - [ ] Windows Task 10 installed desktop/runtime: native picker/WebView, two-instance operation, session/edit revocation, history/recovery/Undo and offline packaging. Linux native commands, Chromium and core cross-compilation pass; installed Windows and hardware evidence remain pending.
+
+- [ ] Windows Task 12 real native PCRE2 CI/runtime: UTF/UCP, no JIT, actual match/depth/heap exhaustion, captures/empty matches and static runtime in the Windows process. GNU fixtures compile/link and import only OS DLLs; Windows execution, MSVC package and offline installed runtime remain pending.
