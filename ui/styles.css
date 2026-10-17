@@ -1732,3 +1732,5 @@ dialog::backdrop{
   .rename-view .rename-table .button { padding:6px; font-size:10px; }
   .rename-view .rename-table input { width:100%; }
 }
+
+.rename-view .recipe-typed-fields { display:contents; }

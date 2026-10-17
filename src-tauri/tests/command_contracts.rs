@@ -2484,3 +2484,71 @@ fn summary_counts_nested_carried_descendants_once_and_identifies_unselected_item
     assert_eq!(result["summary"]["unselectedDescendants"], "1");
     assert_eq!(result["summary"]["folders"], "2");
 }
+
+#[test]
+fn cleared_override_subset_preview_preserves_native_unselected_entry_defense() {
+    let (dir, state) = fixture();
+    std::fs::write(dir.path().join("media/other.mp4"), b"other").unwrap();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let id = |name| {
+        page.items
+            .iter()
+            .find(|row| row["displayName"] == name)
+            .unwrap()["itemId"]
+            .clone()
+    };
+    let a = id("original.mp4");
+    let b = id("other.mp4");
+    let override_a = json!({"entryId":a,"newName":"custom.mp4"});
+    let request = |revision, selected, overrides| {
+        serde_json::from_value::<RenameRequestDto>(
+            json!({"revision":revision,"selectedIds":selected,"rowOverrides":overrides}),
+        )
+        .unwrap()
+    };
+    wait(
+        &state,
+        preview_owned(&state, request("2", json!([a]), json!([override_a]))).unwrap(),
+    );
+    let rejected = preview_owned(&state, request("3", json!([b]), json!([override_a]))).unwrap();
+    let mut failure = None;
+    for _ in 0..500 {
+        let status = status_owned(&state, JobRequest { job_id: rejected }).unwrap();
+        if status.state != "running" {
+            failure = Some(status);
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let failure = failure.expect("stale override preview terminates");
+    assert_eq!(failure.state, "failed");
+    assert_eq!(failure.error.unwrap().code, "unselectedEntry");
+    assert!(failure.result.is_none());
+    let clean = wait(
+        &state,
+        preview_owned(&state, request("4", json!([b]), json!([]))).unwrap(),
+    );
+    let page = page_owned(
+        &state,
+        PageRequest {
+            plan_ref: serde_json::from_value(clean["planRef"].clone()).unwrap(),
+            query: PageQuery::new(4),
+        },
+    )
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0]["itemId"], b);
+    assert_eq!(page.items[0]["newName"], "other.mp4");
+    assert!(dir.path().join("media/original.mp4").exists());
+    assert!(!dir.path().join("media/custom.mp4").exists());
+}

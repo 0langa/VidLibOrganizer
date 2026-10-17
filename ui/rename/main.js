@@ -45,7 +45,7 @@ export function createRename() {
   const orderButton=(label,action)=>{const b=el('button','button',label);b.type='button';b.addEventListener('click',action);orderHost.append(b);return b;};
   const selectAll=orderButton('Select all inventory items',()=>collectInventory(false));
   const adoptOrder=orderButton('Adopt display order for numbering',()=>collectInventory(true));
-  orderButton('Clear selection',()=>{if(active?.mutation)return;const ids=[...selected];selected.clear();recipe.excludeItems(ids);syncSelection();edited();});
+  orderButton('Clear selection',()=>{if(active?.mutation)return;const ids=[...selected];selected.clear();overrides.clear();recipe.excludeItems(ids);syncSelection();edited();});
   const recipe = createRecipeEditor({ recipe: defaultRecipe(), onChange: edited, chooseDestination });
   const editorHost = host.querySelector('.rename-editor');
   const presets = el('fieldset', 'recipe-presets');
@@ -355,7 +355,7 @@ export function createRename() {
   preview.addEventListener('click', () => {
     if (active || !inventoryReady || !selected.size) return;
     perform(async task => {
-      const result = await run(task, 'start_rename_preview', { revision: task.revision, selectedIds: [...selected], recipeJson: JSON.stringify(boundRecipe()), rebindSelection: true, mapping, rowOverrides:[...overrides].map(([entryId,newName])=>({entryId,newName})) });
+      const result = await run(task, 'start_rename_preview', { revision: task.revision, selectedIds: [...selected], recipeJson: JSON.stringify(boundRecipe()), rebindSelection: true, mapping, rowOverrides:[...overrides].filter(([entryId])=>selected.has(entryId)).map(([entryId,newName])=>({entryId,newName})) });
       await acceptPlan(task, result);
     }, { advance: true });
   });

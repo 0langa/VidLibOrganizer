@@ -114,3 +114,40 @@ test('mapping_file_and_both_exports_use_reviewed_native_reference',async({page})
   expect(await page.evaluate(()=>testBridge.calls.findLast(c=>c.command==='export_rename_plan').args.request)).toEqual({planRef:reference,mode});
  }
 });
+test('alternating_JSON_and_typed_edits_keep_one_preview_and_saved_recipe',async({page})=>{
+ await start(page);
+ await page.evaluate(()=>{const invoke=window.__TAURI__.core.invoke;window.__TAURI__.core.invoke=(command,args)=>{if(command==='save_rename_preset'){testBridge.calls.push({command,args});return Promise.resolve({presetId:'00000000-0000-4000-8000-000000000077',revision:'1',recipeJson:args.request.recipeJson});}return invoke(command,args);};});
+ await page.getByLabel('Naming rule',{exact:true}).selectOption('number');
+ const json=page.getByLabel('Rule 1 parameters',{exact:true});
+ const initial=JSON.parse(await json.inputValue());initial.rule.start='99';initial.rule.prefix='retained';
+ await json.fill(JSON.stringify(initial));await expect(json).toBeFocused();
+ await page.getByLabel('Counter step',{exact:true}).fill('2');await expect(page.getByLabel('Counter step',{exact:true})).toBeFocused();
+ await page.getByTestId('rename-preview').click();
+ const first=await page.evaluate(()=>JSON.parse(testBridge.calls.findLast(c=>c.command==='start_rename_preview').args.request.recipeJson));
+ expect(first.rules[0].parameters.rule).toMatchObject({start:'99',step:'2',prefix:'retained'});
+ const next=JSON.parse(await json.inputValue());expect(next.rule).toMatchObject({start:'99',step:'2'});next.rule.start='9007199254740993';next.rule.suffix='latest';
+ await json.fill(JSON.stringify(next));await expect(json).toBeFocused();await expect(page.getByLabel('Counter start',{exact:true})).toHaveValue('9007199254740993');await expect(page.getByLabel('Counter step',{exact:true})).toHaveValue('2');
+ await page.getByLabel('Counter padding',{exact:true}).fill('8');await page.getByRole('button',{name:'Save new preset',exact:true}).click();
+ const saved=await page.evaluate(()=>JSON.parse(testBridge.calls.findLast(c=>c.command==='save_rename_preset').args.request.recipeJson));
+ expect(saved.rules[0].parameters.rule).toMatchObject({start:'9007199254740993',step:'2',padding:'8',prefix:'retained',suffix:'latest'});
+ await page.getByTestId('rename-preview').click();const previewed=await page.evaluate(()=>JSON.parse(testBridge.calls.findLast(c=>c.command==='start_rename_preview').args.request.recipeJson));expect(previewed.rules).toEqual(saved.rules);
+});
+test('malformed_lazy_regex_stays_raw_blocks_preview_and_save_without_page_errors',async({page})=>{
+ const errors=[];page.on('pageerror',error=>errors.push(error.message));await start(page);await page.getByLabel('Naming rule',{exact:true}).selectOption('regex');await expect(page.getByLabel('Regex pattern')).toHaveCount(0);
+ await page.getByLabel('Rule 1 parameters',{exact:true}).fill('{"type":"regex"}');await page.getByRole('button',{name:'Add rule',exact:true}).click();
+ await page.getByTestId('rename-preview').click();await expect(page.getByTestId('rename-status')).toContainText('Complete the invalid rule JSON');await page.getByRole('button',{name:'Save new preset',exact:true}).click();
+ expect(await page.evaluate(()=>testBridge.calls.filter(c=>c.command==='start_rename_preview'||c.command==='save_rename_preset'))).toEqual([]);await expect(page.getByLabel('Rule 1 parameters',{exact:true})).toHaveValue('{"type":"regex"}');await expect(page.getByTestId('rename-apply')).toBeDisabled();
+ await expect(page.getByText('Regex options',{exact:true})).toHaveCount(0);
+ await page.getByLabel('Rule 1 parameters',{exact:true}).fill(JSON.stringify({type:'regex',rule:{pattern:'(?<=S)(\\d+)',replacement:'$1',scope:'all',case_sensitive:true}}));
+ await expect(page.getByLabel('Regex pattern')).toHaveCount(0);await page.getByText('Regex options',{exact:true}).click();await expect(page.getByLabel('Regex pattern')).toHaveValue('(?<=S)(\\d+)');expect(errors).toEqual([]);
+});
+test('clear_selection_discards_overrides_before_selecting_a_subset_or_reselecting',async({page})=>{
+ await page.addInitScript(desktopBridge,fixture);await page.addInitScript(fixture=>{
+  const invoke=window.__TAURI__.core.invoke,b='00000000-0000-4000-8000-000000000099';
+  window.__TAURI__.core.invoke=(command,args)=>command==='inventory_page'?Promise.resolve({items:[{itemId:fixture.row.itemId,displayName:'original.mp4',kind:'file',sizeBytes:'1'},{itemId:b,displayName:'other.mp4',kind:'file',sizeBytes:'1'}],nextCursor:null,revision:args.request.query.expectedRevision}):invoke(command,args);
+ },fixture);
+ await page.goto('/');await page.getByRole('button',{name:'Rename',exact:true}).click();await page.getByRole('button',{name:'Choose folders',exact:true}).click();await page.getByLabel('Select original.mp4').check();await page.getByTestId('rename-preview').click();await page.getByLabel('Override name').fill('custom.mp4');await page.getByRole('button',{name:'Use row override',exact:true}).click();
+ await page.getByText('Selection and numbering order',{exact:true}).click();await page.getByRole('button',{name:'Clear selection',exact:true}).click();await page.getByRole('button',{name:'Edit selection',exact:true}).click();await page.getByLabel('Select other.mp4').check();await page.getByTestId('rename-preview').click();
+ let request=await page.evaluate(()=>testBridge.calls.findLast(c=>c.command==='start_rename_preview').args.request);expect(request.selectedIds).toEqual(['00000000-0000-4000-8000-000000000099']);expect(request.rowOverrides).toEqual([]);
+ await page.getByRole('button',{name:'Edit selection',exact:true}).click();await page.getByLabel('Select original.mp4').check();await page.getByTestId('rename-preview').click();request=await page.evaluate(()=>testBridge.calls.findLast(c=>c.command==='start_rename_preview').args.request);expect(request.rowOverrides).toEqual([]);
+});

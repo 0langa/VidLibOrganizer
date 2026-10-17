@@ -75,6 +75,7 @@ export function parameterFields(host, parameters, change, signal) {
     }
   }
   if (p.type === 'regex') {
+    if (!p.rule || typeof p.rule.pattern !== 'string' || typeof p.rule.replacement !== 'string' || typeof p.rule.scope !== 'string' || typeof p.rule.case_sensitive !== 'boolean') throw new Error('Regex controls require a complete rule object.');
     const details=el('details');details.append(el('summary','','Regex options'));host.append(details);let mounted=false;
     details.addEventListener('toggle',()=>{if(!details.open||mounted)return;mounted=true;
       const fields=controls(details,signal);
