@@ -6,7 +6,7 @@ use std::{
 };
 use vidlib_inventory::{
     encode_path, DirectoryFacts, EntryKind, FileObservation, FileStamp, GrantSet, InventoryIssue,
-    IssueCode, NamespaceEntry, NamespaceSnapshot, ObservationWindow, ProtectedPolicy,
+    IssueCode, NamespaceEntry, NamespaceSnapshot, ObservationWindow, PhysicalId, ProtectedPolicy,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +39,18 @@ pub struct StagingFile {
     pub file: File,
 }
 
+/// Exact rename input plus the reviewed parent identities. The executor rebases
+/// paths after preceding directory moves while retaining those identities. Native
+/// adapters must compare them with the held handles used for the rename syscall.
+#[derive(Debug)]
+pub struct RenameRequest<'a> {
+    pub source: &'a Path,
+    pub target: &'a Path,
+    pub expected: &'a FileStamp,
+    pub source_parent: &'a PhysicalId,
+    pub target_parent: &'a PhysicalId,
+}
+
 /// Unforgeable outside this crate; minted only after the compiled intent commits.
 /// Exact operation/step paths and identity, not a general staging exemption.
 #[derive(Debug)]
@@ -48,6 +60,8 @@ pub struct RenameReservation {
     pub(crate) source: PathBuf,
     pub(crate) target: PathBuf,
     pub(crate) expected: FileStamp,
+    pub(crate) source_parent: PhysicalId,
+    pub(crate) target_parent: PhysicalId,
     pub(crate) reserved_source: bool,
     pub(crate) reserved_target: bool,
 }
@@ -70,6 +84,14 @@ impl RenameReservation {
 /// destination, and verify fresh native identity before an operation.
 /// Journal/coordinator authorization is the caller's responsibility.
 pub trait Filesystem {
+    /// No compatibility fallback: a reviewed execution must retain both parent
+    /// identities all the way to the native handles used for mutation.
+    fn rename_reviewed(
+        &mut self,
+        _request: &RenameRequest<'_>,
+    ) -> Result<MutationOutcome, OpError> {
+        Err(OpError::unsupported(Phase::Rename))
+    }
     fn rename_reserved(
         &mut self,
         _authority: &RenameReservation,
@@ -263,9 +285,26 @@ impl PlatformFs {
         source: &Path,
         target: &Path,
         expected: &FileStamp,
+        reviewed_parents: Option<(&PhysicalId, &PhysicalId)>,
     ) -> Result<MutationOutcome, OpError> {
         let (source_parent, source_name) = parent(source)?;
         let (target_parent, target_name) = parent(target)?;
+        if let Some((expected_source_parent, expected_target_parent)) = reviewed_parents {
+            // These are the exact held descriptors passed to native::rename.
+            // A fresh path binding alone cannot establish reviewed authority.
+            for (held, expected) in [
+                (&source_parent, expected_source_parent),
+                (&target_parent, expected_target_parent),
+            ] {
+                if native::observation(held)?.stamp.physical_id.as_ref() != Some(expected) {
+                    return Err(OpError::new(
+                        ErrorCode::StaleState,
+                        Phase::Rename,
+                        "held parent identity differs from reviewed namespace",
+                    ));
+                }
+            }
+        }
         native::mutation_supported(&source_parent, Phase::Rename)?;
         native::mutation_supported(&target_parent, Phase::Rename)?;
         validate_destination_name(&target_parent, target_name)?;
@@ -336,6 +375,16 @@ fn combine_flush(a: Durability, b: Durability) -> Durability {
 }
 #[cfg(any(target_os = "linux", windows))]
 impl Filesystem for PlatformFs {
+    fn rename_reviewed(&mut self, request: &RenameRequest<'_>) -> Result<MutationOutcome, OpError> {
+        self.permit(request.source)?;
+        self.permit(request.target)?;
+        self.move_entry(
+            request.source,
+            request.target,
+            request.expected,
+            Some((request.source_parent, request.target_parent)),
+        )
+    }
     fn rename_reserved(
         &mut self,
         authority: &RenameReservation,
@@ -357,7 +406,12 @@ impl Filesystem for PlatformFs {
                 self.permit(path)?;
             }
         }
-        self.move_entry(&authority.source, &authority.target, &authority.expected)
+        self.move_entry(
+            &authority.source,
+            &authority.target,
+            &authority.expected,
+            Some((&authority.source_parent, &authority.target_parent)),
+        )
     }
     fn capture_namespace(
         &self,
@@ -488,7 +542,7 @@ impl Filesystem for PlatformFs {
     ) -> Result<MutationOutcome, OpError> {
         self.permit(source)?;
         self.permit(target)?;
-        self.move_entry(source, target, expected)
+        self.move_entry(source, target, expected, None)
     }
     fn publish_staging(
         &mut self,
@@ -497,7 +551,7 @@ impl Filesystem for PlatformFs {
     ) -> Result<MutationOutcome, OpError> {
         self.permit_staging(&owned.path)?;
         self.permit(target)?;
-        self.move_entry(&owned.path, target, &owned.stamp)
+        self.move_entry(&owned.path, target, &owned.stamp, None)
     }
     fn create_directory(&mut self, path: &Path) -> Result<OwnedEntry, OpError> {
         self.permit(path)?;

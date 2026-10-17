@@ -6,8 +6,11 @@ use crate::{
     platform::Durability,
     ErrorCode, Filesystem, OpError, Phase,
 };
-use std::{collections::BTreeMap, path::PathBuf};
-use vidlib_inventory::{encode_path, ids::*, FileStamp, JobControl};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+use vidlib_inventory::{encode_path, ids::*, FileStamp, JobControl, PhysicalId};
 use vidlib_rename::{ExecutionAction, ExpectedIdentity, RenamePlan};
 
 /// Backend-only report: completed groups and receipts remain factual on partial failure.
@@ -147,21 +150,24 @@ pub fn execute(
                             .and_then(|r| r.after.as_ref())
                             .ok_or_else(|| stale("missing durable source receipt"))?,
                     };
-                    for path in [source.path.parent(), target.parent()]
-                        .into_iter()
-                        .flatten()
-                    {
+                    let reviewed_parent = |path: Option<&Path>| -> Result<PhysicalId, OpError> {
+                        let path = path.ok_or_else(|| stale("missing parent path"))?;
                         let (_, expected) = parents
                             .iter()
                             .find(|(p, _)| p == path)
                             .ok_or_else(|| stale("missing original parent identity"))?;
+                        let identity = expected
+                            .physical_id
+                            .as_ref()
+                            .ok_or_else(|| stale("missing original parent identity"))?;
                         let observed = fs.inspect(path)?;
-                        if expected.physical_id.is_none()
-                            || observed.stamp.physical_id != expected.physical_id
-                        {
+                        if observed.stamp.physical_id.as_ref() != Some(identity) {
                             return Err(stale("ancestor identity changed"));
                         }
-                    }
+                        Ok(identity.clone())
+                    };
+                    let source_parent = reviewed_parent(source.path.parent())?;
+                    let target_parent = reviewed_parent(target.parent())?;
                     let before = fs.verify(&source.path, stamp)?;
                     let reserved_source =
                         reservations
@@ -186,11 +192,19 @@ pub fn execute(
                             source: source.path.clone(),
                             target: target.clone(),
                             expected: stamp.clone(),
+                            source_parent,
+                            target_parent,
                             reserved_source,
                             reserved_target: *temporary,
                         })
                     } else {
-                        fs.rename_no_replace(&source.path, target, stamp)
+                        fs.rename_reviewed(&crate::platform::RenameRequest {
+                            source: &source.path,
+                            target,
+                            expected: stamp,
+                            source_parent: &source_parent,
+                            target_parent: &target_parent,
+                        })
                     };
                     let outcome = match action {
                         Ok(outcome) => outcome,

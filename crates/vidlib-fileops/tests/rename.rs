@@ -128,8 +128,22 @@ struct FaultFs {
     cancel: Option<JobControl>,
     durability: Option<Durability>,
     stale_next: Option<PathBuf>,
+    replace_parent: Option<(PathBuf, PathBuf)>,
 }
 impl FaultFs {
+    // Runs after executor inspection/intent, immediately before native handle
+    // acquisition. If the source parent changes, preserve the same source object
+    // at its reviewed path so source freshness alone cannot hide this gap.
+    fn replace_before_native_open(&mut self, source: &Path) {
+        if let Some((parent, parked)) = self.replace_parent.take() {
+            fs::rename(&parent, &parked).unwrap();
+            fs::create_dir(&parent).unwrap();
+            if source.parent() == Some(parent.as_path()) {
+                fs::rename(parked.join(source.file_name().unwrap()), source).unwrap();
+            }
+            fs::write(parent.join("replacement-kept"), b"replacement contents").unwrap();
+        }
+    }
     fn new(f: &Fixture) -> Self {
         Self {
             native: PlatformFs::default(),
@@ -140,6 +154,7 @@ impl FaultFs {
             cancel: None,
             durability: None,
             stale_next: None,
+            replace_parent: None,
         }
     }
 }
@@ -164,6 +179,7 @@ impl Filesystem for FaultFs {
                 "injected reservation failure",
             ));
         }
+        self.replace_before_native_open(authority.source());
         let outcome = self.native.rename_reserved(authority);
         if let Some(control) = &self.cancel {
             control.cancel();
@@ -185,6 +201,14 @@ impl Filesystem for FaultFs {
         t: &Path,
         e: &FileStamp,
     ) -> Result<MutationOutcome, OpError> {
+        self.native.rename_no_replace(s, t, e)
+    }
+    fn rename_reviewed(
+        &mut self,
+        request: &platform::RenameRequest<'_>,
+    ) -> Result<MutationOutcome, OpError> {
+        let s = request.source;
+        let t = request.target;
         let journal = Journal::open(&self.database).unwrap();
         let pending = journal.pending().unwrap();
         let intent = pending
@@ -203,7 +227,8 @@ impl Filesystem for FaultFs {
         if self.collide {
             fs::write(t, b"late occupant").unwrap();
         }
-        let mut result = self.native.rename_no_replace(s, t, e);
+        self.replace_before_native_open(s);
+        let mut result = self.native.rename_reviewed(request);
         if let (Ok(outcome), Some(durability)) = (&mut result, &self.durability) {
             outcome.durability = durability.clone();
         }
@@ -886,4 +911,126 @@ fn ancestor_cycle_finishes_before_child_escape_invalidates_directory_stamp() {
     );
     assert_eq!(fs::read(f.media.join("B/x")).unwrap(), b"blocker");
     assert_eq!(fs::read(f.media.join("outside")).unwrap(), b"child");
+}
+
+fn reviewed_parent_replacement_is_rejected(reserved: bool, replace_source: bool) {
+    let mut f = Fixture::new(&[("a", "new")]);
+    fs::create_dir(f.media.join("source")).unwrap();
+    fs::create_dir(f.media.join("destination")).unwrap();
+    fs::write(f.media.join("source/first"), b"source bytes").unwrap();
+    fs::write(
+        f.media.join("source/original-kept"),
+        b"original source contents",
+    )
+    .unwrap();
+    fs::write(
+        f.media.join("destination/original-kept"),
+        b"original destination contents",
+    )
+    .unwrap();
+    let mapping = if reserved {
+        fs::write(f.media.join("source/second"), b"second bytes").unwrap();
+        vec![
+            ("source/first", "source/second"),
+            ("source/second", "source/first"),
+            ("a", "new"),
+        ]
+    } else {
+        vec![("source/first", "destination/target"), ("a", "new")]
+    };
+    let root = f.media.clone();
+    replan(&mut f, root, &mapping);
+    let first = &f.plan.execution.groups[0].steps[0];
+    let ExecutionAction::RenameEntry {
+        source,
+        target,
+        temporary,
+    } = &first.action
+    else {
+        panic!("rename expected")
+    };
+    assert_eq!(*temporary, reserved);
+    let source_path = source.path.clone();
+    let target_path = target.clone();
+    let parent = if replace_source || reserved {
+        source_path.parent().unwrap()
+    } else {
+        target_path.parent().unwrap()
+    }
+    .to_path_buf();
+    let parked = f.media.join("parked-parent");
+    let old_parent_identity = PlatformFs::default()
+        .inspect(&parent)
+        .unwrap()
+        .stamp
+        .physical_id;
+    let original_kept = fs::read(parent.join("original-kept")).unwrap();
+    let original_source = fs::read(&source_path).unwrap();
+    let mut adapter = FaultFs::new(&f);
+    adapter.replace_parent = Some((parent.clone(), parked.clone()));
+    let report = f.run(&mut adapter, &JobControl::default()).unwrap();
+    assert_eq!(
+        report.failure.as_ref().map(|e| e.code),
+        Some(ErrorCode::StaleState),
+        "reviewed parent replacement must reject the first native effect"
+    );
+    assert!(
+        source_path.exists(),
+        "the same source object must remain unmoved"
+    );
+    assert_eq!(fs::read(&source_path).unwrap(), original_source);
+    assert!(
+        !target_path.exists(),
+        "no effect may land in the replacement directory"
+    );
+    assert_eq!(
+        fs::read(parked.join("original-kept")).unwrap(),
+        original_kept
+    );
+    assert_eq!(
+        fs::read(parent.join("replacement-kept")).unwrap(),
+        b"replacement contents"
+    );
+    assert_eq!(
+        PlatformFs::default()
+            .inspect(&parked)
+            .unwrap()
+            .stamp
+            .physical_id,
+        old_parent_identity
+    );
+    assert_ne!(
+        PlatformFs::default()
+            .inspect(&parent)
+            .unwrap()
+            .stamp
+            .physical_id,
+        old_parent_identity
+    );
+    if reserved {
+        assert_eq!(fs::read(parked.join("second")).unwrap(), b"second bytes");
+    }
+    assert!(report.receipts.is_empty());
+    assert!(report.completed_groups.is_empty());
+    assert_eq!(adapter.calls.len(), 1, "no following effect may execute");
+    assert!(f.media.join("a").exists());
+    assert!(!f.media.join("new").exists());
+    let journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    assert!(journal.events_after(0, 200).unwrap().items.is_empty());
+    assert_eq!(
+        journal.pending().unwrap()[0].steps[0].state,
+        StepState::Unresolved
+    );
+}
+#[test]
+fn target_parent_replaced_after_executor_inspection_is_rejected_by_native_handles() {
+    reviewed_parent_replacement_is_rejected(false, false);
+}
+#[test]
+fn source_parent_replaced_with_same_source_object_is_rejected_by_native_handles() {
+    reviewed_parent_replacement_is_rejected(false, true);
+}
+#[test]
+fn reserved_rename_rejects_parent_replaced_before_native_handle_acquisition() {
+    reviewed_parent_replacement_is_rejected(true, true);
 }
