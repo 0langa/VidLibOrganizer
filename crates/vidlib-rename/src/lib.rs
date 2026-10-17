@@ -10,3 +10,6 @@ pub mod graph;
 pub use graph::plan;
 
 pub mod validate;
+
+pub mod text;
+pub use text::*;

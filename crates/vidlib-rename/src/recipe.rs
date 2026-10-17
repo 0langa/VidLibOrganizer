@@ -33,6 +33,7 @@ pub enum RuleParameters {
     Keep,
     FixedStem { value: String },
     Template { parts: Vec<TemplatePart> },
+    Text { operation: crate::TextOperation },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -46,6 +47,15 @@ pub enum SegmentSelector {
         start: i32,
         end: i32,
     },
+    /// Flat, left-to-right literal pairs; excludes both delimiters unless requested.
+    Between {
+        target: NameSegment,
+        opening: String,
+        closing: String,
+        occurrence: u32,
+        include_delimiters: bool,
+    },
+    /// Select the token after the Nth delimiter, ending before the next.
     /// Literal, left-to-right, non-overlapping, one-based occurrences.
     Delimited {
         target: NameSegment,
@@ -291,6 +301,9 @@ impl RecipeV1 {
                     }
                 }
                 RuleParameters::Template { parts } => validate_template(parts, 0)?,
+                RuleParameters::Text { operation } => {
+                    crate::text::validate_operation(operation).map_err(|e| invalid(e.message))?
+                }
                 RuleParameters::Keep => {}
             }
         }

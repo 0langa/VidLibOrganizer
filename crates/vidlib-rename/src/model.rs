@@ -8,6 +8,7 @@ use vidlib_inventory::{ids::*, FileStamp, GrantSet, Inventory};
 pub enum RenameErrorCode {
     UnknownRecipeVersion,
     InvalidRecipe,
+    InvalidRuleInput,
     RecipeTooLarge,
     TooManyRules,
     UnknownEntry,

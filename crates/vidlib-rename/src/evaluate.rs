@@ -32,9 +32,8 @@ pub fn evaluate(
     for rule in recipe.rules.iter().filter(|r| r.enabled) {
         if !matches!(
             rule.parameters,
-            RuleParameters::Keep | RuleParameters::FixedStem { .. }
-        ) || rule.segment != SegmentSelector::Stem
-        {
+            RuleParameters::Keep | RuleParameters::FixedStem { .. } | RuleParameters::Text { .. }
+        ) {
             return Err(RenameError::new(
                 RenameErrorCode::UnsupportedRule,
                 "rule or segment is not implemented",
@@ -76,33 +75,54 @@ pub fn evaluate(
             rows.push(row);
             continue;
         }
-        let name = std::path::Path::new(native_name.expect("checked above"));
-        let mut stem = (if entry.kind == EntryKind::Directory {
-            name.file_name()
+        let original = if entry.kind == EntryKind::Directory {
+            NameParts::stem_only(native_name.expect("checked above"))
         } else {
-            name.file_stem()
-        })
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-        for rule in recipe.rules.iter().filter(|r| r.enabled) {
-            let before = stem.clone();
-            if let RuleParameters::FixedStem { value } = &rule.parameters {
-                stem.clone_from(value);
-            }
-            row.explanations.push(RuleExplanation {
-                rule_id: rule.id.clone(),
-                before,
-                after: stem.clone(),
-            });
-        }
-        let extension = (entry.kind == EntryKind::File)
-            .then(|| name.extension())
-            .flatten();
-        let new_name = match extension.and_then(|e| e.to_str()) {
-            Some(ext) => format!("{stem}.{ext}"),
-            None => stem,
+            NameParts::from_filename(native_name.expect("checked above"))
         };
+        let mut current = original.clone();
+        for rule in recipe.rules.iter().filter(|r| r.enabled) {
+            let operation = match &rule.parameters {
+                RuleParameters::Keep => TextOperation::Keep,
+                RuleParameters::FixedStem { value } => TextOperation::Fixed {
+                    value: value.clone(),
+                },
+                RuleParameters::Text { operation } => operation.clone(),
+                RuleParameters::Template { .. } => unreachable!("rejected before evaluating rows"),
+            };
+            let before = current.segment(rule.segment.target());
+            match apply_text(
+                &current,
+                &TextRule {
+                    segment: rule.segment.clone(),
+                    operation,
+                },
+            ) {
+                Ok(next) => {
+                    row.explanations.push(RuleExplanation {
+                        rule_id: rule.id.clone(),
+                        before,
+                        after: next.segment(rule.segment.target()),
+                    });
+                    current = next;
+                }
+                Err(issue) => {
+                    row.status = RowStatus::Blocked;
+                    row.issues.push(PlanIssue {
+                        code: RenameErrorCode::InvalidRuleInput,
+                        entry_id: Some(*id),
+                        rule_id: Some(rule.id.clone()),
+                        message: issue.message,
+                    });
+                    break;
+                }
+            }
+        }
+        if row.status == RowStatus::Blocked {
+            rows.push(row);
+            continue;
+        }
+        let new_name = current.filename();
         row.target_path.set_file_name(&new_name);
         row.new_display_name = new_name;
         row.new_display_path = row.target_path.to_string_lossy().into_owned();
