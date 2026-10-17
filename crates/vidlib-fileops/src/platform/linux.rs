@@ -231,12 +231,20 @@ pub(super) fn create(
         .map_err(|e| io_error(e.into(), Phase::Create))
     }
 }
+pub(super) fn removal_link_count(file: &File) -> Result<u64, OpError> {
+    file.metadata()
+        .map(|metadata| metadata.nlink())
+        .map_err(|error| io_error(error, Phase::Remove))
+}
+
 pub(super) fn remove(
     parent: &File,
     name: &std::ffi::OsStr,
     _file: &File,
     directory: bool,
 ) -> Result<(), OpError> {
+    #[cfg(test)]
+    boundary_fixture::run(boundary_fixture::Boundary::RemoveBeforeEffect);
     fs::unlinkat(
         parent,
         name,
@@ -246,9 +254,14 @@ pub(super) fn remove(
             AtFlags::empty()
         },
     )
-    .map_err(|e| io_error(e.into(), Phase::Remove))
+    .map_err(|e| io_error(e.into(), Phase::Remove))?;
+    #[cfg(test)]
+    boundary_fixture::run(boundary_fixture::Boundary::RemoveAfterEffect);
+    Ok(())
 }
 pub(super) fn metadata(file: &File, update: &MetadataUpdate) -> Result<(), OpError> {
+    #[cfg(test)]
+    boundary_fixture::run(boundary_fixture::Boundary::MetadataBeforeEffect);
     if update.created_ns.is_some() || update.windows_attributes.is_some() {
         return Err(OpError::unsupported(Phase::Metadata));
     }
@@ -296,6 +309,8 @@ pub(super) fn metadata(file: &File, update: &MetadataUpdate) -> Result<(), OpErr
             )
         })?;
     }
+    #[cfg(test)]
+    boundary_fixture::run(boundary_fixture::Boundary::MetadataAfterEffect);
     Ok(())
 }
 pub(super) fn flush(file: &File) -> Durability {

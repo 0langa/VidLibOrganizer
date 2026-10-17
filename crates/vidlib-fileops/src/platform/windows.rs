@@ -419,6 +419,13 @@ pub(super) fn create(parent: &File, name: &OsStr, directory: bool) -> Result<Fil
     reject_reparse(&file)?;
     Ok(file)
 }
+// Delete-pending and close-time link removal have not been qualified on native
+// Windows. Refuse owned cleanup before the effect until its evidence contract is
+// implemented and tested; Linux link-count semantics must not be assumed here.
+pub(super) fn removal_link_count(_file: &File) -> Result<u64, OpError> {
+    Err(OpError::unsupported(Phase::Remove))
+}
+
 pub(super) fn remove(
     _parent: &File,
     _name: &OsStr,

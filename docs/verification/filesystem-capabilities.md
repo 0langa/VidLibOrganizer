@@ -78,6 +78,14 @@ and reports file/parent flush outcomes. It must precede publication after writin
 callers must not replace ownership with an unrelated pathname observation.
 Publication uses the same atomic no-replace move. Cleanup checks recorded state
 and only removes an empty owned directory; it never recursively deletes a tree.
+After Linux unlink, success additionally requires evidence from the held object:
+a regular file loses exactly one link (remaining hard-link aliases are allowed),
+or a directory becomes unlinked with zero links, and the requested name is absent.
+A replacement removed by the basename syscall while the owned object survives,
+a recreated name, or unavailable deletion evidence returns `RecoveryRequired`.
+These checks establish observed outcome evidence; they do not eliminate Linux's
+atomic source-binding limitation. Windows owned cleanup now explicitly refuses
+before mutation until native delete-pending/close/link-count evidence is qualified.
 Explicit protected roots remain protected even within canonical staging names.
 
 `open_verified` supplies the held native file for streaming content I/O. Higher
@@ -86,6 +94,11 @@ this primitive does not claim a whole-file hash or frozen content snapshot.
 Creation returns ownership before parent flush; callers use `flush_directory` for
 a new directory and `refresh_staging` for a written staging file, and journal these
 phases explicitly. The seam contains no recipe or execution-step types.
+
+Metadata mutation checks the requested child's identity/freshness immediately
+before the native setter and checks that its pathname still names the held
+object's resulting state afterward. A pre-effect mismatch is `StaleState`;
+post-effect missing/rebound/uncertain state is `RecoveryRequired`.
 
 Linux modification/access time and readonly setters are tested with exact
 nanosecond observations. Creation time and Windows attributes are unsupported on
@@ -123,7 +136,7 @@ cargo clippy -p vidlib-fileops -p vidlib-inventory --all-targets --target x86_64
 ```
 
 The platform suite has 18 named integration tests, plus the held-parent rebinding
-unit test. The complete portable suite has 82 tests. On Linux,
+unit test and six metadata/removal boundary regressions. The complete portable suite has 88 tests after the first review-fix round. On Linux,
 `cargo test -p vidlib-fileops --test windows_platform -- --nocapture` executes
 **zero** tests; it is not Windows evidence.
 

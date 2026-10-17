@@ -816,3 +816,407 @@ A follow-up exclusion command mistakenly named `vidlib-organizer` rather than th
 See `docs/verification/filesystem-capabilities.md` for the matrix, APIs, caller obligations, commands, and precise pending cases.
 
 Final repository checks: `git diff --check` and `git diff --cached --check` succeeded with no output before the implementation commit. Only the eleven task/authorized shared-contract files were committed; no canonical checklist edits.
+
+
+## Review fix round 1 of 5 — Important metadata/removal outcome findings
+
+FIX_BASE: `8fe6590376d7f1bfb1cb8abee092df6ec5dc3040`.
+Review source: `/workspace/scratch/task02-review.md`, both Important findings under Issues. The fix is a separate commit titled `fix: verify metadata and owned cleanup poststates`; its exact SHA is returned in the controller handoff. No public interface changes, canonical checklist edits, or subagents.
+
+### Changes
+
+1. Metadata now revalidates the child pathname identity/freshness immediately before calling the native setter and compares the requested child's poststate to the held object's resulting stamp after the effect. Pre-effect replacement is StaleState without applying the update. Missing/rebound/unobservable post-effect child state is RecoveryRequired, never an ordinary MutationOutcome.
+2. Linux cleanup captures the held object's link count before unlink, checks it afterward, and inspects the resulting name. A file must lose exactly one link; a removed directory must have zero links; the requested name must be absent. A replacement unlinked while the owned object survives elsewhere, a name recreated after unlink, or unavailable evidence produces RecoveryRequired. Existing hard-link aliases remain intact and supported when exactly the intended observed link disappears.
+3. Windows owned-cleanup deletion evidence is explicitly Unsupported before any effect. Linux link-count behavior is not assumed for Windows delete-pending/close semantics. The existing Windows global mutation gate remains disabled; native runtime qualification is still pending.
+
+The deterministic native-boundary fixture is private and `cfg(all(test, target_os = "linux"))`/`cfg(test)` only. One-shot thread-local callbacks and RAII cleanup prevent cross-test interference. It adds no production IPC switch or runtime test configuration. Effects still run through the real production adapter and native syscalls. The tests intentionally reproduce the accepted unavoidable Linux syscall race and assert an unresolved outcome rather than claiming the replacement was protected by atomic source binding.
+
+### Named tests / witnessed red
+
+- `metadata_rebinding_before_final_validation_is_stale_without_effect`: replacing the path after the mutable handle opens must prevent any metadata effect.
+- `metadata_rebinding_at_native_effect_requires_recovery`: replacement at the native setter boundary updates the held original but must not record the requested path as complete.
+- `metadata_path_missing_after_native_effect_requires_recovery`: unlink after the setter must not produce an ordinary successful result.
+- `owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories`: moving the owned entry and installing a replacement just before unlink must leave evidence of unresolved owned removal.
+- `owned_removal_recreated_name_after_unlink_requires_recovery`: a new name binding after unlink must not be described as completed cleanup.
+- `owned_removal_of_one_hard_link_preserves_other_alias`: intended removal of one alias remains supported without deleting another alias. This compatibility guard already passed before the fix; it is not claimed as an intended red.
+
+The first five named tests failed before the behavioral fix because the adapter returned successful outcomes. All six then passed, including both file/directory iterations of the unlink regression. The original held-parent test and all existing platform/legacy tests remain green.
+
+### Intended red
+
+```sh
+cargo test -p vidlib-fileops --lib boundary_regressions
+```
+
+```text
+   Compiling vidlib-fileops v0.2.0 (/workspace/VidLibOrganizer/.worktrees/rename-blueprint/crates/vidlib-fileops)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
+     Running unittests src/lib.rs (target/debug/deps/vidlib_fileops-1d5a57864a55a22b)
+
+running 6 tests
+test platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery ... FAILED
+test platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery ... FAILED
+test platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect ... FAILED
+test platform::boundary_regressions::owned_removal_of_one_hard_link_preserves_other_alias ... ok
+test platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories ... FAILED
+test platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery ... FAILED
+
+failures:
+
+---- platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery stdout ----
+
+thread 'platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery' (20783) panicked at crates/vidlib-fileops/src/platform/mod.rs:806:27:
+called `Result::unwrap_err()` on an `Ok` value: MutationOutcome { observation: FileObservation { kind: File, stamp: FileStamp { physical_id: Some(PhysicalId { platform: UnixBytes, volume_identity: [0, 0, 0, 0, 0, 0, 0, 33], file_identity: [0, 0, 0, 0, 0, 0, 15, 56] }), size: Some(5), created_ns: Some(1792235439660880325), modified_ns: Some(1700000000123456789), accessed_ns: Some(1792235439660880325), windows_attributes: None } }, durability: Synced }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery stdout ----
+
+thread 'platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery' (20782) panicked at crates/vidlib-fileops/src/platform/mod.rs:816:131:
+called `Result::unwrap_err()` on an `Ok` value: MutationOutcome { observation: FileObservation { kind: File, stamp: FileStamp { physical_id: Some(PhysicalId { platform: UnixBytes, volume_identity: [0, 0, 0, 0, 0, 0, 0, 33], file_identity: [0, 0, 0, 0, 0, 0, 15, 57] }), size: Some(5), created_ns: Some(1792235439660880325), modified_ns: Some(1700000000123456789), accessed_ns: Some(1792235439660880325), windows_attributes: None } }, durability: Synced }
+
+---- platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect stdout ----
+
+thread 'platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect' (20784) panicked at crates/vidlib-fileops/src/platform/mod.rs:795:27:
+called `Result::unwrap_err()` on an `Ok` value: MutationOutcome { observation: FileObservation { kind: File, stamp: FileStamp { physical_id: Some(PhysicalId { platform: UnixBytes, volume_identity: [0, 0, 0, 0, 0, 0, 0, 33], file_identity: [0, 0, 0, 0, 0, 0, 15, 61] }), size: Some(5), created_ns: Some(1792235439662782527), modified_ns: Some(1700000000123456789), accessed_ns: Some(1792235439662782527), windows_attributes: None } }, durability: Synced }
+
+---- platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories stdout ----
+
+thread 'platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories' (20786) panicked at crates/vidlib-fileops/src/platform/mod.rs:827:53:
+called `Result::unwrap_err()` on an `Ok` value: Synced
+
+---- platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery stdout ----
+
+thread 'platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery' (20787) panicked at crates/vidlib-fileops/src/platform/mod.rs:837:49:
+called `Result::unwrap_err()` on an `Ok` value: Synced
+
+
+failures:
+    platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery
+    platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery
+    platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect
+    platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories
+    platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery
+
+test result: FAILED. 1 passed; 5 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p vidlib-fileops --lib`
+
+```
+
+### Focused green
+
+```sh
+cargo test -p vidlib-fileops --lib boundary_regressions
+```
+
+```text
+   Compiling vidlib-fileops v0.2.0 (/workspace/VidLibOrganizer/.worktrees/rename-blueprint/crates/vidlib-fileops)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (target/debug/deps/vidlib_fileops-1d5a57864a55a22b)
+
+running 6 tests
+test platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect ... ok
+test platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery ... ok
+test platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery ... ok
+test platform::boundary_regressions::owned_removal_of_one_hard_link_preserves_other_alias ... ok
+test platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories ... ok
+test platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+```
+
+### Portable regression green
+
+```sh
+cargo test -p vidlib-engine -p vidlib-fileops -p vidlib-inventory
+```
+
+```text
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling vidlib-fileops v0.2.0 (/workspace/VidLibOrganizer/.worktrees/rename-blueprint/crates/vidlib-fileops)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running unittests src/lib.rs (target/debug/deps/vidlib_engine-d93bfedd144350c9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scan.rs (target/debug/deps/scan-c76ad2f0b7e7510f)
+
+running 14 tests
+test cancellation_before_scan_preserves_cancelled_state ... ok
+test directory_links_are_not_followed_or_counted_as_extra_videos ... ok
+test empty_library_completes_without_issues_or_hash_work ... ok
+test fast_scan_groups_exact_sizes_recursively_without_content_comparison ... ok
+test invalid_roots_produce_issues_without_discarding_valid_roots ... ok
+test md5_separates_same_size_collisions_and_hashes_complete_candidates_only ... ok
+test missing_candidate_reports_issue_and_keeps_other_duplicate_results ... ok
+test cancellation_mid_hash_stops_before_finishing_current_file ... ok
+test no_roots_is_a_validation_error ... ok
+test overlapping_roots_and_repeated_paths_are_counted_once ... ok
+test selected_directory_link_is_reported_instead_of_followed ... ok
+test files_changed_during_hashing_are_excluded_and_reported ... ok
+test modification_time_change_without_length_change_invalidates_hash ... ok
+test complete_hash_detects_a_difference_beyond_the_first_buffer ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src/lib.rs (target/debug/deps/vidlib_fileops-1d5a57864a55a22b)
+
+running 8 tests
+test platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery ... ok
+test platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect ... ok
+test platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery ... ok
+test platform::boundary_regressions::owned_removal_of_one_hard_link_preserves_other_alias ... ok
+test platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery ... ok
+test platform::tests::replaced_parent_binding_is_stale_even_while_old_handle_remains_valid ... ok
+test platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories ... ok
+test tests::changed_source_after_validation_cleans_partial_destination ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/actions.rs (target/debug/deps/actions-98c8373a47b420f9)
+
+running 21 tests
+test changed_modification_time_rejects_deletion ... ok
+test deleting_a_selected_copy_keeps_the_original ... ok
+test empty_selection_is_rejected ... ok
+test changed_kept_copy_hash_prevents_deletion_even_with_restored_timestamp ... ok
+test duplicate_selection_is_rejected ... ok
+test invalid_move_destination_prevents_changes ... ok
+test missing_md5_hash_rejects_actions ... ok
+test changed_selected_content_rejects_md5_actions_with_restored_timestamp ... ok
+test missing_kept_copy_prevents_deletion ... ok
+test move_collision_never_overwrites_existing_file ... ok
+test move_preserves_content_and_kept_original ... ok
+test move_to_source_directory_is_rejected ... ok
+test selecting_every_copy_is_rejected_before_any_deletion ... ok
+test move_preserves_original_modification_timestamp ... ok
+test stale_group_late_in_request_prevents_changes_to_an_earlier_group ... ok
+test size_candidates_can_be_deleted_without_content_equality ... ok
+test symlink_source_is_rejected_without_removing_its_target ... ok
+test stale_selected_file_rejects_every_action ... ok
+test unknown_path_rejects_the_entire_request ... ok
+test selected_files_with_same_name_both_move_without_overwrite ... ok
+test move_preserves_content_across_many_streaming_chunks ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/platform.rs (target/debug/deps/platform-53904100077d678f)
+
+running 18 tests
+test cleanup_does_not_remove_replaced_or_nonempty_owned_entries ... ok
+test directory_case_policy_is_per_parent ... ok
+test directories_and_symlink_destinations_are_never_replaced ... ok
+test every_candidate_is_grant_checked_before_parent_deduplication ... ok
+test create_new_staging_publish_and_owned_cleanup ... ok
+test namespace_keeps_native_names_and_protected_entries ... ok
+test existing_target_never_replaced ... ok
+test planner_and_adapter_share_native_reserved_name_and_length_policy ... ok
+test protected_names_and_outside_grants_fail_before_mutation ... ok
+test reparse_ancestor_rejected ... ok
+test staging_cannot_bypass_an_explicitly_protected_root ... ok
+test rename_files_directories_and_case_only_preserves_identity ... ok
+test staging_refresh_rejects_a_path_replaced_while_content_handle_is_open ... ok
+test target_created_after_inspection_is_not_overwritten ... ok
+test unknown_filesystem_is_read_only_to_mutation_seam ... ok
+test stale_source_or_missing_identity_cannot_mutate ... ok
+test tmpfs_native_capability_fixture ... ok
+test verified_read_and_metadata_setters_use_fresh_handles ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/windows_platform.rs (target/debug/deps/windows_platform-99b9a609e9550729)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vidlib_inventory-8cf31c7bb3797f0b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inventory.rs (target/debug/deps/inventory-54d7614fdaa102a6)
+
+running 22 tests
+test explicit_files_are_supported_and_relative_grants_are_rejected ... ok
+test cancellation_preserves_coverage ... ok
+test failed_stat_retains_listed_child ... ok
+test failed_binding_observation_drops_previously_matched_evidence ... ok
+test mismatched_identity_or_invalid_directory_handle_still_rejects_traversal ... ok
+test namespace_model_carries_exact_epochs_and_observed_parent_facts_without_fileops ... ok
+test links_are_visible_but_never_followed ... ok
+test native_modified_timestamp_and_regular_file_size_match_os_observation ... ok
+test os_directory_listing_refuses_directory_links ... ok
+test overlap_deduplicates_paths_not_hardlinks ... ok
+test non_utf8_names_remain_native_and_carry_transformation_issues ... ok
+test overlapping_bindings_retain_their_own_observation_and_coverage_association ... ok
+test overlapping_bindings_validate_evidence_before_deduplicating_traversal ... ok
+test precancelled_scan_records_unvisited_roots_and_progress_is_bounded ... ok
+test protected_marker_and_staging_names_remain_in_listing_but_are_excluded ... ok
+test protected_roots_conservatively_match_case_aliases_at_component_boundaries ... ok
+test protected_subtrees_are_excluded_when_selected_directly ... ok
+test replacing_a_listed_directory_with_an_external_link_never_observes_external_children ... ok
+test partial_and_failed_listings_propagate_incomplete_coverage_to_ancestors ... ok
+test reserved_ascii_case_variants_are_conservatively_excluded_for_unknown_filesystems ... ok
+test scan_keeps_unique_empty_and_nonvideo_entries ... ok
+test unavailable_directory_identity_preserves_safe_entries_with_incomplete_coverage ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/path_codec.rs (target/debug/deps/path_codec-4d9b5506ad20490f)
+
+running 5 tests
+test path_codec_round_trips_native_units ... ok
+test all_ids_are_distinct_uuid_strings ... ok
+test portable_relative_paths_reject_escape_and_native_display_is_not_lookup ... ok
+test json_quantities_and_nanosecond_timestamps_use_validated_decimal_strings ... ok
+test windows_utf16_fixture_is_exact_and_foreign_paths_are_not_transcoded ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vidlib_engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vidlib_fileops
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vidlib_inventory
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+```
+
+### Overlay native regression green
+
+```sh
+TMPDIR=/workspace/VidLibOrganizer/.worktrees/rename-blueprint/target/task02-overlay-tmp cargo test -p vidlib-fileops
+```
+
+```text
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/vidlib_fileops-1d5a57864a55a22b)
+
+running 8 tests
+test platform::boundary_regressions::metadata_path_missing_after_native_effect_requires_recovery ... ok
+test platform::boundary_regressions::metadata_rebinding_before_final_validation_is_stale_without_effect ... ok
+test platform::boundary_regressions::metadata_rebinding_at_native_effect_requires_recovery ... ok
+test platform::tests::replaced_parent_binding_is_stale_even_while_old_handle_remains_valid ... ok
+test platform::boundary_regressions::owned_removal_recreated_name_after_unlink_requires_recovery ... ok
+test platform::boundary_regressions::owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories ... ok
+test tests::changed_source_after_validation_cleans_partial_destination ... ok
+test platform::boundary_regressions::owned_removal_of_one_hard_link_preserves_other_alias ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/actions.rs (target/debug/deps/actions-98c8373a47b420f9)
+
+running 21 tests
+test deleting_a_selected_copy_keeps_the_original ... ok
+test changed_modification_time_rejects_deletion ... ok
+test changed_kept_copy_hash_prevents_deletion_even_with_restored_timestamp ... ok
+test duplicate_selection_is_rejected ... ok
+test empty_selection_is_rejected ... ok
+test invalid_move_destination_prevents_changes ... ok
+test changed_selected_content_rejects_md5_actions_with_restored_timestamp ... ok
+test missing_kept_copy_prevents_deletion ... ok
+test missing_md5_hash_rejects_actions ... ok
+test move_preserves_original_modification_timestamp ... ok
+test move_preserves_content_and_kept_original ... ok
+test move_collision_never_overwrites_existing_file ... ok
+test move_to_source_directory_is_rejected ... ok
+test selecting_every_copy_is_rejected_before_any_deletion ... ok
+test stale_group_late_in_request_prevents_changes_to_an_earlier_group ... ok
+test size_candidates_can_be_deleted_without_content_equality ... ok
+test stale_selected_file_rejects_every_action ... ok
+test unknown_path_rejects_the_entire_request ... ok
+test symlink_source_is_rejected_without_removing_its_target ... ok
+test selected_files_with_same_name_both_move_without_overwrite ... ok
+test move_preserves_content_across_many_streaming_chunks ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/platform.rs (target/debug/deps/platform-53904100077d678f)
+
+running 18 tests
+test cleanup_does_not_remove_replaced_or_nonempty_owned_entries ... ok
+test directory_case_policy_is_per_parent ... ok
+test directories_and_symlink_destinations_are_never_replaced ... ok
+test namespace_keeps_native_names_and_protected_entries ... ok
+test existing_target_never_replaced ... ok
+test every_candidate_is_grant_checked_before_parent_deduplication ... ok
+test planner_and_adapter_share_native_reserved_name_and_length_policy ... ok
+test protected_names_and_outside_grants_fail_before_mutation ... ok
+test staging_cannot_bypass_an_explicitly_protected_root ... ok
+test reparse_ancestor_rejected ... ok
+test staging_refresh_rejects_a_path_replaced_while_content_handle_is_open ... ok
+test target_created_after_inspection_is_not_overwritten ... ok
+test stale_source_or_missing_identity_cannot_mutate ... ok
+test unknown_filesystem_is_read_only_to_mutation_seam ... ok
+test tmpfs_native_capability_fixture ... ok
+test verified_read_and_metadata_setters_use_fresh_handles ... ok
+test rename_files_directories_and_case_only_preserves_identity ... ok
+test create_new_staging_publish_and_owned_cleanup ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/windows_platform.rs (target/debug/deps/windows_platform-99b9a609e9550729)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vidlib_fileops
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+```
+
+### Linux Clippy
+
+```sh
+cargo clippy -p vidlib-fileops -p vidlib-inventory --all-targets -- -D warnings
+```
+
+```text
+    Checking vidlib-fileops v0.2.0 (/workspace/VidLibOrganizer/.worktrees/rename-blueprint/crates/vidlib-fileops)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+
+```
+
+### Windows-target Clippy, compile only
+
+```sh
+source /workspace/.tools/windows-check-env.sh
+cargo clippy -p vidlib-fileops -p vidlib-inventory --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+```
+
+```text
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking vidlib-fileops v0.2.0 (/workspace/VidLibOrganizer/.worktrees/rename-blueprint/crates/vidlib-fileops)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.14s
+
+```
+
+`cargo fmt --all -- --check` succeeded with no output. Portable total: **88 passing tests**. The overlay fileops run passes 8 unit + 21 legacy action + 18 platform tests (**47**); the explicit `/dev/shm` fixture remains tmpfs even in that run. No full/unconfigured desktop rerun was needed; the previously recorded baseline limitation is unchanged.
+
+The Minor Windows staging writer-sharing lifecycle finding is deliberately deferred to copy/publication integration and final review, as directed by the controller. No native Windows test result is claimed. These changes address both Important outcome-reporting findings while preserving the documented unavoidable Linux atomic source-binding limitation.

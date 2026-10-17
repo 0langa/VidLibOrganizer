@@ -573,6 +573,8 @@ impl Filesystem for PlatformFs {
         let (parent, name) = parent(path)?;
         native::mutation_supported(&parent, Phase::Metadata)?;
         let file = native::open_mutable_child(&parent, name, Phase::Metadata)?;
+        #[cfg(all(test, target_os = "linux"))]
+        boundary_fixture::run(boundary_fixture::Boundary::MetadataBeforeRevalidation);
         check_stamp(
             &native::observation(&file)?.stamp,
             expected,
@@ -583,6 +585,14 @@ impl Filesystem for PlatformFs {
             &parent,
             Phase::Metadata,
         )?;
+        let immediate = native::child_observation(&parent, name).map_err(|_| {
+            OpError::new(
+                ErrorCode::StaleState,
+                Phase::Metadata,
+                "metadata target binding cannot be revalidated",
+            )
+        })?;
+        check_stamp(&immediate.stamp, expected, Phase::Metadata)?;
         native::metadata(&file, update)?;
         applied_parent_binding(
             path.parent().expect("validated parent"),
@@ -596,6 +606,15 @@ impl Filesystem for PlatformFs {
                 "metadata applied but observation failed",
             )
         })?;
+        native::child_observation(&parent, name)
+            .and_then(|bound| check_stamp(&bound.stamp, &observation.stamp, Phase::Metadata))
+            .map_err(|_| {
+                OpError::new(
+                    ErrorCode::RecoveryRequired,
+                    Phase::Metadata,
+                    "metadata applied but requested pathname no longer has the held object's state",
+                )
+            })?;
         Ok(MutationOutcome {
             observation,
             durability: native::flush(&file),
@@ -614,6 +633,14 @@ impl Filesystem for PlatformFs {
         let file = native::open_mutable_child(&parent, name, Phase::Remove)?;
         let observation = native::observation(&file)?;
         check_stamp(&observation.stamp, &entry.stamp, Phase::Remove)?;
+        let links_before = native::removal_link_count(&file)?;
+        if links_before == 0 {
+            return Err(OpError::new(
+                ErrorCode::StaleState,
+                Phase::Remove,
+                "owned object was already unlinked",
+            ));
+        }
         check_stamp(
             &native::child_observation(&parent, name)?.stamp,
             &entry.stamp,
@@ -635,6 +662,22 @@ impl Filesystem for PlatformFs {
             &parent,
             Phase::Remove,
         )?;
+        let links_after = native::removal_link_count(&file).map_err(|_| {
+            OpError::new(
+                ErrorCode::RecoveryRequired,
+                Phase::Remove,
+                "unlink applied but held-object deletion evidence is unavailable",
+            )
+        })?;
+        let intended_link_removed = if observation.kind == EntryKind::Directory {
+            links_after == 0
+        } else {
+            links_before.checked_sub(1) == Some(links_after)
+        };
+        let name_absent = matches!(native::child_observation(&parent, name), Err(error) if error.code == ErrorCode::SourceMissing);
+        if !intended_link_removed || !name_absent {
+            return Err(OpError::new(ErrorCode::RecoveryRequired, Phase::Remove, "unlink applied but intended owned removal cannot be established from held-object and pathname evidence"));
+        }
         Ok(native::flush(&parent))
     }
 }
@@ -749,5 +792,223 @@ mod tests {
                 .code,
             ErrorCode::StaleState
         );
+    }
+}
+
+// Private deterministic fixture seam: omitted from every non-test build, with
+// thread-local one-shot callbacks so concurrent tests cannot affect one another.
+#[cfg(all(test, target_os = "linux"))]
+mod boundary_fixture {
+    use std::cell::RefCell;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Boundary {
+        MetadataBeforeRevalidation,
+        MetadataBeforeEffect,
+        MetadataAfterEffect,
+        RemoveBeforeEffect,
+        RemoveAfterEffect,
+    }
+    type Hook = (Boundary, Box<dyn FnOnce()>);
+    thread_local! { static HOOK: RefCell<Option<Hook>> = RefCell::new(None); }
+    pub(super) struct Guard;
+    pub(super) fn install(boundary: Boundary, action: impl FnOnce() + 'static) -> Guard {
+        HOOK.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some((boundary, Box::new(action)));
+        });
+        Guard
+    }
+    pub(super) fn run(boundary: Boundary) {
+        let hook = HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(at, _)| *at == boundary) {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some((_, action)) = hook {
+            action();
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod boundary_regressions {
+    use super::boundary_fixture::{install, Boundary};
+    use super::*;
+    use std::fs;
+    const UPDATED: i128 = 1_700_000_000_123_456_789;
+
+    #[test]
+    fn metadata_rebinding_before_final_validation_is_stale_without_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let moved = dir.path().join("moved");
+        fs::write(&source, b"owned").unwrap();
+        let mut adapter = PlatformFs::default();
+        let expected = adapter.inspect(&source).unwrap().stamp;
+        let at_source = source.clone();
+        let at_moved = moved.clone();
+        let _guard = install(Boundary::MetadataBeforeRevalidation, move || {
+            fs::rename(&at_source, at_moved).unwrap();
+            fs::write(at_source, b"replacement").unwrap();
+        });
+        let result = adapter.set_metadata(
+            &source,
+            &expected,
+            &MetadataUpdate {
+                modified_ns: Some(UPDATED),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.unwrap_err().code, ErrorCode::StaleState);
+        assert_eq!(
+            adapter.inspect(&moved).unwrap().stamp.modified_ns,
+            expected.modified_ns
+        );
+        assert_eq!(fs::read(source).unwrap(), b"replacement");
+    }
+    #[test]
+    fn metadata_rebinding_at_native_effect_requires_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let moved = dir.path().join("moved");
+        fs::write(&source, b"owned").unwrap();
+        let mut adapter = PlatformFs::default();
+        let expected = adapter.inspect(&source).unwrap().stamp;
+        let at_source = source.clone();
+        let at_moved = moved.clone();
+        let _guard = install(Boundary::MetadataBeforeEffect, move || {
+            fs::rename(&at_source, at_moved).unwrap();
+            fs::write(at_source, b"replacement").unwrap();
+        });
+        let result = adapter.set_metadata(
+            &source,
+            &expected,
+            &MetadataUpdate {
+                modified_ns: Some(UPDATED),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.unwrap_err().code, ErrorCode::RecoveryRequired);
+        assert_eq!(
+            adapter.inspect(&moved).unwrap().stamp.modified_ns,
+            Some(UPDATED)
+        );
+        assert_ne!(
+            adapter.inspect(&source).unwrap().stamp.modified_ns,
+            Some(UPDATED)
+        );
+        assert_eq!(fs::read(source).unwrap(), b"replacement");
+    }
+    #[test]
+    fn metadata_path_missing_after_native_effect_requires_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::write(&source, b"owned").unwrap();
+        let mut adapter = PlatformFs::default();
+        let expected = adapter.inspect(&source).unwrap().stamp;
+        let at_source = source.clone();
+        let _guard = install(Boundary::MetadataAfterEffect, move || {
+            fs::remove_file(at_source).unwrap()
+        });
+        assert_eq!(
+            adapter
+                .set_metadata(
+                    &source,
+                    &expected,
+                    &MetadataUpdate {
+                        modified_ns: Some(UPDATED),
+                        ..Default::default()
+                    }
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::RecoveryRequired
+        );
+        assert!(!source.exists());
+    }
+    #[test]
+    fn owned_removal_rebinding_at_unlink_requires_recovery_for_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = PlatformFs::default();
+        for directory in [false, true] {
+            let source = dir.path().join(if directory {
+                "folder"
+            } else {
+                ".vidlib-staging-owned"
+            });
+            let moved = dir.path().join(if directory {
+                "moved-folder"
+            } else {
+                "moved-file"
+            });
+            let owned = if directory {
+                adapter.create_directory(&source).unwrap()
+            } else {
+                adapter.create_staging(&source).unwrap().ownership
+            };
+            let at_source = source.clone();
+            let at_moved = moved.clone();
+            let _guard = install(Boundary::RemoveBeforeEffect, move || {
+                fs::rename(&at_source, at_moved).unwrap();
+                if directory {
+                    fs::create_dir(at_source).unwrap();
+                } else {
+                    fs::write(at_source, b"replacement").unwrap();
+                }
+            });
+            assert_eq!(
+                adapter.remove_owned(&owned).unwrap_err().code,
+                ErrorCode::RecoveryRequired
+            );
+            assert_eq!(
+                adapter.inspect(&moved).unwrap().stamp.physical_id,
+                owned.stamp.physical_id
+            );
+            assert!(!source.exists()); // Linux removed the replacement, not the held owned object.
+        }
+    }
+    #[test]
+    fn owned_removal_recreated_name_after_unlink_requires_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join(".vidlib-staging-owned");
+        let mut adapter = PlatformFs::default();
+        let owned = adapter.create_staging(&source).unwrap().ownership;
+        let at_source = source.clone();
+        let _guard = install(Boundary::RemoveAfterEffect, move || {
+            fs::write(at_source, b"new binding").unwrap()
+        });
+        assert_eq!(
+            adapter.remove_owned(&owned).unwrap_err().code,
+            ErrorCode::RecoveryRequired
+        );
+        assert_eq!(fs::read(source).unwrap(), b"new binding");
+    }
+    #[test]
+    fn owned_removal_of_one_hard_link_preserves_other_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join(".vidlib-staging-owned");
+        let alias = dir.path().join("alias");
+        let mut adapter = PlatformFs::default();
+        let mut staging = adapter.create_staging(&source).unwrap();
+        use std::io::Write;
+        staging.file.write_all(b"owned").unwrap();
+        adapter.refresh_staging(&mut staging).unwrap();
+        fs::hard_link(&source, &alias).unwrap();
+        assert_eq!(
+            adapter.remove_owned(&staging.ownership).unwrap(),
+            Durability::Synced
+        );
+        assert!(!source.exists());
+        assert_eq!(fs::read(alias).unwrap(), b"owned");
     }
 }
