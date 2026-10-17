@@ -211,6 +211,9 @@ pub enum CompanionPolicy {
     Explicit {
         associations: Vec<CompanionAssociation>,
     },
+    MatchExact {
+        associations: Vec<CompanionAssociation>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -335,7 +338,9 @@ impl RecipeV1 {
             return Err(invalid("duplicate selected entry"));
         }
         let mut companions = BTreeSet::new();
-        if let CompanionPolicy::Explicit { associations } = &self.companions {
+        if let CompanionPolicy::Explicit { associations }
+        | CompanionPolicy::MatchExact { associations } = &self.companions
+        {
             let mut primaries = BTreeSet::new();
             for association in associations {
                 if !selected.contains(&association.primary)
@@ -358,7 +363,13 @@ impl RecipeV1 {
         }
         let primary_set: BTreeSet<_> = selected.difference(&companions).copied().collect();
         let order: BTreeSet<_> = self.numbering_order.iter().copied().collect();
-        if order.len() != self.numbering_order.len() || order != primary_set {
+        if order.len() != self.numbering_order.len()
+            || if matches!(self.companions, CompanionPolicy::MatchExact { .. }) {
+                !order.is_subset(&primary_set)
+            } else {
+                order != primary_set
+            }
+        {
             return Err(RenameError::new(
                 RenameErrorCode::InvalidNumberingOrder,
                 "numbering order must list every primary exactly once",

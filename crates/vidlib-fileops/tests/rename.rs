@@ -1223,3 +1223,181 @@ fn recovery_cannot_clear_an_unconfirmed_durability_receipt_without_flush() {
         "original receipt must stay factual"
     );
 }
+
+fn companion_fixture() -> Fixture {
+    let mut f = Fixture::new(&[
+        ("old.mkv", "old.mkv"),
+        ("old.en.idx", "old.en.idx"),
+        ("old.en.sub", "old.en.sub"),
+        ("unrelated.txt", "unrelated.txt"),
+    ]);
+    let inventory = f.plan.execution.provenance.inventory.clone();
+    let mut recipe = f.plan.execution.provenance.recipe.clone();
+    recipe.selection.retain(|id| {
+        inventory
+            .entries
+            .iter()
+            .find(|e| e.id == *id)
+            .unwrap()
+            .display_name
+            != "unrelated.txt"
+    });
+    recipe.companions = CompanionPolicy::MatchExact {
+        associations: vec![],
+    };
+    recipe.rules = vec![Rule {
+        id: "name".into(),
+        enabled: true,
+        segment: SegmentSelector::Stem,
+        parameters: RuleParameters::FixedStem {
+            value: "New".into(),
+        },
+    }];
+    prepare_associations(&inventory, &mut recipe).unwrap();
+    let mut inputs = f.plan.frozen_inputs.clone();
+    inputs.primary_order = recipe.numbering_order.clone();
+    let batch = evaluate(&inventory, &recipe, &inputs).unwrap();
+    let ns = PlatformFs::default()
+        .capture_namespace(
+            &batch.grants,
+            &batch
+                .rows
+                .iter()
+                .map(|r| r.source_path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    f.plan = plan(&inventory, &batch, &ns, f.plan.version).unwrap();
+    assert_eq!(f.plan.execution.groups.len(), 1);
+    assert_eq!(f.plan.execution.groups[0].steps.len(), 3);
+    f
+}
+#[test]
+fn partial_companion_failure_compensates_every_applied_asset_and_retains_unrelated() {
+    let f = companion_fixture();
+    let mut adapter = FaultFs::new(&f);
+    adapter.fail_at = Some(3);
+    let report = f.run(&mut adapter, &JobControl::default()).unwrap();
+    assert_eq!(report.state, OperationState::Failed);
+    assert!(report.completed_groups.is_empty());
+    assert_eq!(
+        report.receipts.len(),
+        4,
+        "two effects and their inverses remain factual"
+    );
+    for name in ["old.mkv", "old.en.idx", "old.en.sub", "unrelated.txt"] {
+        assert_eq!(fs::read(f.media.join(name)).unwrap(), name.as_bytes());
+    }
+    assert_eq!(fs::read_dir(&f.media).unwrap().count(), 4);
+    let journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    let record = journal.operation(report.operation_id.unwrap()).unwrap();
+    assert_eq!(record.steps.len(), 3);
+    assert_eq!(record.recovery_effects.len(), 2);
+    let preview = recovery::reconcile(&record, &mut PlatformFs::default()).unwrap();
+    for name in ["old.mkv", "old.en.idx", "old.en.sub"] {
+        assert!(preview.actions.iter().any(|a| a
+            .before_path
+            .as_ref()
+            .is_some_and(|p| decode_path(p).unwrap() == f.media.join(name))));
+    }
+    assert!(journal.pending().unwrap().is_empty());
+}
+#[test]
+fn partial_companion_failure_with_interrupted_compensation_is_recoverable() {
+    let f = companion_fixture();
+    let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_inverse BEFORE INSERT ON recovery_effects BEGIN SELECT RAISE(ABORT,'companion inverse durability fault'); END;").unwrap();
+    let mut adapter = FaultFs::new(&f);
+    adapter.fail_at = Some(3);
+    assert!(f.run(&mut adapter, &JobControl::default()).is_err());
+    assert_eq!(adapter.calls.len(), 3);
+    assert_eq!(fs::read(f.media.join("New.mkv")).unwrap(), b"old.mkv");
+    assert_eq!(fs::read(f.media.join("New.en.idx")).unwrap(), b"old.en.idx");
+    assert_eq!(fs::read(f.media.join("old.en.sub")).unwrap(), b"old.en.sub");
+    assert_eq!(
+        fs::read(f.media.join("unrelated.txt")).unwrap(),
+        b"unrelated.txt"
+    );
+    db.execute_batch("DROP TRIGGER fail_inverse;").unwrap();
+    let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    let record = journal.pending().unwrap().remove(0);
+    let preview = recovery::reconcile(&record, &mut PlatformFs::default()).unwrap();
+    assert_eq!(preview.actions.len(), 3);
+    for name in ["old.mkv", "old.en.idx", "old.en.sub"] {
+        assert!(preview.actions.iter().any(|a| a
+            .before_path
+            .as_ref()
+            .is_some_and(|p| decode_path(p).unwrap() == f.media.join(name))));
+    }
+    let nonce = preview.review_nonce();
+    let lease = f.coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    recovery::apply_recovery(
+        preview.review(nonce).unwrap(),
+        recovery::RecoveryChoice::Restore,
+        &lease,
+        &mut journal,
+        &mut PlatformFs::default(),
+        &JobControl::default(),
+    )
+    .unwrap();
+    for name in ["old.mkv", "old.en.idx", "old.en.sub", "unrelated.txt"] {
+        assert_eq!(fs::read(f.media.join(name)).unwrap(), name.as_bytes());
+    }
+    assert_eq!(fs::read_dir(&f.media).unwrap().count(), 4);
+    assert!(journal.pending().unwrap().is_empty());
+}
+
+#[test]
+fn completed_companion_group_undo_preserves_receipt_groups_and_all_assets() {
+    let f = companion_fixture();
+    let report = f
+        .run(&mut PlatformFs::default(), &JobControl::default())
+        .unwrap();
+    assert_eq!(report.state, OperationState::Completed);
+    let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    let record = journal.operation(report.operation_id.unwrap()).unwrap();
+    let context = undo::capture_context(&record).unwrap();
+    let read = f.coordinator.try_acquire(LeaseKind::Read).unwrap();
+    let epochs = read.epochs().unwrap();
+    let mut native = PlatformFs {
+        namespace_epoch: epochs.namespace,
+        policy_epoch: epochs.policy,
+        ..Default::default()
+    };
+    let ns = native
+        .capture_namespace(&context.grants, &context.candidates)
+        .unwrap();
+    let inverse = undo::plan_undo(
+        &record,
+        &ns,
+        PlanRef {
+            session_id: SessionId::new(),
+            plan_id: PlanId::new(),
+            revision: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(inverse.rows.len(), 3);
+    assert_eq!(inverse.execution.groups.len(), 1);
+    assert_eq!(inverse.execution.groups[0].steps.len(), 3);
+    assert!(inverse.issues.is_empty());
+    drop(read);
+    let lease = f.coordinator.try_acquire(LeaseKind::Write).unwrap();
+    let result = execute(
+        &inverse,
+        &lease,
+        &mut journal,
+        &mut native,
+        &JobControl::default(),
+    )
+    .unwrap();
+    assert_eq!(result.state, OperationState::Completed);
+    for name in ["old.mkv", "old.en.idx", "old.en.sub", "unrelated.txt"] {
+        assert_eq!(fs::read(f.media.join(name)).unwrap(), name.as_bytes());
+    }
+    assert_eq!(fs::read_dir(&f.media).unwrap().count(), 4);
+    assert_eq!(
+        journal.operation(record.operation_id).unwrap().steps.len(),
+        3
+    );
+}

@@ -77,3 +77,13 @@ test('nested_rename_request_matches_shared_camel_case_golden', async ({ page }) 
   expect(sent.request.selectionFilter.createdNs.max).toBe('1700000000000000000123456789');
   expect(sent.request.rowOverrides[0].newName).toBe('=literal,名.mkv');
 });
+
+test('primary_only_companion_warning_is_visible_in_preview', async ({ page }) => {
+  const warning = 'Related asset original.en.srt is not bound to this primary; it will not inherit its name.';
+  await page.addInitScript(desktopBridge, { ...fixture, row: { ...fixture.row, companionWarnings: [warning] } });
+  await open(page, false);
+  await page.getByRole('button', { name: 'Choose folders', exact: true }).click();
+  await page.getByLabel('Select original.mp4').check();
+  await page.getByTestId('rename-preview').click();
+  await expect(page.getByRole('cell').filter({ hasText: warning })).toBeVisible();
+});

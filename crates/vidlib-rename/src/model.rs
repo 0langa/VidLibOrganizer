@@ -6,6 +6,7 @@ use vidlib_inventory::{ids::*, FileStamp, GrantSet, Inventory};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenameErrorCode {
+    InvalidAssociation,
     InvalidMapping,
     AmbiguousMapping,
     MappingCardinality,

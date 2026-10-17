@@ -31,10 +31,20 @@ pub fn evaluate(
             ));
         }
     }
-    if recipe.companions != CompanionPolicy::None
-        || recipe.destination != Destination::SameDirectory
-        || !recipe.metadata_changes.is_empty()
+    let associations = associate(inventory, &recipe.selection, &recipe.companions)?;
+    if associations
+        .primary_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != recipe.numbering_order.iter().copied().collect()
     {
+        return Err(RenameError::new(
+            RenameErrorCode::InvalidNumberingOrder,
+            "resolve associations before freezing primary order",
+        ));
+    }
+    if recipe.destination != Destination::SameDirectory || !recipe.metadata_changes.is_empty() {
         return Err(RenameError::new(
             RenameErrorCode::UnsupportedConfiguration,
             "configuration requires a later evaluator",
@@ -83,8 +93,34 @@ pub fn evaluate(
             }
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let mut rows = Vec::with_capacity(recipe.numbering_order.len());
+    let assets = associations
+        .assets
+        .iter()
+        .map(|a| (a.asset_id, a))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = BTreeMap::<EntryId, Vec<EntryId>>::new();
+    let mut unresolved = Vec::new();
+    for id in &recipe.selection {
+        if let Some(asset) = assets.get(id) {
+            if let Some(owner) = asset.owner {
+                children.entry(owner).or_default().push(*id);
+            } else {
+                unresolved.push(*id);
+            }
+        }
+    }
+    // Preserve the established primary row order and place selected assets next
+    // to their owner. Display sorting remains an adapter-only operation.
+    let mut row_order = Vec::with_capacity(recipe.selection.len());
     for id in &recipe.numbering_order {
+        row_order.push(*id);
+        if let Some(ids) = children.get(id) {
+            row_order.extend(ids);
+        }
+    }
+    row_order.extend(unresolved);
+    let mut rows = Vec::with_capacity(recipe.selection.len());
+    for id in &row_order {
         let entry = entries[id];
         let native_name = entry.absolute_path.file_name().and_then(|n| n.to_str());
         // Unsupported native names remain visible and blocked without lossy reconstruction.
@@ -115,6 +151,19 @@ pub fn evaluate(
                 rule_id: None,
                 message: "entry is not a supported regular file with a clean observation".into(),
             });
+            rows.push(row);
+            continue;
+        }
+        if let Some(asset) = assets.get(id) {
+            if asset.owner.is_none() {
+                row.status = RowStatus::NeedsReview;
+                row.issues.push(PlanIssue {
+                    code: RenameErrorCode::InvalidAssociation,
+                    entry_id: Some(*id),
+                    rule_id: None,
+                    message: "Choose an explicit companion owner; asset kept unchanged".into(),
+                });
+            }
             rows.push(row);
             continue;
         }
@@ -239,7 +288,7 @@ pub fn evaluate(
         }
         rows.push(row);
     }
-    Ok(EvaluatedBatch {
+    let mut batch = EvaluatedBatch {
         recipe: recipe.clone(),
         inventory_id: inventory.id,
         generation: inventory.generation,
@@ -253,7 +302,22 @@ pub fn evaluate(
                 .map(|r| r.source_grant.clone())
                 .collect(),
         },
-    })
+    };
+    propagate_names(&mut batch, &associations)?;
+    for warning in &associations.warnings {
+        if let Some(row) = batch
+            .rows
+            .iter_mut()
+            .find(|r| r.entry_id == warning.entry_id)
+        {
+            row.explanations.push(RuleExplanation {
+                rule_id: "companion_warning".into(),
+                before: warning.asset_id.to_string(),
+                after: warning.message.clone(),
+            });
+        }
+    }
+    Ok(batch)
 }
 
 pub(crate) fn validate_inventory(

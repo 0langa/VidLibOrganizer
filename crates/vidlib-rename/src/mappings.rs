@@ -466,6 +466,16 @@ pub fn evaluate_with_mappings(
             .with_file_name(&edit.new_name);
         targets.insert(edit.entry_id, path);
     }
+    let associations = associate(inventory, &recipe.selection, &recipe.companions)?;
+    if associations
+        .assets
+        .iter()
+        .any(|a| targets.contains_key(&a.asset_id))
+    {
+        return Err(invalid(
+            "unbind companion ownership before editing an asset independently",
+        ));
+    }
     for row in &mut batch.rows {
         let Some(target) = targets.get(&row.entry_id) else {
             continue;
@@ -501,6 +511,7 @@ pub fn evaluate_with_mappings(
             RowStatus::Changed
         };
     }
+    propagate_names(&mut batch, &associations)?;
     Ok(batch)
 }
 pub fn export_report(plan: &RenamePlan, mode: ExportMode) -> Result<Vec<u8>, RenameError> {

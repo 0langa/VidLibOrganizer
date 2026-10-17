@@ -270,7 +270,9 @@ pub fn prepare_selection(
     let mut updated = recipe.clone();
     updated.selection = selection;
     updated.selection_filter = Some(filter.clone());
-    if let CompanionPolicy::Explicit { associations } = &mut updated.companions {
+    if let CompanionPolicy::Explicit { associations }
+    | CompanionPolicy::MatchExact { associations } = &mut updated.companions
+    {
         associations.retain(|a| selected.contains(&a.primary));
         for a in associations {
             a.companions.retain(|id| selected.contains(id));
@@ -278,7 +280,8 @@ pub fn prepare_selection(
     }
     let companions = match &updated.companions {
         CompanionPolicy::None => BTreeSet::new(),
-        CompanionPolicy::Explicit { associations } => associations
+        CompanionPolicy::Explicit { associations }
+        | CompanionPolicy::MatchExact { associations } => associations
             .iter()
             .flat_map(|a| a.companions.iter().copied())
             .collect(),
@@ -303,6 +306,7 @@ pub fn prepare_selection(
             "recipe revision overflow",
         )
     })?;
+    prepare_associations(inventory, &mut updated)?;
     updated.validate()?;
     *recipe = updated;
     Ok(())

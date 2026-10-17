@@ -65,6 +65,7 @@ fn preview(state: &AppState) -> UiPlanRef {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -389,6 +390,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -456,6 +458,7 @@ fn directory_capture_preserves_unselected_nested_children_for_undo() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -597,6 +600,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -617,6 +621,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -695,6 +700,7 @@ fn empty_directory_rename_retains_complete_namespace_for_undo() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -900,6 +906,7 @@ fn recovery_all_actions_are_reachable_through_one_review() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -1131,6 +1138,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
                 selection_filter: None,
                 numbering_scope: Default::default(),
                 row_overrides: vec![],
+                companions: None,
             },
         )
         .unwrap(),
@@ -1147,6 +1155,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
             selection_filter: None,
             numbering_scope: Default::default(),
             row_overrides: vec![],
+            companions: None,
         }
     )
     .is_err());
@@ -1659,6 +1668,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
             selection_filter: None,
             numbering_scope: Default::default(),
             row_overrides: vec![],
+            companions: None,
         };
         let result = wait(&state, preview_owned(&state, request).unwrap());
         let reference = serde_json::from_value(result["planRef"].clone()).unwrap();
@@ -1696,6 +1706,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         selection_filter: None,
         numbering_scope: Default::default(),
         row_overrides: vec![],
+        companions: None,
     };
     let result = wait(&state, preview_owned(&state, request).unwrap());
     let reference = serde_json::from_value(result["planRef"].clone()).unwrap();
@@ -1759,6 +1770,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         selection_filter: None,
         numbering_scope: Default::default(),
         row_overrides: vec![],
+        companions: None,
     };
     let result = wait(&state, preview_owned(&state, request).unwrap());
     let reference = serde_json::from_value(result["planRef"].clone()).unwrap();
@@ -1771,4 +1783,230 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
     )
     .unwrap();
     assert_eq!(rows.items[0]["newName"], "original-20240203.mp4");
+}
+
+#[test]
+fn companion_wire_is_strict_camel_case() {
+    let primary = vidlib_inventory::ids::EntryId::new();
+    let asset = vidlib_inventory::ids::EntryId::new();
+    let base = json!({"revision":"1","selectedIds":[primary,asset],"companions":{"type":"matchExact","associations":[{"primaryId":primary,"companionIds":[asset]}]}});
+    assert!(
+        serde_json::from_value::<RenameRequestDto>(base.clone()).is_ok(),
+        "valid camelCase policy must be accepted"
+    );
+    for bad in [
+        json!({"type":"match_exact","associations":[]}),
+        json!({"type":"matchExact","associations":[],"path":"/outside"}),
+        json!({"type":"explicit","associations":[{"primary_id":primary,"companionIds":[asset]}]}),
+        json!({"type":"explicit","associations":[{"primaryId":primary,"companion_ids":[asset]}]}),
+        json!({"type":"explicit","associations":[{"primaryId":primary,"companionIds":[asset],"target":"outside"}]}),
+    ] {
+        let mut payload = base.clone();
+        payload["companions"] = bad;
+        assert!(serde_json::from_value::<RenameRequestDto>(payload).is_err());
+    }
+}
+
+#[test]
+fn companions_reach_legacy_and_ordered_preview_before_metadata_and_counter_freezing() {
+    use vidlib_rename::*;
+    use vidlib_tauri::metadata::MediaInfoProvider;
+    let (dir, mut state) = fixture();
+    let media = dir.path().join("media");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/fixtures/media/metadata.mp4");
+    for name in ["original.mp4", "second.mp4"] {
+        std::fs::copy(&fixture, media.join(name)).unwrap();
+    }
+    std::fs::write(media.join("original.en.forced.srt"), b"subtitle, not media").unwrap();
+    std::fs::write(media.join("second.fr.srt"), b"second subtitle").unwrap();
+    #[cfg(not(windows))]
+    let (exe, version) = (PathBuf::from("/usr/bin/mediainfo"), "25.04");
+    #[cfg(windows)]
+    let (exe, version) = (
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/mediainfo/windows-x86_64/MediaInfo.exe"),
+        "25.10",
+    );
+    state.metadata_provider =
+        std::sync::Arc::new(MediaInfoProvider::from_executable(exe, version.into()));
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let id = |name: &str| {
+        page.items
+            .iter()
+            .find(|r| r["name"] == name || r["displayName"] == name)
+            .map(|r| r["itemId"].clone())
+            .unwrap_or_else(|| panic!("missing {name}: {:?}", page.items))
+    };
+    let primary = id("original.mp4");
+    let subtitle = id("original.en.forced.srt");
+    let selected = vec![
+        subtitle.clone(),
+        primary.clone(),
+        id("second.fr.srt"),
+        id("second.mp4"),
+    ];
+    let parts = vec![
+        TemplatePart::Field {
+            key: FieldKey::Media {
+                property: MediaProperty::Title,
+            },
+            format: ValueFormat::Text,
+            fallback: None,
+        },
+        TemplatePart::Literal("-".into()),
+        TemplatePart::Field {
+            key: FieldKey::Counter,
+            format: ValueFormat::Text,
+            fallback: None,
+        },
+    ];
+    for (revision, ordered) in [(2, false), (3, true)] {
+        let mut payload = json!({"revision":revision.to_string(),"selectedIds":selected,"companions":{"type":"matchExact","associations":[]},"rule":{"template":{"parts":parts}}});
+        if ordered {
+            let recipe = json!({"schema_version":1,"revision":"1","selection":[],"numbering_order":[],"rules":[{"id":"title-counter","enabled":true,"segment":{"type":"stem"},"parameters":{"type":"template","parts":parts}},{"id":"last","enabled":true,"segment":{"type":"stem"},"parameters":{"type":"text","operation":{"type":"suffix","text":"-final"}}}],"companions":{"type":"match_exact","associations":[]},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"},"metadata_changes":[]});
+            payload["recipeJson"] = Value::String(recipe.to_string());
+            payload["rebindSelection"] = json!(true);
+            payload.as_object_mut().unwrap().remove("companions");
+            payload.as_object_mut().unwrap().remove("rule");
+        }
+        let parsed = serde_json::from_value::<RenameRequestDto>(payload);
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+        let result = wait(&state, preview_owned(&state, parsed.unwrap()).unwrap());
+        assert_eq!(result["counts"]["blocked"], "0", "{result}");
+        let plan_ref = serde_json::from_value(result["planRef"].clone()).unwrap();
+        let page = page_owned(
+            &state,
+            PageRequest {
+                plan_ref,
+                query: PageQuery::new(revision),
+            },
+        )
+        .unwrap();
+        let row = |id: &Value| page.items.iter().find(|r| &r["itemId"] == id).unwrap();
+        let suffix = if ordered { "-final" } else { "" };
+        assert_eq!(
+            row(&primary)["newName"],
+            format!("VidLib fixture-1{suffix}.mp4")
+        );
+        assert_eq!(
+            row(&subtitle)["newName"],
+            format!("VidLib fixture-1{suffix}.en.forced.srt")
+        );
+        {
+            let lease = state
+                .coordinator
+                .try_acquire(vidlib_fileops::coordinator::LeaseKind::Read)
+                .unwrap();
+            let stored = state
+                .plans
+                .lock()
+                .unwrap()
+                .snapshot(plan_ref.into(), &lease)
+                .unwrap();
+            let primary_id = serde_json::from_value(primary.clone()).unwrap();
+            let second_id = serde_json::from_value(id("second.mp4")).unwrap();
+            assert_eq!(
+                stored.frozen_inputs.primary_order,
+                vec![primary_id, second_id]
+            );
+            assert!(stored
+                .frozen_inputs
+                .values
+                .iter()
+                .all(|v| v.entry_id == primary_id || v.entry_id == second_id));
+        }
+        assert!(row(&subtitle)["explanations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["ruleId"] == "companion"));
+        assert!(row(&subtitle)["explanations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e.get("rule_id").is_none()));
+        assert_eq!(row(&subtitle)["association"]["primaryId"], primary);
+        assert_eq!(
+            row(&subtitle)["association"]["groupId"],
+            row(&primary)["association"]["groupId"]
+        );
+        assert_eq!(
+            row(&id("second.mp4"))["newName"],
+            format!("VidLib fixture-2{suffix}.mp4")
+        );
+    }
+}
+
+#[test]
+fn manual_companion_binding_requires_current_selected_grants() {
+    let (dir, state) = fixture();
+    let media = dir.path().join("media");
+    std::fs::create_dir(media.join("subtitles")).unwrap();
+    std::fs::write(media.join("subtitles/unrelated.EN.srt"), b"subtitle").unwrap();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let primary = page
+        .items
+        .iter()
+        .find(|r| r["displayName"] == "original.mp4")
+        .unwrap()["itemId"]
+        .clone();
+    let asset = page
+        .items
+        .iter()
+        .find(|r| r["displayName"] == "unrelated.EN.srt")
+        .unwrap()["itemId"]
+        .clone();
+    let mut payload = json!({"revision":"2","selectedIds":[primary,asset],"rule":"fixedStem","fixedStem":"Final","companions":{"type":"explicit","associations":[{"primaryId":primary,"companionIds":[asset]}]}});
+    let request = serde_json::from_value::<RenameRequestDto>(payload.clone()).unwrap();
+    let result = wait(&state, preview_owned(&state, request).unwrap());
+    let plan_ref = serde_json::from_value(result["planRef"].clone()).unwrap();
+    let rows = page_owned(
+        &state,
+        PageRequest {
+            plan_ref,
+            query: PageQuery::new(2),
+        },
+    )
+    .unwrap();
+    let row = rows.items.iter().find(|r| r["itemId"] == asset).unwrap();
+    assert_eq!(row["newName"], "Final.EN.srt");
+    assert_eq!(row["association"]["primaryId"], primary);
+    assert!(row["newDisplay"].as_str().unwrap().contains("subtitles"));
+    payload["revision"] = json!("3");
+    payload["selectedIds"] = json!([primary]);
+    let job = preview_owned(&state, serde_json::from_value(payload).unwrap()).unwrap();
+    let mut completed = false;
+    for _ in 0..500 {
+        let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+        if status.state != "running" {
+            assert_eq!(status.error.unwrap().code, "unselectedEntry");
+            completed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(completed);
+    assert!(confirm_owned(&state, PlanRequest { plan_ref }).is_err());
+    assert!(media.join("subtitles/unrelated.EN.srt").exists());
 }

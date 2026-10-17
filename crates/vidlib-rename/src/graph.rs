@@ -22,13 +22,7 @@ pub fn plan(
         .collect();
     resolve_paths(inventory, &mut rows);
     validate_rows(inventory, &mut rows, &parents, namespace);
-    resolve_collisions(
-        inventory,
-        &mut rows,
-        namespace,
-        &parents,
-        &evaluated.recipe.collision_policy,
-    );
+    resolve_collisions(inventory, &mut rows, namespace, &parents, &evaluated.recipe)?;
     validate_rows(inventory, &mut rows, &parents, namespace);
     validate_carried_paths(inventory, &mut rows, namespace);
     let mut groups = Vec::new();
@@ -153,13 +147,143 @@ fn refresh_row(row: &mut PlanRow) {
         };
     }
 }
+/// A suffix belongs to the entire association. A collision on any companion
+/// retries the primary stem, then preflights every derived target together.
+fn resolve_companion_collisions(
+    inventory: &Inventory,
+    rows: &mut [PlanRow],
+    ns: &NamespaceSnapshot,
+    parents: &TargetParents,
+    recipe: &RecipeV1,
+) -> Result<(), RenameError> {
+    let CollisionPolicy::Suffix {
+        separator,
+        max_attempts,
+    } = &recipe.collision_policy
+    else {
+        return Ok(());
+    };
+    let associations = associate(inventory, &recipe.selection, &recipe.companions)?;
+    let owners = associations
+        .assets
+        .iter()
+        .filter_map(|a| a.owner)
+        .collect::<BTreeSet<_>>();
+    let selected = rows
+        .iter()
+        .map(|r| r.source_path.clone())
+        .collect::<BTreeSet<_>>();
+    let dirs = directory_ids(inventory);
+    for owner in owners {
+        let members = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.primary_id == owner)
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        if members
+            .iter()
+            .any(|&i| matches!(rows[i].status, RowStatus::Blocked | RowStatus::NeedsReview))
+        {
+            continue;
+        }
+        let primary = *members
+            .iter()
+            .find(|&&i| rows[i].entry_id == owner)
+            .expect("validated ownership");
+        let occupied = ns
+            .parents
+            .iter()
+            .flat_map(|p| &p.entries)
+            .filter(|e| !selected.contains(&e.absolute_path))
+            .map(|e| {
+                carried_destination(&e.absolute_path, rows, &dirs)
+                    .map_or_else(|| e.absolute_path.clone(), |(_, p)| p)
+            })
+            .chain(
+                rows.iter()
+                    .filter(|r| r.primary_id != owner)
+                    .map(|r| r.target_path.clone()),
+            )
+            .collect::<Vec<_>>();
+        let available = |paths: &[(usize, PathBuf)]| {
+            paths.iter().all(|(i, path)| {
+                facts_for(&rows[*i], parents, ns).is_some_and(|facts| {
+                    facts.validate_path(path).is_ok()
+                        && !ns.policy.excludes(path)
+                        && !occupied.iter().any(|p| same_path(path, p, facts))
+                        && !paths
+                            .iter()
+                            .any(|(j, p)| i != j && same_path(path, p, facts))
+                })
+            })
+        };
+        let initial = members
+            .iter()
+            .map(|&i| (i, rows[i].target_path.clone()))
+            .collect::<Vec<_>>();
+        if available(&initial) {
+            continue;
+        }
+        let base = NameParts::from_filename(&rows[primary].new_display_name);
+        let mut replacement = None;
+        for n in 1..=*max_attempts {
+            let primary_name = rows[primary]
+                .target_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let stem = format!("{primary_name}{separator}{n}");
+            let mut changed = base.clone();
+            changed.stem = stem.clone();
+            let paths = members
+                .iter()
+                .map(|&i| {
+                    let name = if i == primary {
+                        changed.filename()
+                    } else {
+                        let suffix = &associations
+                            .assets
+                            .iter()
+                            .find(|a| a.asset_id == rows[i].entry_id)
+                            .expect("validated asset")
+                            .retained_suffix;
+                        format!("{stem}{suffix}")
+                    };
+                    (i, rows[i].target_path.with_file_name(name))
+                })
+                .collect::<Vec<_>>();
+            if available(&paths) {
+                replacement = Some(paths);
+                break;
+            }
+        }
+        if let Some(paths) = replacement {
+            for (i, path) in paths {
+                rows[i].target_path = path;
+                refresh_row(&mut rows[i]);
+            }
+        } else {
+            for i in members {
+                issue(
+                    &mut rows[i],
+                    RenameErrorCode::Collision,
+                    "no available target for complete companion group",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_collisions(
     inventory: &Inventory,
     rows: &mut [PlanRow],
     ns: &NamespaceSnapshot,
     parents: &TargetParents,
-    policy: &CollisionPolicy,
-) {
+    recipe: &RecipeV1,
+) -> Result<(), RenameError> {
+    let policy = &recipe.collision_policy;
     let dirs = directory_ids(inventory);
     let selected: BTreeSet<_> = rows.iter().map(|r| r.source_path.clone()).collect();
     let mut processed = Vec::new();
@@ -171,7 +295,12 @@ fn resolve_collisions(
             i,
         )
     });
+    let mut companions_resolved = false;
     for i in order {
+        if !companions_resolved && !dirs.contains(&rows[i].entry_id) {
+            resolve_companion_collisions(inventory, rows, ns, parents, recipe)?;
+            companions_resolved = true;
+        }
         let mut taken: Vec<(PathBuf, Option<usize>)> = ns
             .parents
             .iter()
@@ -190,7 +319,7 @@ fn resolve_collisions(
                 .iter()
                 .map(|&j: &usize| (rows[j].target_path.clone(), Some(j))),
         );
-        if rows[i].status == RowStatus::Blocked {
+        if matches!(rows[i].status, RowStatus::Blocked | RowStatus::NeedsReview) {
             continue;
         }
         let Some(facts) = facts_for(&rows[i], parents, ns) else {
@@ -273,6 +402,7 @@ fn resolve_collisions(
         }
         processed.push(i);
     }
+    Ok(())
 }
 
 /// Iterative Kosaraju: dependency cycles share one recovery/temporary group.

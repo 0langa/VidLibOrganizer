@@ -21,7 +21,14 @@
     "modifiedNs": "-9007199254740993",
     "status": "changed",
     "carriedDescendants": "0",
-    "issues": []
+    "issues": [],
+    "association": {
+      "primaryId": "00000000-0000-4000-8000-000000000003",
+      "groupId": "00000000-0000-4000-8000-000000000003",
+      "isCompanion": false
+    },
+    "companionWarnings": [],
+    "explanations": []
   },
   "error": {
     "code": "staleState",

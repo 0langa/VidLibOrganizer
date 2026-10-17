@@ -62,7 +62,65 @@ pub(crate) fn validate_batch(
     {
         return Err(invalid("complete selected entry set is required"));
     }
+    let associations = associate(inventory, &batch.recipe.selection, &batch.recipe.companions)?;
+    if associations
+        .primary_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != batch.recipe.numbering_order.iter().copied().collect()
+    {
+        return Err(invalid(
+            "primary order differs from resolved companion ownership",
+        ));
+    }
     for row in &batch.rows {
+        let owner = associations
+            .assets
+            .iter()
+            .find(|a| a.asset_id == row.entry_id)
+            .and_then(|a| a.owner)
+            .unwrap_or(row.entry_id);
+        // Receipt-derived inverse/cycle/ancestor groups can legitimately merge
+        // independent primaries. Companion ownership requires the actual owner
+        // row's group, not a freshly derived ID that discards historical lineage.
+        let owner_group = batch
+            .rows
+            .iter()
+            .find(|r| r.entry_id == owner)
+            .ok_or_else(|| invalid("missing companion primary"))?
+            .group_id;
+        if row.primary_id != owner || (owner != row.entry_id && row.group_id != owner_group) {
+            return Err(invalid(
+                "row companion lineage differs from resolved ownership",
+            ));
+        }
+        if let Some(asset) = associations
+            .assets
+            .iter()
+            .find(|a| a.asset_id == row.entry_id && a.owner.is_some())
+        {
+            let primary = batch
+                .rows
+                .iter()
+                .find(|r| r.entry_id == owner)
+                .ok_or_else(|| invalid("missing companion primary"))?;
+            if !matches!(row.status, RowStatus::Blocked | RowStatus::NeedsReview) {
+                let stem = primary
+                    .target_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| invalid("unsupported primary name"))?;
+                let expected = row
+                    .source_path
+                    .with_file_name(format!("{stem}{}", asset.retained_suffix));
+                if row.target_path != expected {
+                    return Err(invalid(
+                        "companion target differs from its final primary name",
+                    ));
+                }
+            }
+        }
         let entry = entries
             .get(&row.entry_id)
             .ok_or_else(|| invalid("unknown source"))?;

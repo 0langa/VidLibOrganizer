@@ -730,11 +730,15 @@ fn number_rule_skips_other_kind_and_companions_do_not_consume_ordinals() {
         scoped_numbering_order(&i, &r).unwrap(),
         vec![i.entries[3].id, i.entries[1].id]
     );
-    // Association naming remains Task18; the existing evaluator rejects it clearly.
-    assert_eq!(
-        evaluate(&i, &r, &frozen(&i, &r)).unwrap_err().code,
-        RenameErrorCode::UnsupportedConfiguration
-    );
+    let associated = evaluate(&i, &r, &frozen(&i, &r)).unwrap();
+    assert_eq!(associated.rows.len(), 4);
+    assert_eq!(associated.rows[0].entry_id, i.entries[3].id);
+    let asset = associated
+        .rows
+        .iter()
+        .find(|row| row.entry_id == i.entries[2].id)
+        .unwrap();
+    assert_eq!(asset.primary_id, i.entries[1].id);
     r.companions = CompanionPolicy::None;
     r.selection.retain(|id| *id != i.entries[2].id);
     r.rules = vec![Rule {

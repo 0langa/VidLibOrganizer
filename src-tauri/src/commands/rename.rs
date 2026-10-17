@@ -161,6 +161,49 @@ pub struct RenameRequestDto {
     pub numbering_scope: NumberingScope,
     #[serde(default)]
     pub row_overrides: Vec<RowOverrideDto>,
+    #[serde(default)]
+    pub companions: Option<CompanionPolicyDto>,
+}
+/// The command envelope uses camelCase; portable recipe documents keep their
+/// versioned core representation. Only inventory IDs cross this boundary.
+#[derive(Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum CompanionPolicyDto {
+    None,
+    Explicit {
+        associations: Vec<CompanionAssociationDto>,
+    },
+    MatchExact {
+        associations: Vec<CompanionAssociationDto>,
+    },
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompanionAssociationDto {
+    pub primary_id: EntryId,
+    pub companion_ids: Vec<EntryId>,
+}
+impl From<CompanionPolicyDto> for CompanionPolicy {
+    fn from(value: CompanionPolicyDto) -> Self {
+        let convert = |bindings: Vec<CompanionAssociationDto>| {
+            bindings
+                .into_iter()
+                .map(|b| CompanionAssociation {
+                    primary: b.primary_id,
+                    companions: b.companion_ids,
+                })
+                .collect()
+        };
+        match value {
+            CompanionPolicyDto::None => Self::None,
+            CompanionPolicyDto::Explicit { associations } => Self::Explicit {
+                associations: convert(associations),
+            },
+            CompanionPolicyDto::MatchExact { associations } => Self::MatchExact {
+                associations: convert(associations),
+            },
+        }
+    }
 }
 /// Desktop literal edit; core mapping/recipe data keeps its portable names.
 #[derive(Clone, Deserialize)]
@@ -575,6 +618,9 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
                 metadata_changes: vec![],
             }
         };
+        if let Some(companions) = request.companions {
+            recipe.companions = companions.into();
+        }
         let known = inventory
             .entries
             .iter()
@@ -599,6 +645,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             recipe.numbering_order.retain(|id| allowed.contains(id));
             recipe.selection_filter = Some(filter);
         }
+        prepare_associations(&inventory, &mut recipe)?;
         let requirements = InputRequirements::from_recipe(&recipe, FrozenTimezone::Utc)?;
         let inputs = frozen_inputs
             .lock()
@@ -670,8 +717,34 @@ fn counts(c: &PlanCounts) -> Value {
     json!({"changed":c.changed.to_string(),"unchanged":c.unchanged.to_string(),"blocked":c.blocked.to_string(),"needsReview":c.needs_review.to_string()})
 }
 fn row_dto(row: &PlanRow) -> Value {
-    json!({"itemId":row.entry_id,"oldName":row.old_display_name,"newName":row.new_display_name,"oldDisplay":row.old_display_path,"newDisplay":row.new_display_path,"sizeBytes":row.stamp.size.map(|n|n.to_string()),"modifiedNs":row.stamp.modified_ns.map(|n|n.to_string()),"status":camel_tag(&format!("{:?}",row.status)),"carriedDescendants":row.carried_descendants.to_string(),"issues":row.issues.iter().map(|i|&i.message).collect::<Vec<_>>()})
+    let warnings = row
+        .explanations
+        .iter()
+        .filter(|e| e.rule_id == "companion_warning")
+        .map(|e| &e.after)
+        .collect::<Vec<_>>();
+    let explanations = row
+        .explanations
+        .iter()
+        .map(|e| json!({"ruleId": e.rule_id, "before": e.before, "after": e.after}))
+        .collect::<Vec<_>>();
+    json!({
+        "itemId": row.entry_id,
+        "association": { "primaryId": row.primary_id, "groupId": row.group_id, "isCompanion": row.entry_id != row.primary_id },
+        "companionWarnings": warnings,
+        "explanations": explanations,
+        "oldName": row.old_display_name,
+        "newName": row.new_display_name,
+        "oldDisplay": row.old_display_path,
+        "newDisplay": row.new_display_path,
+        "sizeBytes": row.stamp.size.map(|n| n.to_string()),
+        "modifiedNs": row.stamp.modified_ns.map(|n| n.to_string()),
+        "status": camel_tag(&format!("{:?}", row.status)),
+        "carriedDescendants": row.carried_descendants.to_string(),
+        "issues": row.issues.iter().map(|i| &i.message).collect::<Vec<_>>()
+    })
 }
+
 pub fn page_owned(state: &AppState, request: PageRequest) -> Result<Page> {
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
     let r = lock(state)?;
@@ -1225,6 +1298,7 @@ mod tests {
                         selection_filter: None,
                         numbering_scope: Default::default(),
                         row_overrides: vec![],
+                        companions: None,
                     },
                 )
                 .unwrap(),
@@ -1333,11 +1407,12 @@ mod tests {
             "../../../tests/ui/fixtures/command-contracts.json"
         ))
         .unwrap();
+        let id: EntryId = serde_json::from_value(golden["row"]["itemId"].clone()).unwrap();
         let row = PlanRow {
             carried_descendants: 0,
-            entry_id: serde_json::from_value(golden["row"]["itemId"].clone()).unwrap(),
-            group_id: GroupId::new(),
-            primary_id: EntryId::new(),
+            entry_id: id,
+            group_id: GroupId::from_uuid(*id.as_uuid()),
+            primary_id: id,
             source_path: "/backend/only/original.mp4".into(),
             target_path: "/backend/only/renamed.mp4".into(),
             old_display_name: "original.mp4".into(),
@@ -1408,6 +1483,7 @@ mod tests {
                         selection_filter: None,
                         numbering_scope: Default::default(),
                         row_overrides: vec![],
+                        companions: None,
                     },
                 )
                 .unwrap(),

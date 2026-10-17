@@ -11,7 +11,8 @@ export function renderPreview(host, rows) {
     const oldName = el('td', '', row.oldName); oldName.title = row.oldDisplay;
     const newName = el('td', '', row.newName); newName.title = row.newDisplay;
     const size = el('td', 'mono', formatExactBytes(row.sizeBytes)); size.dataset.testid = 'exact-bytes';
-    const status = el('td', '', `${row.status}${row.carriedDescendants !== '0' ? ` · carries ${row.carriedDescendants} descendants` : ''}${row.issues.length ? ` · ${row.issues.join('; ')}` : ''}`);
+    const warnings = [...row.issues, ...(row.companionWarnings || [])];
+    const status = el('td', '', `${row.status}${row.carriedDescendants !== '0' ? ` · carries ${row.carriedDescendants} descendants` : ''}${warnings.length ? ` · ${warnings.join('; ')}` : ''}`);
     tr.append(oldName, newName, size, status); fragment.append(tr);
   }
   body.append(fragment); table.append(head, body); host.replaceChildren(table);

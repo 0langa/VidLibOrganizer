@@ -259,10 +259,18 @@ pub fn plan_undo(
     };
     let make_entry = |id, path: PathBuf, kind, stamp| -> Result<EntrySnapshot, OpError> {
         let root = root_for(&path)?;
+        // Root entries use their filename relative to the root's parent, just
+        // like scanned inventories. In particular an individually granted file
+        // must not acquire an empty relative path in an inverse inventory.
+        let relative_base = if path == root.path {
+            root.path.parent().unwrap_or(&root.path)
+        } else {
+            &root.path
+        };
         Ok(EntrySnapshot {
             id,
             root_id: root.id,
-            relative_path: encode_path(path.strip_prefix(&root.path).unwrap()),
+            relative_path: encode_path(path.strip_prefix(relative_base).unwrap()),
             display_name: path
                 .file_name()
                 .unwrap_or_default()
