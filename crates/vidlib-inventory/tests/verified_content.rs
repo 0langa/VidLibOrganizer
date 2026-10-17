@@ -135,3 +135,54 @@ fn root_and_source_replacements_fail_closed() {
     .is_err());
     std::fs::remove_dir_all(dir.path().with_extension("moved")).unwrap();
 }
+
+#[test]
+fn selected_anchor_root_must_match_scan_identity_before_content_callback() {
+    let (_dir, mut inventory, id) = fixture();
+    let prior_root_identity = inventory.roots[0].evidence.observed_identity.clone();
+    let anchor = inventory.roots[0]
+        .path
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_owned();
+    // Build an anchor-root observation without recursively scanning the whole drive.
+    // Both identities are real observations; only the selected root binding changes.
+    let mut root = RootBinding::new(anchor.clone()).unwrap();
+    root.evidence.observed_identity = OsInventoryFs
+        .open_directory(&anchor)
+        .unwrap()
+        .observation()
+        .unwrap()
+        .stamp
+        .physical_id;
+    assert_ne!(root.evidence.observed_identity, prior_root_identity);
+    for entry in &mut inventory.entries {
+        entry.root_id = root.id;
+        entry.relative_path = encode_path(entry.absolute_path.strip_prefix(&anchor).unwrap());
+    }
+    inventory.roots = vec![root];
+    let bytes = with_verified_content(&inventory, id, |reader| {
+        let mut bytes = vec![];
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+    .unwrap();
+    assert_eq!(bytes, b"abc", "a correctly bound anchor remains readable");
+
+    // Model a redirected/replaced root whose descendant still has its original stamp.
+    inventory.roots[0].evidence.observed_identity = prior_root_identity;
+    let called = std::cell::Cell::new(false);
+    let result = with_verified_content(&inventory, id, |_| {
+        called.set(true);
+        Ok(())
+    });
+    assert!(
+        !called.get(),
+        "stale anchor root must be rejected before content callback"
+    );
+    assert!(
+        result.is_err(),
+        "descendant identity cannot authorize a different root"
+    );
+}

@@ -674,3 +674,65 @@ fn lazy_preparation_rejects_oversized_recipes_before_opening_sources() {
     );
     assert_eq!(inv.entries.len(), 1);
 }
+
+#[test]
+fn cached_hash_revalidation_rejects_stale_selected_anchor_root() {
+    let (_dir, mut inventory, recipe, _) =
+        fixture(&["movie.mkv"], hash_recipe(HashAlgorithm::Sha256));
+    let prior_root_identity = inventory.roots[0].evidence.observed_identity.clone();
+    let anchor = inventory.roots[0]
+        .path
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_owned();
+    let mut root = RootBinding::new(anchor.clone()).unwrap();
+    root.evidence.observed_identity = OsInventoryFs
+        .open_directory(&anchor)
+        .unwrap()
+        .observation()
+        .unwrap()
+        .stamp
+        .physical_id;
+    assert_ne!(root.evidence.observed_identity, prior_root_identity);
+    let live_root_identity = root.evidence.observed_identity.clone();
+    for entry in &mut inventory.entries {
+        entry.root_id = root.id;
+        entry.relative_path = encode_path(entry.absolute_path.strip_prefix(&anchor).unwrap());
+    }
+    inventory.roots = vec![root];
+    let requirements = request(&recipe);
+    let mut cache = FrozenInputCache::default();
+    let first = cache
+        .prepare(&requirements, &inventory, &JobControl::default())
+        .unwrap();
+    assert_eq!(cache.content_bytes_read, 5);
+    assert_eq!(
+        first,
+        cache
+            .prepare(&requirements, &inventory, &JobControl::default())
+            .unwrap()
+    );
+    assert_eq!(
+        cache.content_bytes_read, 5,
+        "valid cached hash needs no further content read"
+    );
+
+    inventory.roots[0].evidence.observed_identity = prior_root_identity;
+    let error = cache
+        .prepare(&requirements, &inventory, &JobControl::default())
+        .expect_err("cached descendant hash must not bypass scanned anchor-root identity");
+    assert_eq!(error.code, RenameErrorCode::StaleInputs);
+    assert_eq!(cache.content_bytes_read, 5);
+    inventory.roots[0].evidence.observed_identity = live_root_identity;
+    assert_eq!(
+        first,
+        cache
+            .prepare(&requirements, &inventory, &JobControl::default())
+            .unwrap()
+    );
+    assert_eq!(
+        cache.content_bytes_read, 5,
+        "failed revalidation must preserve the prior cache"
+    );
+}

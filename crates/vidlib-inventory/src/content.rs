@@ -93,6 +93,11 @@ pub fn with_verified_content<T>(
     let directory = platform::open_directory(&anchor)?;
     let before = directory.observation()?;
     identity(&before, &before.stamp, EntryKind::Directory)?;
+    // A selected filesystem anchor is never visited as a descended child.
+    // Bind it to the scan evidence before any content callback, including cached reads.
+    if anchor == root.path && before.stamp.physical_id != root.evidence.observed_identity {
+        return Err(stale());
+    }
     let result = descend(
         inventory,
         root,
