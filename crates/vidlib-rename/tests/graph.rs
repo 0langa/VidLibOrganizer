@@ -886,3 +886,221 @@ fn material_stamp_changes_still_revoke_preflight() {
         }
     }
 }
+
+// Model namespace writes changing parent directory freshness independently of the
+// planner. Both Observed and FromReceipt prestates must remain consumable.
+fn simulate_material_prestates(inventory: &Inventory, plan: &RenamePlan) -> Vec<PathBuf> {
+    let mut state: Vec<_> = inventory
+        .entries
+        .iter()
+        .map(|e| (e.id, e.absolute_path.clone(), e.kind, e.stamp.clone()))
+        .collect();
+    let mut receipts = std::collections::BTreeMap::<StepId, (PathBuf, FileStamp)>::new();
+    for (ordinal, step) in steps(plan).iter().enumerate() {
+        let ExecutionAction::RenameEntry { source, target, .. } = &step.action else {
+            panic!("expected pure rename graph");
+        };
+        let index = state
+            .iter()
+            .position(|e| e.0 == step.entry_id && e.1 == source.path)
+            .expect("current source identity/path");
+        assert!(
+            !state.iter().any(|e| &e.1 == target),
+            "target must be absent"
+        );
+        let expected = match &source.identity {
+            ExpectedIdentity::Observed(stamp) => stamp,
+            ExpectedIdentity::FromReceipt { step_id } => {
+                let (recorded_path, stamp) = &receipts[step_id];
+                assert_eq!(
+                    recorded_path, &source.path,
+                    "receipt path must remain exact"
+                );
+                stamp
+            }
+        };
+        let actual = &state[index].3;
+        assert!(expected.physical_id.is_some());
+        assert_eq!(actual.physical_id, expected.physical_id);
+        assert_eq!(actual.size, expected.size);
+        assert_eq!(
+            actual.modified_ns,
+            expected.modified_ns,
+            "directory prestate invalidated by an earlier child namespace mutation: {}",
+            source.path.display()
+        );
+        if let Some(created) = expected.created_ns {
+            assert_eq!(actual.created_ns, Some(created));
+        }
+        assert_eq!(actual.windows_attributes, expected.windows_attributes);
+        // Removing/adding a direct child changes the owning directory's mtime.
+        // This remains true while that directory lives at a temporary path.
+        for (_, path, kind, stamp) in &mut state {
+            if *kind == EntryKind::Directory
+                && (Some(path.as_path()) == source.path.parent()
+                    || Some(path.as_path()) == target.parent())
+            {
+                stamp.modified_ns = Some(10_000 + ordinal as i128);
+            }
+        }
+        for (_, path, _, _) in &mut state {
+            if let Ok(relative) = path.strip_prefix(&source.path) {
+                *path = target.join(relative);
+            }
+        }
+        receipts.insert(step.id, (target.clone(), state[index].3.clone()));
+    }
+    state.into_iter().map(|e| e.1).collect()
+}
+
+// The ready escape must wait through both parking and finalization of A. Moving
+// x after A is parked would stale the receipt consumed by A's final rename too.
+#[test]
+fn ancestor_finishes_before_descendant_escape_changes_its_material_stamp() {
+    let (inventory, mut batch, ns, version) = fixture(&[
+        ("A", EntryKind::Directory),
+        ("B", EntryKind::File),
+        ("A/x", EntryKind::File),
+    ]);
+    target(&mut batch, 0, "B");
+    target(&mut batch, 1, "A/x");
+    target(&mut batch, 2, "outside");
+    let result = plan(&inventory, &batch, &ns, version).unwrap();
+    assert_eq!(result.counts.blocked, 0);
+    assert_eq!(
+        simulate_material_prestates(&inventory, &result),
+        vec![path("B"), path("B/x"), path("outside")]
+    );
+    let compiled = steps(&result);
+    let ancestor_final = compiled.iter().position(|s| s.entry_id == batch.rows[0].entry_id && matches!(&s.action, ExecutionAction::RenameEntry { target, temporary: false, .. } if target == &path("B"))).unwrap();
+    let escape = compiled
+        .iter()
+        .position(|s| s.entry_id == batch.rows[2].entry_id)
+        .unwrap();
+    assert!(
+        ancestor_final < escape,
+        "parking alone does not preserve a consumed receipt's material stamp"
+    );
+}
+
+// Selection order can choose a different reserved node, but must not weaken the
+// material-prestate invariant or change the intended final locations.
+#[test]
+fn descendant_escape_material_prestates_survive_selection_permutations() {
+    for order in [[2, 0, 1], [1, 2, 0], [0, 2, 1]] {
+        let (inventory, mut batch, ns, version) = fixture(&[
+            ("A", EntryKind::Directory),
+            ("B", EntryKind::File),
+            ("A/x", EntryKind::File),
+        ]);
+        target(&mut batch, 0, "B");
+        target(&mut batch, 1, "A/x");
+        target(&mut batch, 2, "outside");
+        batch.rows = order.iter().map(|&i| batch.rows[i].clone()).collect();
+        batch.recipe.numbering_order = batch.rows.iter().map(|r| r.entry_id).collect();
+        batch.frozen_inputs.primary_order = batch.recipe.numbering_order.clone();
+        let result = plan(&inventory, &batch, &ns, version).unwrap();
+        assert_eq!(result.counts.blocked, 0);
+        assert_eq!(
+            simulate_material_prestates(&inventory, &result),
+            vec![path("B"), path("B/x"), path("outside")]
+        );
+    }
+}
+
+// Operation-owned cycle paths must be excluded by the ordinary inventory and
+// Rename policy, while remaining frozen logical reservations in compiled steps.
+#[test]
+fn cycle_temps_use_protected_operation_staging_and_cannot_be_selected() {
+    let (inventory, mut batch, mut ns, version) = fixture(&[("a", EntryKind::File)]);
+    ns.parents[0].case_sensitivity = CaseSensitivity::Insensitive;
+    target(&mut batch, 0, "A");
+    let result = plan(&inventory, &batch, &ns, version).unwrap();
+    let ExecutionAction::RenameEntry {
+        target: reserved,
+        temporary: true,
+        ..
+    } = &steps(&result)[0].action
+    else {
+        panic!("case-only cycle needs a reservation");
+    };
+    assert!(
+        ns.policy.excludes(reserved),
+        "normal inventory must exclude operation temps"
+    );
+    assert!(reserved
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with(".vidlib-staging-rename-"));
+    assert!(reserved
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains(&batch.rows[0].entry_id.to_string()));
+    let mut ordinary = batch.clone();
+    ordinary.rows[0].target_path = reserved.clone();
+    assert_eq!(
+        plan(&inventory, &ordinary, &ns, version)
+            .unwrap()
+            .counts
+            .blocked,
+        1
+    );
+    let (temp_inventory, mut temp_batch, temp_ns, temp_version) = fixture(&[(
+        reserved.file_name().unwrap().to_str().unwrap(),
+        EntryKind::File,
+    )]);
+    target(&mut temp_batch, 0, "ordinary");
+    assert_eq!(
+        plan(&temp_inventory, &temp_batch, &temp_ns, temp_version)
+            .unwrap()
+            .counts
+            .blocked,
+        1
+    );
+}
+
+// Internal staging authorization must not bypass exact marker/root guards or
+// additional configured exclusion prefixes when choosing a reserved name.
+#[test]
+fn internal_temp_reservations_still_honor_marker_root_and_custom_policy() {
+    let (inventory, mut batch, mut ns, version) = fixture(&[("a", EntryKind::File)]);
+    ns.parents[0].case_sensitivity = CaseSensitivity::Insensitive;
+    target(&mut batch, 0, "A");
+    let blocked_name = format!(".vidlib-staging-rename-{}-0", batch.rows[0].entry_id);
+    ns.policy.marker_name = blocked_name.clone();
+    ns.policy.guarded_roots.push(path(&format!(
+        ".vidlib-staging-rename-{}-1",
+        batch.rows[0].entry_id
+    )));
+    let result = plan(&inventory, &batch, &ns, version).unwrap();
+    assert_eq!(result.counts.blocked, 0);
+    let ExecutionAction::RenameEntry {
+        target,
+        temporary: true,
+        ..
+    } = &steps(&result)[0].action
+    else {
+        panic!("expected reservation");
+    };
+    assert_eq!(
+        target,
+        &path(&format!(
+            ".vidlib-staging-rename-{}-2",
+            batch.rows[0].entry_id
+        ))
+    );
+    ns.policy
+        .staging_prefixes
+        .push(".vidlib-staging-rename-".into());
+    let blocked = plan(&inventory, &batch, &ns, version).unwrap();
+    assert_eq!(blocked.counts.blocked, 1);
+    assert!(blocked.execution.groups.is_empty());
+    assert!(blocked
+        .issues
+        .iter()
+        .any(|issue| issue.message == "no legal temporary reservation available"));
+}

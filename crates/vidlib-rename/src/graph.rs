@@ -425,10 +425,23 @@ fn compile(
             .collect();
         let mut parked = BTreeSet::new();
         while !pending.is_empty() {
+            // A descendant namespace write changes its directory's material
+            // stamp even at a parked path. Finish every pending ancestor's final
+            // move before consuming either observed or receipt-based child steps.
+            let ancestor_finished = |i: usize| {
+                !pending.iter().any(|&ancestor| {
+                    ancestor != i
+                        && dirs.contains(&rows[ancestor].entry_id)
+                        && current[i].starts_with(&current[ancestor])
+                })
+            };
             let ready = pending
                 .iter()
                 .copied()
                 .filter(|&i| {
+                    if !ancestor_finished(i) {
+                        return false;
+                    }
                     let Some(parent) = rows[i].target_path.parent() else {
                         return false;
                     };
@@ -456,9 +469,9 @@ fn compile(
                 let i = pending
                     .iter()
                     .copied()
-                    .filter(|i| !parked.contains(i))
+                    .filter(|i| !parked.contains(i) && ancestor_finished(*i))
                     .min_by_key(|&i| (current[i].components().count(), i))
-                    .ok_or("hierarchy cannot reach final destinations safely")?;
+                    .ok_or("no progress: pending ancestor moves cannot finish before descendant namespace writes")?;
                 parked.insert(i);
                 let parent = current[i].parent().ok_or("temporary parent absent")?;
                 let f = parent_locations
@@ -469,9 +482,9 @@ fn compile(
                 let mut reserved = None;
                 for suffix in 0..10_000u32 {
                     let candidate =
-                        parent.join(format!(".vidlib-rename-{}-{suffix}", rows[i].entry_id));
+                        parent.join(format!("{RENAME_TEMP_PREFIX}{}-{suffix}", rows[i].entry_id));
                     if facts.validate_path(&candidate).is_ok()
-                        && !ns.policy.excludes(&candidate)
+                        && ns.policy.allows_rename_reservation(&candidate)
                         && !occupancy.keys().any(|p| same_path(p, &candidate, facts))
                         && !rows
                             .iter()

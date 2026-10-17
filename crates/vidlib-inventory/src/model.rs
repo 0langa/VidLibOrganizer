@@ -272,6 +272,8 @@ pub struct DirectoryFacts {
 }
 pub const BLUEPRINT_MARKER_NAME: &str = ".vidlib-blueprint.json";
 pub const STAGING_NAME_PREFIX: &str = ".vidlib-staging";
+/// Cycle reservations live under the canonical excluded operation namespace.
+pub const RENAME_TEMP_PREFIX: &str = ".vidlib-staging-rename-";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProtectedPolicy {
@@ -316,6 +318,28 @@ impl ProtectedPolicy {
                 .any(|root| crate::path::conservative_path_is_within(root, path))
     }
 
+    /// Narrow path-policy exception for an already compiled operation reservation.
+    /// This is not mutation authority: the executor must additionally require the
+    /// exact owned step, fresh identity and an absent target under its write lease.
+    pub fn allows_rename_reservation(&self, path: &Path) -> bool {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        crate::path::conservative_name_matches(name, RENAME_TEMP_PREFIX.as_ref(), true)
+            && !self.excludes(parent)
+            && !crate::path::conservative_name_matches(name, self.marker_name.as_ref(), false)
+            && !self
+                .guarded_roots
+                .iter()
+                .chain(&self.protected_roots)
+                .any(|root| crate::path::conservative_path_is_within(root, path))
+            && !self
+                .staging_prefixes
+                .iter()
+                .filter(|prefix| prefix.as_str() != STAGING_NAME_PREFIX)
+                .any(|prefix| crate::path::conservative_name_matches(name, prefix.as_ref(), true))
+    }
+
     /// Canonical exclusion rule shared by inventory and later operation adapters.
     /// Matching uses native units; display strings never participate in lookup.
     /// Case behavior is unknown here, so reserved ASCII variants are protected on
@@ -335,9 +359,10 @@ impl ProtectedPolicy {
             if crate::path::conservative_name_matches(name, self.marker_name.as_ref(), false) {
                 return true;
             }
-            self.staging_prefixes
-                .iter()
-                .any(|prefix| crate::path::conservative_name_matches(name, prefix.as_ref(), true))
+            crate::path::conservative_name_matches(name, STAGING_NAME_PREFIX.as_ref(), true)
+                || self.staging_prefixes.iter().any(|prefix| {
+                    crate::path::conservative_name_matches(name, prefix.as_ref(), true)
+                })
         })
     }
 }
