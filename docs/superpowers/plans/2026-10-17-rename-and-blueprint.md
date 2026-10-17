@@ -409,17 +409,17 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** `assign_numbers(entries, order: &NumberingOrder, rule: &NumberRule) -> Result<NumberAssignments, RenameError>`; `format_date(value: &DateValue, rule: &DateRule, env: &FrozenEnvironment) -> Result<String, RuleIssue>`. FrozenEnvironment records now, zone/offset, and selected ambiguity policy.
 
-- [ ] **Step 1 — Red:** Add `natural_display_sort_does_not_change_number_order`, `counter_repeat_step_reset_and_formats`, `pad_existing_number_in_segment`, `ambiguous_date_requires_format`, `missing_recording_timezone_stays_unknown`, and `dst_ambiguity_is_explicit`.
+- [x] **Step 1 — Red:** Add `natural_display_sort_does_not_change_number_order`, `counter_repeat_step_reset_and_formats`, `pad_existing_number_in_segment`, `ambiguous_date_requires_format`, `missing_recording_timezone_stays_unknown`, and `dst_ambiguity_is_explicit`.
   ```rust
   assert_eq!(alphabetic_values, ["Y", "Z", "AA"]);
   assert_eq!(repeated_values, ["01", "01", "03", "03"]);
   assert_eq!(reformatted, "2026-10-17"); // %d-%m-%Y input, %Y-%m-%d output
   assert_eq!(ambiguous.code, RuleIssueCode::DateNeedsFormat);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test numbers_dates`.
-- [ ] **Step 3 — Implement:** All R06 settings and source-parent resets; checked decimal/hex/alphabetic arithmetic; original vector tie-breaks; date parsing, insert/reformat and fixed/UTC/IANA modes. Distinguish filesystem-created/modified/accessed from recording time. Resolve DST only through recipe policy; freeze now/zone once.
-- [ ] **Step 4 — Verify green:** Counter/date tests, including overflow, negative step, repeat_each=0, absent file dates, and a Europe/Berlin repeated/nonexistent local time fixture.
-- [ ] **Step 5 — Commit:** `feat: add stable numbering and explicit date formatting`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test numbers_dates`.
+- [x] **Step 3 — Implement:** All R06 settings and source-parent resets; checked decimal/hex/alphabetic arithmetic; original vector tie-breaks; date parsing, insert/reformat and fixed/UTC/IANA modes. Distinguish filesystem-created/modified/accessed from recording time. Resolve DST only through recipe policy; freeze now/zone once.
+- [x] **Step 4 — Verify green:** Counter/date tests, including overflow, negative step, repeat_each=0, absent file dates, and a Europe/Berlin repeated/nonexistent local time fixture.
+- [x] **Step 5 — Commit:** `feat: add stable numbering and explicit date formatting`.
 
 ### Task 14: Typed templates and lazy frozen hash/random inputs
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–12 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–13 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13's Windows local-zone/runtime checks remain pending. Task 14 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -810,6 +810,8 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 11: `d3beffd`, review fix `c32ef33` | Backend Unicode text/case/extension rules, current-input grapheme and literal-pair segments, explicit transliteration, ordered operations and per-row explanations. Independent review plus scoped fix review approved; Unicode titlecase sentence-state defect corrected. Initial 330-workspace run passed; final 72 text/contract/graph tests plus scoped Clippy/fmt/diff pass, with earlier Windows compile evidence. Dotted-I exact title spelling remains a deferred minor for final triage. Delimited/Between semantics are documented; no unsupported frontend controls added. Next eligible: Task 12. |
 
 | 2026-10-17 | Task 12: `8ca48e1` | Native PCRE2 UTF/UCP/no-JIT adapter with exact 16 KiB pattern, 1,000,000 match, 1,000 depth and 8,192 KiB heap limits; validated capture replacement, current-segment reassembly, structured failures and compile-once preparation. 86 scoped and 345 distinct workspace tests pass, including real native match/depth/heap exhaustion. Clippy/fmt and Windows all-target compilation/test-executable linking/static-import checks pass. Independent review approved with no findings. Step 4 real native Windows CI remains pending; no runtime/release gate opened. Next eligible: Task 13. |
+
+| 2026-10-17 | Task 13: `a249c4a` | Checked frozen-order numbering/repeats/signed padding/alphabetic formats/original-folder resets and typed date parsing, explicit zones, frozen time, source separation and DST policies. 106 scoped and 365 distinct workspace tests pass; Clippy/fmt and all six Windows test-executable cross-links/import checks pass. Independent review approved; legacy offset inspection remains backward-readable. Minor excess RFC3339 fractional precision is deferred for final triage. Windows local-zone/native runtime and packaged release remain pending. Next eligible: Task 14. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -836,3 +838,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 10 installed desktop/runtime: native picker/WebView, two-instance operation, session/edit revocation, history/recovery/Undo and offline packaging. Linux native commands, Chromium and core cross-compilation pass; installed Windows and hardware evidence remain pending.
 
 - [ ] Windows Task 12 real native PCRE2 CI/runtime: UTF/UCP, no JIT, actual match/depth/heap exhaustion, captures/empty matches and static runtime in the Windows process. GNU fixtures compile/link and import only OS DLLs; Windows execution, MSVC package and offline installed runtime remain pending.
+
+- [ ] Windows Task 13 native date/number/runtime: explicit OS local-zone resolution and confirmation, UTC/fixed/IANA and DST fixtures, exact date fields in the installed app. All six GNU test executables link with OS DLLs only; actual Windows/MSVC execution and packaging remain pending.
