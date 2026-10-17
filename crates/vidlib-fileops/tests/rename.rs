@@ -773,7 +773,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
         .unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
-    db.execute_batch("UPDATE operations SET inspection=json_remove(inspection,'$.expected_namespace'); ALTER TABLE operations DROP COLUMN inspection_version; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
+    db.execute_batch("UPDATE operations SET inspection=json_remove(inspection,'$.expected_namespace'); ALTER TABLE operations DROP COLUMN inspection_version; DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
     let journal = Journal::open(&f.coordinator.database_path()).unwrap();
     let record = journal.operation(op).unwrap();
     assert_eq!(record.steps[0].state, StepState::IntentDurable);
@@ -787,7 +787,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
 }
 #[test]
@@ -797,7 +797,7 @@ fn failed_v3_migration_rolls_back_schema_and_keeps_evidence() {
     let op = journal.begin(&f.plan.execution).unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
-    db.execute_batch("ALTER TABLE operations DROP COLUMN inspection_version; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3; CREATE TRIGGER reject_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
+    db.execute_batch("ALTER TABLE operations DROP COLUMN inspection_version; DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3; CREATE TRIGGER reject_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
     let before: String = db
         .query_row("SELECT inspection FROM operations", [], |r| r.get(0))
         .unwrap();

@@ -300,14 +300,7 @@ pub fn execute(
                 .is_some_and(|e| e.phase != Phase::Flush))
     {
         if let Some(group) = current_group {
-            match crate::recovery::compensate_current(
-                op,
-                group,
-                lease,
-                journal,
-                fs,
-                cancelled_partial,
-            ) {
+            match crate::recovery::compensate_current(op, group, lease, journal, fs) {
                 Ok(()) => {
                     report.state = if cancelled_partial {
                         OperationState::Cancelled
@@ -339,7 +332,16 @@ pub fn execute(
     if let Some(error) = journal_failure {
         return Err(error);
     }
-    if journal.operation(op)?.state != report.state {
+    let current = journal.operation(op)?.state;
+    if current != report.state {
+        if current == OperationState::RecoveryRequired
+            && matches!(
+                report.state,
+                OperationState::Failed | OperationState::Cancelled
+            )
+        {
+            journal.set_state(op, OperationState::Running)?;
+        }
         journal.set_state(op, report.state)?;
     }
     Ok(report)

@@ -57,6 +57,13 @@ pub struct PendingOperation {
     pub inspection: serde_json::Value,
     pub groups: Vec<OperationGroup>,
     pub recovery_effects: Vec<RecoveryEffect>,
+    /// A durable Restore decision, including an explicit no-group decision.
+    /// This survives reconciliation changing the original step states.
+    pub restore_context: Option<RestoreContext>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreContext {
+    pub group_id: Option<GroupId>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryEffect {
@@ -647,6 +654,7 @@ fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationR
     }
     let recovery_effects = recovery::load_effects(connection, op, &mut steps)?;
     Ok(PendingOperation {
+        restore_context: recovery::load_restore_context(connection, op)?,
         recovery_effects,
         operation_id: op,
         state: from_json(&format!("\"{state}\""))?,

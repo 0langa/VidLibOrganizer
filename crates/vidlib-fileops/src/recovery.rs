@@ -280,6 +280,20 @@ fn recover(
 ) -> Result<OperationReport, OpError> {
     let result = (|| {
         let op = journal.operation(op_id)?;
+        // Persist the reviewed Restore scope before gap resolution can turn an
+        // interrupted group into a wholly receipted group, or reset its intent.
+        let restore_group = if choice == RecoveryChoice::Restore {
+            let group = interrupted_group(&op, journal)?;
+            journal.remember_restore(op_id, group)?;
+            group
+        } else {
+            if op.restore_context.is_some() {
+                return Err(error(
+                    "Restore was already selected; Resume is no longer authorized",
+                ));
+            }
+            None
+        };
         for pending in op
             .steps
             .iter()
@@ -316,24 +330,25 @@ fn recover(
         }
         match choice {
             RecoveryChoice::Resume => resume(op_id, journal, fs, control)?,
-            RecoveryChoice::Restore => restore(
-                op_id,
-                journal,
-                fs,
-                control,
-                op.steps
-                    .iter()
-                    .rev()
-                    .find(|s| s.state != StepState::Planned)
-                    .map(|s| s.step.group_id),
-                OperationState::Cancelled,
-            )?,
+            RecoveryChoice::Restore => restore(op_id, journal, fs, control, restore_group)?,
         }
         Ok(())
     })();
     // Even recovery of an action/receipt gap must revoke older namespace views.
     lease.advance_namespace()?;
     result?;
+    // The pending operation must continue gating writers if epoch durability
+    // fails, even when Restore performed no new filesystem action.
+    if journal.operation(op_id)?.state == OperationState::RecoveryRequired {
+        journal.set_state(op_id, OperationState::Running)?;
+    }
+    journal.set_state(
+        op_id,
+        match choice {
+            RecoveryChoice::Resume => OperationState::Completed,
+            RecoveryChoice::Restore => OperationState::Cancelled,
+        },
+    )?;
     let op = journal.operation(op_id)?;
     Ok(OperationReport {
         operation_id: Some(op_id),
@@ -401,10 +416,7 @@ fn resume(
             return Err(error("recovered effect durability unconfirmed"));
         }
     }
-    if journal.operation(op_id)?.state == OperationState::RecoveryRequired {
-        journal.set_state(op_id, OperationState::Running)?;
-    }
-    journal.set_state(op_id, OperationState::Completed)
+    Ok(())
 }
 fn restore(
     op_id: OperationId,
@@ -412,16 +424,10 @@ fn restore(
     fs: &mut dyn Filesystem,
     control: &JobControl,
     current_group: Option<GroupId>,
-    final_state: OperationState,
 ) -> Result<(), OpError> {
     // Only the interrupted group is compensated; completed earlier groups are facts.
-    let initial = journal.operation(op_id)?;
-
     let Some(group) = current_group else {
-        if initial.state == OperationState::RecoveryRequired {
-            journal.set_state(op_id, OperationState::Running)?;
-        }
-        return journal.set_state(op_id, final_state);
+        return Ok(());
     };
     loop {
         if control.is_cancelled() {
@@ -429,9 +435,11 @@ fn restore(
         }
         let op = journal.operation(op_id)?;
         if let Some(effect) = op.recovery_effects.iter().find(|e| {
-            op.steps
-                .iter()
-                .any(|s| s.step.id == e.original_step && s.state != StepState::Compensated)
+            e.inverse.step.group_id == group
+                && op
+                    .steps
+                    .iter()
+                    .any(|s| s.step.id == e.original_step && s.state != StepState::Compensated)
         }) {
             if effect.inverse.state != StepState::CompletionDurable {
                 let mut gap = effect.inverse.clone();
@@ -506,10 +514,7 @@ fn restore(
         let (sp, tp) = parents(&op, &inverse, true, fs)?;
         journal.recovery_intent(op_id, original.step.id, &inverse, (&sp, &tp))?;
     }
-    if journal.operation(op_id)?.state == OperationState::RecoveryRequired {
-        journal.set_state(op_id, OperationState::Running)?;
-    }
-    journal.set_state(op_id, final_state)
+    Ok(())
 }
 
 /// Runtime compensation uses only the current executor's ordinary lease. This
@@ -520,12 +525,12 @@ pub(crate) fn compensate_current(
     lease: &Lease,
     journal: &mut Journal,
     fs: &mut dyn Filesystem,
-    cancelled: bool,
 ) -> Result<(), OpError> {
     if lease.kind() != LeaseKind::Write || lease.database_path() != journal.database_path() {
         return Err(error("current execution lease required"));
     }
     let op = journal.operation(op_id)?;
+    journal.remember_restore(op_id, Some(group))?;
     for pending in op.steps.iter().filter(|s| s.step.group_id == group) {
         if matches!(
             pending.state,
@@ -534,18 +539,7 @@ pub(crate) fn compensate_current(
             resolve_gap(&op, pending, journal, fs)?;
         }
     }
-    restore(
-        op_id,
-        journal,
-        fs,
-        &JobControl::default(),
-        Some(group),
-        if cancelled {
-            OperationState::Cancelled
-        } else {
-            OperationState::Failed
-        },
-    )
+    restore(op_id, journal, fs, &JobControl::default(), Some(group))
 }
 
 /// Transitional legacy writes have no item-level paths, identities or receipts.
@@ -560,4 +554,43 @@ pub fn inspect_legacy_interruption(lease: &Lease) -> Result<Option<LegacyInterru
         unresolved:true,
         explanation:"Interrupted legacy write has no item-level identity or completion evidence; preserve the marker and inspect read-only.",
     }))
+}
+
+// A durable prior group is never compensation authority merely by recency.
+// Existing inverse links provide compatible v5 continuation evidence. Otherwise
+// the first unfinished/unconfirmed group is the only candidate; Planned alone
+// grants no inverse and safely cancels the remaining unexecuted work.
+fn interrupted_group(op: &PendingOperation, journal: &Journal) -> Result<Option<GroupId>, OpError> {
+    if let Some(context) = &op.restore_context {
+        return Ok(context.group_id);
+    }
+    if let Some(effect) = op.recovery_effects.first() {
+        let group = effect.inverse.step.group_id;
+        if op
+            .recovery_effects
+            .iter()
+            .any(|e| e.inverse.step.group_id != group)
+        {
+            return Err(error("inverse evidence spans multiple recovery groups"));
+        }
+        return Ok(Some(group));
+    }
+    for group in &op.groups {
+        for step in op.steps.iter().filter(|s| s.step.group_id == group.id) {
+            if !matches!(
+                step.state,
+                StepState::CompletionDurable | StepState::Compensated
+            ) {
+                return Ok(Some(group.id));
+            }
+            for fact in &step.receipts {
+                if fact.durability != Durability::Synced
+                    && !journal.durability_verified(op.operation_id, fact.step_id)?
+                {
+                    return Ok(Some(group.id));
+                }
+            }
+        }
+    }
+    Ok(None)
 }

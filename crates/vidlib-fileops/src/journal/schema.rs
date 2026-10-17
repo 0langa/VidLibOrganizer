@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 5;
+pub(super) const VERSION: i64 = 6;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -414,4 +414,10 @@ fn validate_path(path: &Path) -> Result<(), OpError> {
 pub(super) const V5_SQL: &str = r#"
 CREATE TABLE recovery_audit(sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL REFERENCES operations(id), step_id TEXT NOT NULL, resolution TEXT NOT NULL, evidence TEXT NOT NULL, FOREIGN KEY(operation_id,step_id) REFERENCES steps(operation_id,id));
 CREATE TABLE recovery_effects(operation_id TEXT NOT NULL, original_step TEXT NOT NULL, inverse_step TEXT NOT NULL, parents TEXT NOT NULL, PRIMARY KEY(operation_id,original_step), UNIQUE(operation_id,inverse_step), FOREIGN KEY(operation_id,original_step) REFERENCES steps(operation_id,id), FOREIGN KEY(operation_id,inverse_step) REFERENCES steps(operation_id,id));
+"#;
+
+// Explicit Restore authority survives receipt/reset/flush transitions. An old
+// reader must reject this protocol version rather than ignore the selection.
+pub(super) const V6_SQL: &str = r#"
+CREATE TABLE recovery_restore(operation_id TEXT PRIMARY KEY REFERENCES operations(id), group_id TEXT);
 "#;

@@ -3,6 +3,47 @@ use super::*;
 use vidlib_inventory::PhysicalId;
 
 impl Journal {
+    pub(crate) fn remember_restore(
+        &mut self,
+        op: OperationId,
+        group: Option<GroupId>,
+    ) -> Result<(), OpError> {
+        self.write(Some(op), None, |tx| {
+            if let Some(existing) = load_restore_context(tx, op)? {
+                if existing.group_id != group {
+                    return Err(invalid("Restore group authority cannot change"));
+                }
+                return Ok(());
+            }
+            if !matches!(
+                operation_header(tx, op)?.0,
+                OperationState::Prepared
+                    | OperationState::Running
+                    | OperationState::RecoveryRequired
+            ) {
+                return Err(invalid("terminal operation cannot start Restore"));
+            }
+            if let Some(group) = group {
+                let belongs: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM steps WHERE operation_id=?1 AND group_id=?2)",
+                        params![op.to_string(), group.to_string()],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql_error)?;
+                if !belongs {
+                    return Err(invalid("Restore group is not in this operation"));
+                }
+            }
+            tx.execute(
+                "INSERT INTO recovery_restore(operation_id,group_id) VALUES(?1,?2)",
+                params![op.to_string(), group.map(|id| id.to_string())],
+            )
+            .map_err(sql_error)?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn durability_verified(
         &self,
         op: OperationId,
@@ -120,4 +161,26 @@ pub(super) fn load_effects(
             })
         })
         .collect()
+}
+
+pub(super) fn load_restore_context(
+    connection: &Connection,
+    op: OperationId,
+) -> Result<Option<RestoreContext>, OpError> {
+    use rusqlite::OptionalExtension;
+    let group: Option<Option<String>> = connection
+        .query_row(
+            "SELECT group_id FROM recovery_restore WHERE operation_id=?1",
+            [op.to_string()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    group
+        .map(|group| {
+            Ok(RestoreContext {
+                group_id: group.as_deref().map(parse_id).transpose()?,
+            })
+        })
+        .transpose()
 }

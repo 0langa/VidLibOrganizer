@@ -182,6 +182,25 @@ impl Filesystem for CrashFs {
         Ok(captured)
     }
     fn inspect(&self, p: &Path) -> Result<FileObservation, OpError> {
+        if self.boundary == "receipt" && self.count == self.index {
+            // The executor has committed the preceding receipt, but has not
+            // written the next intent when it inspects that step's parents.
+            std::process::exit(86);
+        }
+        if let Some(database) = self.boundary.strip_prefix("post_reset:") {
+            let db = rusqlite::Connection::open(database).unwrap();
+            let reset: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM recovery_audit a JOIN steps s ON s.operation_id=a.operation_id AND s.id=a.step_id WHERE a.resolution='NotApplied' AND s.state='Planned')", [], |r|r.get(0)).unwrap();
+            if reset {
+                std::process::exit(86);
+            }
+        }
+        if let Some(database) = self.boundary.strip_prefix("resolved_gap:") {
+            let db = rusqlite::Connection::open(database).unwrap();
+            let resolved: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM steps WHERE state!='CompletionDurable') AND NOT EXISTS(SELECT 1 FROM recovery_effects)", [], |r|r.get(0)).unwrap();
+            if resolved {
+                std::process::exit(86);
+            }
+        }
         self.native.inspect(p)
     }
     fn verify(&self, p: &Path, s: &FileStamp) -> Result<FileObservation, OpError> {

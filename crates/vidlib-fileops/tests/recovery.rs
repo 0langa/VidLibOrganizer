@@ -16,8 +16,10 @@ fn crash_child_entry() {
     if std::env::var_os("VIDLIB_CRASH_ROOT").is_none() {
         return;
     }
-    let cycle = std::env::var("VIDLIB_CRASH_CYCLE").unwrap() == "1";
-    let mut f = Fixture::new(if cycle {
+    let case = std::env::var("VIDLIB_CRASH_CYCLE").unwrap();
+    let mut f = Fixture::new(if case == "groups" {
+        &[("a", "new"), ("b", "other")]
+    } else if case == "1" {
         &[("a", "b"), ("b", "a")]
     } else {
         &[("a", "new")]
@@ -151,13 +153,20 @@ fn crashed(
     index: usize,
     cycle: bool,
 ) -> (tempfile::TempDir, PathBuf, Coordinator, Journal) {
+    crashed_case(boundary, index, if cycle { "1" } else { "0" })
+}
+fn crashed_case(
+    boundary: &str,
+    index: usize,
+    case: &str,
+) -> (tempfile::TempDir, PathBuf, Coordinator, Journal) {
     let dir = tempfile::tempdir().unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "crash_child_entry", "--nocapture"])
         .env("VIDLIB_CRASH_ROOT", dir.path())
         .env("VIDLIB_CRASH_BOUNDARY", boundary)
         .env("VIDLIB_CRASH_INDEX", index.to_string())
-        .env("VIDLIB_CRASH_CYCLE", if cycle { "1" } else { "0" })
+        .env("VIDLIB_CRASH_CYCLE", case)
         .status()
         .unwrap();
     assert_eq!(
@@ -336,11 +345,17 @@ fn recovery_crash_child_entry() {
     let preview = reconcile(&journal.pending().unwrap()[0], &mut PlatformFs::default()).unwrap();
     let nonce = preview.review_nonce();
     let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    let boundary = std::env::var("VIDLIB_CRASH_BOUNDARY").unwrap();
+    let reset = boundary == "post_reset";
     let mut native = CrashFs {
         outcome_durability: None,
         after_capture: None,
         native: PlatformFs::default(),
-        boundary: std::env::var("VIDLIB_CRASH_BOUNDARY").unwrap(),
+        boundary: if reset || boundary == "resolved_gap" {
+            format!("{boundary}:{}", coordinator.database_path().display())
+        } else {
+            boundary
+        },
         index: std::env::var("VIDLIB_CRASH_INDEX")
             .unwrap()
             .parse()
@@ -349,7 +364,11 @@ fn recovery_crash_child_entry() {
     };
     apply_recovery(
         preview.review(nonce).unwrap(),
-        RecoveryChoice::Restore,
+        if reset {
+            RecoveryChoice::Resume
+        } else {
+            RecoveryChoice::Restore
+        },
         &lease,
         &mut journal,
         &mut native,
@@ -753,7 +772,7 @@ fn failed_v4_recovery_migration_rolls_back_without_losing_evidence() {
         .unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
-    db.execute_batch("DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version=5; PRAGMA user_version=4; CREATE TABLE recovery_effects(conflicting_evidence TEXT); INSERT INTO recovery_effects VALUES('retain original evidence');").unwrap();
+    db.execute_batch("DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=5; PRAGMA user_version=4; CREATE TABLE recovery_effects(conflicting_evidence TEXT); INSERT INTO recovery_effects VALUES('retain original evidence');").unwrap();
     assert!(Journal::open(&f.coordinator.database_path()).is_err());
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -838,4 +857,245 @@ fn verified_flush_audit_survives_a_later_inverse_durability_gap() {
     .expect("prior durability proof must survive a subsequent inverse gap");
     assert_eq!(report.state, OperationState::Cancelled);
     assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 2);
+}
+
+fn assert_restore_preserves_completed_group(
+    media: &std::path::Path,
+    coordinator: &Coordinator,
+    journal: &mut Journal,
+) {
+    use vidlib_fileops::journal::StepState;
+    let before = journal.pending().unwrap().remove(0);
+    assert_eq!(before.groups.len(), 2);
+    assert_eq!(before.steps[0].state, StepState::CompletionDurable);
+    assert_eq!(before.steps[1].state, StepState::Planned);
+    let events = journal.events_after(0, 200).unwrap().items;
+    assert_eq!(events.len(), 1);
+    let preview = reconcile(&before, &mut PlatformFs::default()).unwrap();
+    let nonce = preview.review_nonce();
+    let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    let epoch = lease.epochs().unwrap().namespace;
+    let report = apply_recovery(
+        preview.review(nonce).unwrap(),
+        RecoveryChoice::Restore,
+        &lease,
+        journal,
+        &mut PlatformFs::default(),
+        &JobControl::default(),
+    )
+    .unwrap();
+    assert!(
+        !media.join("a").exists(),
+        "fully durable G1 must not be restored from recency"
+    );
+    assert_eq!(fs::read(media.join("new")).unwrap(), b"fixture");
+    assert_eq!(fs::read(media.join("b")).unwrap(), b"b");
+    assert!(!media.join("other").exists(), "Restore must not execute G2");
+    let after = journal.operation(before.operation_id).unwrap();
+    assert_eq!(
+        after.steps, before.steps,
+        "original states and factual receipts must remain unchanged"
+    );
+    assert!(
+        after.recovery_effects.is_empty(),
+        "no unreviewed inverse may be compiled"
+    );
+    assert_eq!(journal.events_after(0, 200).unwrap().items, events);
+    assert_eq!(report.state, OperationState::Cancelled);
+    assert_eq!(report.completed_groups, vec![before.groups[0].id]);
+    assert!(journal.pending().unwrap().is_empty());
+    assert!(!lease.status().unwrap().pending_journal);
+    assert_eq!(lease.epochs().unwrap().namespace, epoch + 1);
+}
+#[test]
+fn restore_after_receipt_before_next_intent_preserves_completed_group() {
+    let (_dir, media, coordinator, mut journal) = crashed_case("receipt", 1, "groups");
+    assert_restore_preserves_completed_group(&media, &coordinator, &mut journal);
+}
+#[test]
+fn restore_after_non_application_reset_crash_preserves_completed_group() {
+    let (_dir, media, coordinator, mut journal) = crashed_case("before", 2, "groups");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "recovery_crash_child_entry", "--nocapture"])
+        .env("VIDLIB_RECOVERY_ROOT", media.parent().unwrap())
+        .env("VIDLIB_CRASH_BOUNDARY", "post_reset")
+        .env("VIDLIB_CRASH_INDEX", "0")
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(86));
+    let db = rusqlite::Connection::open(coordinator.database_path()).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM recovery_audit WHERE resolution='NotApplied'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_restore_preserves_completed_group(&media, &coordinator, &mut journal);
+}
+#[test]
+fn zero_effect_restore_keeps_gate_if_epoch_finalization_fails() {
+    let (_dir, media, coordinator, mut journal) = crashed_case("receipt", 1, "groups");
+    let before = journal.pending().unwrap().remove(0);
+    let events = journal.events_after(0, 200).unwrap().items;
+    let db = rusqlite::Connection::open(coordinator.database_path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_recovery_epoch BEFORE UPDATE OF namespace_epoch ON coordination BEGIN SELECT RAISE(ABORT,'injected recovery epoch failure'); END;").unwrap();
+    let preview = reconcile(&before, &mut PlatformFs::default()).unwrap();
+    let nonce = preview.review_nonce();
+    let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    let epoch = lease.epochs().unwrap().namespace;
+    assert!(apply_recovery(
+        preview.review(nonce).unwrap(),
+        RecoveryChoice::Restore,
+        &lease,
+        &mut journal,
+        &mut PlatformFs::default(),
+        &JobControl::default()
+    )
+    .is_err());
+    assert!(
+        lease.status().unwrap().pending_journal,
+        "earlier effects remain gated until the epoch advances"
+    );
+    assert_eq!(lease.epochs().unwrap().namespace, epoch);
+    let after = journal.operation(before.operation_id).unwrap();
+    assert_eq!(after.steps, before.steps);
+    assert!(after.recovery_effects.is_empty());
+    assert_eq!(journal.events_after(0, 200).unwrap().items, events);
+    assert_eq!(fs::read(media.join("new")).unwrap(), b"fixture");
+    assert!(!media.join("a").exists());
+    assert_eq!(fs::read(media.join("b")).unwrap(), b"b");
+    assert!(!media.join("other").exists());
+    db.execute_batch("DROP TRIGGER fail_recovery_epoch;")
+        .unwrap();
+    drop(lease);
+    assert_restore_preserves_completed_group(&media, &coordinator, &mut journal);
+}
+
+#[test]
+fn restore_scope_survives_final_gap_receipt_before_inverse_intent() {
+    use vidlib_fileops::journal::StepState;
+    let (_dir, media, coordinator, mut journal) = crashed("after", 3, true);
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "recovery_crash_child_entry", "--nocapture"])
+        .env("VIDLIB_RECOVERY_ROOT", media.parent().unwrap())
+        .env("VIDLIB_CRASH_BOUNDARY", "resolved_gap")
+        .env("VIDLIB_CRASH_INDEX", "0")
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(86));
+    let before = journal.pending().unwrap().remove(0);
+    assert!(before
+        .steps
+        .iter()
+        .all(|s| s.state == StepState::CompletionDurable));
+    assert!(before.recovery_effects.is_empty());
+    assert_eq!(
+        before.restore_context.as_ref().unwrap().group_id,
+        Some(before.groups[0].id)
+    );
+    assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 3);
+    let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    let preview = reconcile(&before, &mut PlatformFs::default()).unwrap();
+    let nonce = preview.review_nonce();
+    assert!(apply_recovery(
+        preview.review(nonce).unwrap(),
+        RecoveryChoice::Resume,
+        &lease,
+        &mut journal,
+        &mut PlatformFs::default(),
+        &JobControl::default()
+    )
+    .is_err());
+    assert_eq!(journal.operation(before.operation_id).unwrap(), before);
+    let preview = reconcile(&before, &mut PlatformFs::default()).unwrap();
+    let nonce = preview.review_nonce();
+    let report = apply_recovery(
+        preview.review(nonce).unwrap(),
+        RecoveryChoice::Restore,
+        &lease,
+        &mut journal,
+        &mut PlatformFs::default(),
+        &JobControl::default(),
+    )
+    .unwrap();
+    assert_eq!(report.state, OperationState::Cancelled);
+    assert_eq!(fs::read(media.join("a")).unwrap(), b"fixture");
+    assert_eq!(fs::read(media.join("b")).unwrap(), b"b");
+    let after = journal.operation(before.operation_id).unwrap();
+    assert!(after
+        .steps
+        .iter()
+        .all(|s| s.state == StepState::Compensated));
+    assert_eq!(after.recovery_effects.len(), 3);
+    assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 6);
+    assert!(!lease.status().unwrap().pending_journal);
+}
+
+#[test]
+fn v5_migration_preserves_receipts_without_inventing_restore_scope() {
+    let (_dir, media, coordinator, mut journal) = crashed_case("receipt", 1, "groups");
+    let before = journal.pending().unwrap().remove(0);
+    let events = journal.events_after(0, 200).unwrap().items;
+    drop(journal);
+    let db = rusqlite::Connection::open(coordinator.database_path()).unwrap();
+    db.execute_batch("DROP TABLE recovery_restore; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;").unwrap();
+    journal = Journal::open(&coordinator.database_path()).unwrap();
+    assert_eq!(journal.pending().unwrap(), vec![before]);
+    assert_eq!(journal.events_after(0, 200).unwrap().items, events);
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        6
+    );
+    assert_restore_preserves_completed_group(&media, &coordinator, &mut journal);
+}
+
+#[test]
+fn failed_v5_restore_migration_retains_original_evidence() {
+    let (_dir, _media, coordinator, journal) = crashed_case("receipt", 1, "groups");
+    drop(journal);
+    let db = rusqlite::Connection::open(coordinator.database_path()).unwrap();
+    let states = |db: &rusqlite::Connection| {
+        db.prepare("SELECT state FROM steps ORDER BY sequence")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = states(&db);
+    db.execute_batch("DROP TABLE recovery_restore; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5; CREATE TABLE recovery_restore(evidence TEXT); INSERT INTO recovery_restore VALUES('retain original evidence');").unwrap();
+    assert!(Journal::open(&coordinator.database_path()).is_err());
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        db.query_row("SELECT evidence FROM recovery_restore", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "retain original evidence"
+    );
+    assert_eq!(states(&db), before);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM receipts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM operation_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }
