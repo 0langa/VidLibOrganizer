@@ -207,9 +207,9 @@ fn frozen_inventory_and_numbering_order_must_match() {
     );
 }
 
-// Catches bypassing the bound or accepting unsupported active configurations as a no-op.
+// Catches bypassing the import bound or ignoring an enabled typed template.
 #[test]
-fn bounded_recipe_import_and_unimplemented_rules_fail_closed() {
+fn bounded_recipe_import_and_enabled_templates_use_frozen_values() {
     assert_eq!(
         RecipeV1::from_json(&vec![b' '; 1_048_577])
             .unwrap_err()
@@ -225,8 +225,8 @@ fn bounded_recipe_import_and_unimplemented_rules_fail_closed() {
         }],
     };
     assert_eq!(
-        evaluate(&inventory, &recipe, &inputs).unwrap_err().code,
-        RenameErrorCode::UnsupportedRule
+        evaluate(&inventory, &recipe, &inputs).unwrap().rows[0].new_display_name,
+        "frozen-uuid.MKV"
     );
     recipe.rules[0].enabled = false;
     assert_eq!(

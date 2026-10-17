@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 use vidlib_fileops::{
     coordinator::{Lease, LeaseKind},
@@ -155,6 +155,7 @@ pub struct RenameRequestDto {
 pub enum NamingRule {
     Keep,
     FixedStem,
+    Template { parts: Vec<TemplatePart> },
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -262,6 +263,7 @@ pub struct RenameState {
     pub(crate) revision: u64,
     pub(crate) selection_generation: u64,
     pub(crate) inventory: Option<Arc<Inventory>>,
+    frozen_inputs: Arc<Mutex<FrozenInputCache>>,
     jobs: BTreeMap<JobId, crate::jobs::RenameJob>,
     plan_revision: u64,
     reviews: BTreeMap<StepId, RecoveryReview>,
@@ -381,6 +383,7 @@ pub fn inventory_owned(state: &AppState, request: InventoryRequestDto) -> Result
     set_revision(state, &mut r, request.revision)?;
     plans(state)?.invalidate();
     r.inventory = None;
+    r.frozen_inputs = Arc::default();
     let mut input = InventoryRequest::new(r.roots.clone());
     input.generation = request.revision;
     input.policy = r.policy.clone();
@@ -472,6 +475,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         .clone()
         .ok_or_else(|| stale("Scan sources first"))?;
     let policy = r.policy.clone();
+    let frozen_inputs = r.frozen_inputs.clone();
     let selection_generation = r.selection_generation;
     let version = next_plan(state, &mut r)?;
     let (id, control) = reserve(&mut r)?;
@@ -491,6 +495,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
                 segment: SegmentSelector::Stem,
                 parameters: match request.rule {
                     NamingRule::Keep => RuleParameters::Keep,
+                    NamingRule::Template { parts } => RuleParameters::Template { parts },
                     NamingRule::FixedStem => RuleParameters::FixedStem {
                         value: request.fixed_stem,
                     },
@@ -501,17 +506,11 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             collision_policy: CollisionPolicy::Block,
             metadata_changes: vec![],
         };
-        let inputs = FrozenInputs {
-            inventory_id: inventory.id,
-            generation: inventory.generation,
-            now_ns: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as i128,
-            timezone: FrozenTimezone::Utc,
-            primary_order: request.selected_ids,
-            values: vec![],
-        };
+        let requirements = InputRequirements::from_recipe(&recipe, FrozenTimezone::Utc)?;
+        let inputs = frozen_inputs
+            .lock()
+            .map_err(|_| stale("Frozen input state unavailable"))?
+            .prepare(&requirements, &inventory, &control)?;
         let evaluated = evaluate(&inventory, &recipe, &inputs)?;
         // Capture originals, including unselected carried descendants. A selected
         // file itself authorizes parent occupancy without granting sibling sources.
@@ -612,6 +611,7 @@ pub fn apply_owned(state: &AppState, request: ApplyRequest) -> Result<JobId> {
     let (id, control) = reserve(&mut r)?;
     plans(state)?.invalidate();
     r.inventory = None;
+    r.frozen_inputs = Arc::default();
     let database = state.operations.clone();
     drop(r);
     spawn(state, id, move || {
@@ -853,6 +853,7 @@ pub fn recovery_owned(state: &AppState, request: RecoveryRequest) -> Result<JobI
     let (id, control) = reserve(&mut r)?;
     plans(state)?.invalidate();
     r.inventory = None;
+    r.frozen_inputs = Arc::default();
     let database = state.operations.clone();
     drop(r);
     spawn(state, id, move || {
@@ -998,6 +999,7 @@ impl RenameState {
             .ok_or_else(|| stale("Selection generation overflow"))?;
         self.roots = roots;
         self.inventory = None;
+        self.frozen_inputs = Arc::default();
         self.reviews.clear();
         Ok(())
     }
@@ -1006,6 +1008,131 @@ impl RenameState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn await_job(state: &AppState, id: JobId) -> Value {
+        for _ in 0..1000 {
+            let status = status_owned(state, JobRequest { job_id: id }).unwrap();
+            if status.state != "running" {
+                assert_eq!(status.state, "completed", "{status:?}");
+                return status.result.unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("job timeout")
+    }
+    #[test]
+    fn repeated_desktop_preview_retains_frozen_clock_until_inventory_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir(&media).unwrap();
+        std::fs::write(media.join("movie.mkv"), b"abc").unwrap();
+        let state =
+            AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+        crate::selection::install_selection(&state, vec![media]).unwrap();
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+        );
+        let preview = |revision| {
+            let selected_ids = lock(&state)
+                .unwrap()
+                .inventory
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|e| e.kind == EntryKind::File)
+                .map(|e| e.id)
+                .collect();
+            let value = await_job(
+                &state,
+                preview_owned(
+                    &state,
+                    RenameRequestDto {
+                        revision,
+                        selected_ids,
+                        rule: NamingRule::Keep,
+                        fixed_stem: String::new(),
+                    },
+                )
+                .unwrap(),
+            );
+            let reference: UiPlanRef = serde_json::from_value(value["planRef"].clone()).unwrap();
+            let lease = state.coordinator.try_acquire(LeaseKind::Read).unwrap();
+            let inputs = plans(&state)
+                .unwrap()
+                .snapshot(reference.into(), &lease)
+                .unwrap()
+                .frozen_inputs
+                .clone();
+            inputs
+        };
+        let first = preview(2);
+        let second = preview(3);
+        assert_eq!(
+            first.now_ns, second.now_ns,
+            "same inventory must retain clock across previews"
+        );
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 4 }).unwrap(),
+        );
+        let refreshed = preview(5);
+        assert_ne!(first.inventory_id, refreshed.inventory_id);
+        assert_ne!(first.now_ns, refreshed.now_ns);
+    }
+    #[test]
+    fn desktop_typed_template_freezes_hash_and_generated_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir(&media).unwrap();
+        std::fs::write(media.join("movie.mkv"), b"abc").unwrap();
+        let state =
+            AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+        crate::selection::install_selection(&state, vec![media]).unwrap();
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+        );
+        let ids = lock(&state)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .map(|e| e.id)
+            .collect::<Vec<_>>();
+        let mut previous = None;
+        for revision in [2, 3] {
+            let parsed = serde_json::from_value::<RenameRequestDto>(
+                json!({"revision":revision.to_string(),"selectedIds":ids,"fixedStem":"","rule":{"template":{"parts":[
+                    {"type":"field","value":{"key":{"type":"uuid"},"format":{"type":"text"},"fallback":null}},
+                    {"type":"literal","value":"_"},
+                    {"type":"field","value":{"key":{"type":"hash","algorithm":"md5"},"format":{"type":"text"},"fallback":null}}
+                ]}}}),
+            );
+            assert!(
+                parsed.is_ok(),
+                "typed template must reach the backend preview: {:?}",
+                parsed.err()
+            );
+            let value = await_job(&state, preview_owned(&state, parsed.unwrap()).unwrap());
+            let reference: UiPlanRef = serde_json::from_value(value["planRef"].clone()).unwrap();
+            let lease = state.coordinator.try_acquire(LeaseKind::Read).unwrap();
+            let plan = plans(&state)
+                .unwrap()
+                .snapshot(reference.into(), &lease)
+                .unwrap();
+            assert_eq!(plan.rows[0].status, RowStatus::Changed);
+            let name = plan.rows[0].new_display_name.clone();
+            assert!(name.ends_with("_900150983cd24fb0d6963f7d28e17f72.mkv"));
+            if let Some(previous) = previous {
+                assert_eq!(name, previous);
+            }
+            previous = Some(name);
+        }
+    }
     #[test]
     fn cancel_signal_does_not_hide_factual_operation_report() {
         let dir = tempfile::tempdir().unwrap();

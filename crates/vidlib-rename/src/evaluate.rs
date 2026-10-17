@@ -39,6 +39,7 @@ pub fn evaluate(
                 | RuleParameters::Number { .. }
                 | RuleParameters::PadNumbers { .. }
                 | RuleParameters::Date { .. }
+                | RuleParameters::Template { .. }
         ) {
             return Err(RenameError::new(
                 RenameErrorCode::UnsupportedRule,
@@ -134,6 +135,20 @@ pub fn evaluate(
                         crate::dates::apply_date(selected, operation, entry, &rule.id, inputs)
                     })
                 }
+                RuleParameters::Template { parts } => {
+                    crate::text::apply_segment(&current, &rule.segment, false, |_| {
+                        render_template(
+                            parts,
+                            &TemplateContext {
+                                entry,
+                                original: &original,
+                                current: &current,
+                                rule_id: &rule.id,
+                                inputs,
+                            },
+                        )
+                    })
+                }
                 parameters => {
                     let operation = match parameters {
                         RuleParameters::Keep => TextOperation::Keep,
@@ -175,6 +190,7 @@ pub fn evaluate(
                             RuleIssueCode::DateAmbiguous => RenameErrorCode::DateAmbiguous,
                             RuleIssueCode::DateNonexistent => RenameErrorCode::DateNonexistent,
                             RuleIssueCode::DateMissing => RenameErrorCode::DateMissing,
+                            RuleIssueCode::MetadataMissing => RenameErrorCode::MetadataMissing,
                             RuleIssueCode::DateInvalid => RenameErrorCode::DateInvalid,
                         },
                         entry_id: Some(*id),

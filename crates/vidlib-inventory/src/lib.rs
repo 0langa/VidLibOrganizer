@@ -19,3 +19,6 @@ pub use scan::{
     scan, scan_with_fs, DirectoryListing, FileObservation, InventoryDirectory, InventoryError,
     InventoryFs, OsInventoryFs,
 };
+
+pub mod content;
+pub use content::{with_verified_content, InventoryFile};

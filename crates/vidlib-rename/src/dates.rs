@@ -390,7 +390,7 @@ pub(crate) fn apply_date(
         } => crate::numbers::insert_value(input, at, format!("{prefix}{formatted}{suffix}")),
     }
 }
-fn date_source(
+pub(crate) fn date_source(
     entry: &vidlib_inventory::EntrySnapshot,
     rule_id: &str,
     source: DateSource,

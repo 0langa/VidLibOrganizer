@@ -1,0 +1,137 @@
+use vidlib_inventory::*;
+fn fixture() -> (tempfile::TempDir, Inventory, ids::EntryId) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/source"), b"abc").unwrap();
+    let inv = scan(
+        &InventoryRequest::new(vec![RootBinding::new(dir.path().to_owned()).unwrap()]),
+        &JobControl::default(),
+    )
+    .unwrap();
+    let id = inv
+        .entries
+        .iter()
+        .find(|e| e.kind == EntryKind::File)
+        .unwrap()
+        .id;
+    (dir, inv, id)
+}
+#[test]
+fn held_content_checks_before_and_after_and_ignores_read_access_time() {
+    let (dir, inv, id) = fixture();
+    let content = with_verified_content(&inv, id, |file| {
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+    .unwrap();
+    assert_eq!(content, b"abc");
+    assert!(with_verified_content(&inv, id, |_| {
+        std::fs::write(dir.path().join("sub/source"), b"changed")?;
+        Ok(())
+    })
+    .is_err());
+}
+#[test]
+fn replacement_and_parent_rebinding_fail_closed() {
+    let (dir, inv, id) = fixture();
+    assert!(with_verified_content(&inv, id, |_| {
+        std::fs::rename(dir.path().join("sub"), dir.path().join("old"))?;
+        std::fs::create_dir(dir.path().join("sub"))?;
+        std::fs::hard_link(dir.path().join("old/source"), dir.path().join("sub/source"))?;
+        Ok(())
+    })
+    .is_err());
+    assert!(
+        with_verified_content(&inv, id, |_| Ok(())).is_err(),
+        "replaced parent rejected even with same source inode"
+    );
+}
+#[test]
+fn wrong_grant_and_root_evidence_never_read_content() {
+    let (_dir, mut inv, id) = fixture();
+    inv.roots[0].source_grant.path = inv.roots[0].path.join("other");
+    assert!(with_verified_content(&inv, id, |_| -> std::io::Result<()> {
+        panic!("outside grant")
+    })
+    .is_err());
+}
+#[cfg(unix)]
+#[test]
+fn source_and_ancestor_links_are_rejected() {
+    use std::os::unix::fs::symlink;
+    let (dir, inv, id) = fixture();
+    std::fs::rename(dir.path().join("sub/source"), dir.path().join("sub/real")).unwrap();
+    symlink("real", dir.path().join("sub/source")).unwrap();
+    assert!(
+        with_verified_content(&inv, id, |_| -> std::io::Result<()> { panic!("link read") })
+            .is_err()
+    );
+    std::fs::remove_file(dir.path().join("sub/source")).unwrap();
+    std::fs::rename(dir.path().join("sub/real"), dir.path().join("sub/source")).unwrap();
+    std::fs::rename(dir.path().join("sub"), dir.path().join("real_sub")).unwrap();
+    symlink("real_sub", dir.path().join("sub")).unwrap();
+    assert!(with_verified_content(&inv, id, |_| -> std::io::Result<()> {
+        panic!("ancestor link read")
+    })
+    .is_err());
+}
+#[test]
+fn unavailable_creation_stamp_does_not_invent_a_requirement() {
+    let (_dir, mut inv, id) = fixture();
+    inv.entries
+        .iter_mut()
+        .find(|e| e.id == id)
+        .unwrap()
+        .stamp
+        .created_ns = None;
+    let text = with_verified_content(&inv, id, |reader| {
+        let mut s = String::new();
+        reader.read_to_string(&mut s)?;
+        Ok(s)
+    })
+    .unwrap();
+    assert_eq!(text, "abc");
+}
+#[test]
+fn access_time_only_change_is_not_material_and_file_grants_work() {
+    let (dir, _, _) = fixture();
+    let path = dir.path().join("sub/source");
+    let inv = scan(
+        &InventoryRequest::new(vec![RootBinding::new(path.clone()).unwrap()]),
+        &JobControl::default(),
+    )
+    .unwrap();
+    let id = inv.entries[0].id;
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_accessed(std::time::UNIX_EPOCH))
+        .unwrap();
+    assert_eq!(
+        with_verified_content(&inv, id, |reader| {
+            let mut s = String::new();
+            reader.read_to_string(&mut s)?;
+            Ok(s)
+        })
+        .unwrap(),
+        "abc"
+    );
+}
+#[test]
+fn root_and_source_replacements_fail_closed() {
+    let (dir, inv, id) = fixture();
+    std::fs::rename(dir.path().join("sub/source"), dir.path().join("old-source")).unwrap();
+    std::fs::write(dir.path().join("sub/source"), b"xyz").unwrap();
+    assert!(with_verified_content(&inv, id, |_| -> std::io::Result<()> {
+        panic!("replacement reader called")
+    })
+    .is_err());
+    let (dir, inv, id) = fixture();
+    assert!(with_verified_content(&inv, id, |_| {
+        std::fs::rename(dir.path(), dir.path().with_extension("moved"))?;
+        std::fs::create_dir(dir.path())?;
+        Ok(())
+    })
+    .is_err());
+    std::fs::remove_dir_all(dir.path().with_extension("moved")).unwrap();
+}

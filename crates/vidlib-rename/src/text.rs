@@ -55,6 +55,7 @@ pub enum RuleIssueCode {
     DateAmbiguous,
     DateNonexistent,
     DateMissing,
+    MetadataMissing,
     DateInvalid,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

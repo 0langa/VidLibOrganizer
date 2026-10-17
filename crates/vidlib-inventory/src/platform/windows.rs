@@ -80,7 +80,25 @@ fn directory(file: File) -> io::Result<Box<dyn InventoryDirectory>> {
 struct WindowsDirectory {
     file: File,
 }
+struct WindowsFile(File);
+impl std::io::Read for WindowsFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        std::io::Read::read(&mut self.0, buffer)
+    }
+}
+impl crate::InventoryFile for WindowsFile {
+    fn observation(&self) -> io::Result<FileObservation> {
+        observation(&self.0)
+    }
+}
 impl InventoryDirectory for WindowsDirectory {
+    fn open_child_file(&self, name: &OsStr) -> io::Result<Box<dyn crate::InventoryFile + '_>> {
+        Ok(Box::new(WindowsFile(open_relative(
+            &self.file,
+            name,
+            windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+        )?)))
+    }
     fn observation(&self) -> io::Result<FileObservation> {
         observation(&self.file)
     }

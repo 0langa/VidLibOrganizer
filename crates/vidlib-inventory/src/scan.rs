@@ -39,6 +39,12 @@ pub trait InventoryFs {
 /// Child operations are relative to this live directory handle, never its
 /// display/absolute path. Implementations reject links/reparse points on open.
 pub trait InventoryDirectory {
+    fn open_child_file(&self, _name: &OsStr) -> io::Result<Box<dyn InventoryFile + '_>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "content reader unavailable",
+        ))
+    }
     fn observation(&self) -> io::Result<FileObservation>;
     fn read_directory(&self) -> io::Result<DirectoryListing>;
     fn observe_child(&self, name: &OsStr) -> io::Result<FileObservation>;

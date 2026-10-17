@@ -148,6 +148,10 @@ pub enum MediaProperty {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
+    Crc32,
+    Md5,
+    Sha1,
+    Sha512,
     Sha256,
     Blake3,
 }
@@ -406,7 +410,7 @@ pub(crate) fn valid_component(value: &str) -> bool {
     !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\', '\0'])
 }
 
-fn validate_template(parts: &[TemplatePart], depth: usize) -> Result<(), RenameError> {
+pub(crate) fn validate_template(parts: &[TemplatePart], depth: usize) -> Result<(), RenameError> {
     if depth > 32 {
         return Err(invalid("template nesting exceeds 32"));
     }

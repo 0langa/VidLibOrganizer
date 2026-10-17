@@ -38,7 +38,33 @@ pub(crate) fn open_directory(path: &Path) -> io::Result<Box<dyn InventoryDirecto
 struct UnixDirectory {
     file: File,
 }
+struct UnixFile(File);
+impl std::io::Read for UnixFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        std::io::Read::read(&mut self.0, buffer)
+    }
+}
+impl crate::InventoryFile for UnixFile {
+    fn observation(&self) -> io::Result<FileObservation> {
+        let metadata = self.0.metadata()?;
+        Ok(FileObservation {
+            kind: crate::scan::kind(&metadata),
+            stamp: super::stamp(&metadata, physical_id(Path::new(""), &metadata)),
+        })
+    }
+}
 impl InventoryDirectory for UnixDirectory {
+    fn open_child_file(&self, name: &OsStr) -> io::Result<Box<dyn crate::InventoryFile + '_>> {
+        crate::scan::validate_child_name(name)?;
+        // NONBLOCK prevents an attacker-swapped FIFO from blocking preparation.
+        let file = openat(
+            &self.file,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        Ok(Box::new(UnixFile(file.into())))
+    }
     fn observation(&self) -> io::Result<FileObservation> {
         let metadata = self.file.metadata()?;
         Ok(FileObservation {
