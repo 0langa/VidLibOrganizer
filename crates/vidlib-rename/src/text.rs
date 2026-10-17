@@ -625,8 +625,14 @@ fn convert_case(
                     CaseMode::Sentence => part.to_lowercase(),
                 }
             };
-            // Numeric-only words do not consume sentence capitalization.
-            if part.chars().any(|c| c.is_lowercase() || c.is_uppercase()) {
+            // Numeric/uncased words do not consume sentence capitalization.
+            // Unicode Lt letters are neither Lowercase nor Uppercase, but have
+            // a nonidentity lowercase mapping and must consume it as well.
+            if part.chars().any(|c| {
+                c.is_lowercase()
+                    || c.is_uppercase()
+                    || unicode_case_mapping::to_lowercase(c) != [0; 2]
+            }) {
                 sentence_start = false;
             }
             converted.push_str(&word);

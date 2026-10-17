@@ -917,3 +917,54 @@ fn input_components_are_never_implicitly_sanitized() {
         "drive:name.mkv"
     );
 }
+
+// Catches treating Unicode Lt letters as uncased when consuming sentence capitalization.
+#[test]
+fn sentence_case_consumes_titlecase_letters_and_preserves_context() {
+    let rows = [
+        ("ǅ hello.mkv", "ǅ hello.mkv"),
+        ("ǈ hello.mkv", "ǈ hello.mkv"),
+        ("ǋ hello.mkv", "ǋ hello.mkv"),
+        ("ǲ hello.mkv", "ǲ hello.mkv"),
+        ("123 ǅ HELLO.mkv", "123 ǅ hello.mkv"),
+        ("ǅ HELLO! ǈ WORLD.mkv", "ǅ hello! ǈ world.mkv"),
+        ("ǅ ΟΣ.mkv", "ǅ ος.mkv"),
+        ("影像 hello WORLD.mkv", "影像 Hello world.mkv"),
+        ("ß HELLO.mkv", "Ss hello.mkv"),
+    ];
+    for (input, expected) in rows {
+        assert_eq!(
+            run(input, SegmentSelector::Stem, case(CaseMode::Sentence))
+                .unwrap()
+                .filename(),
+            expected,
+            "sentence case for {input:?}"
+        );
+    }
+    assert_eq!(
+        run(
+            "ǅ HELLO iii.mkv",
+            SegmentSelector::Stem,
+            TextOperation::Case {
+                mode: CaseMode::Sentence,
+                exceptions: vec!["ǅ".into()],
+                roman: Some(RomanCase::Upper),
+            },
+        )
+        .unwrap()
+        .filename(),
+        "ǅ hello III.mkv"
+    );
+    assert_eq!(
+        run("ǅ hello.mkv", SegmentSelector::Stem, case(CaseMode::Title))
+            .unwrap()
+            .filename(),
+        "ǅ Hello.mkv"
+    );
+    assert_eq!(
+        run("ǅ hello.mkv", g(1, 1), case(CaseMode::Sentence))
+            .unwrap()
+            .filename(),
+        "ǅ hello.mkv"
+    );
+}
