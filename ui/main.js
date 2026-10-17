@@ -217,3 +217,29 @@ async function initialize() {
   }
 }
 initialize();
+
+// Rust owns argv/drop paths. This bridge polls only an opaque pending ID and
+// retries coordinator contention; no browser File.path or display text is sent.
+const discardNative=el('button','button','Discard waiting native selection');
+discardNative.hidden=true;$('#message').append(discardNative);
+discardNative.addEventListener('click',async()=>{
+  try { await call('discard_native_selection',{request:{}}); discardNative.hidden=true;notify('Waiting native selection discarded.'); }
+  catch(error){notify(error.message || String(error),true);}
+});
+async function pollNativeSelection() {
+  try {
+    const pending=await call('pending_native_selection',{request:{}});
+    discardNative.hidden=true;
+    if(pending) {
+      navigate('rename');
+      if(!await rename.acceptNative(pending.selectionId)) {
+        discardNative.hidden=false;
+        notify('Native selection is waiting for review. It will retry automatically, or you can discard it.',true);
+      }
+    }
+  } catch(error) {
+    discardNative.hidden=false;
+    notify(`Native selection is waiting for review: ${error.message || String(error)}`,true);
+  } finally { setTimeout(pollNativeSelection,750); }
+}
+if(isDesktop) pollNativeSelection();

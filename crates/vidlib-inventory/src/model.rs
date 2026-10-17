@@ -76,6 +76,10 @@ pub struct SourceGrant {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrantSource {
     NativeSelection,
+    /// Explicit native entry selection, including the directory itself.
+    /// Unlike older subtree grants, permits the exact selected root entry to
+    /// be renamed to a sibling; never grants its parent or sibling contents.
+    NativeSelectedEntry,
     ValidatedManual,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -310,12 +314,16 @@ pub struct NamespaceSnapshot {
 
 impl ProtectedPolicy {
     pub fn guards_move(&self, path: &Path) -> bool {
-        self.excludes(path)
-            || self
-                .guarded_roots
-                .iter()
-                .chain(&self.protected_roots)
-                .any(|root| crate::path::conservative_path_is_within(root, path))
+        self.excludes(path) || self.guards_root_relocation(path)
+    }
+
+    /// Exact configured/protected root or carrying ancestor, without treating
+    /// owned staging names or ordinary descendants as root relocations.
+    pub fn guards_root_relocation(&self, path: &Path) -> bool {
+        self.guarded_roots
+            .iter()
+            .chain(&self.protected_roots)
+            .any(|root| crate::path::conservative_path_is_within(root, path))
     }
 
     /// Narrow path-policy exception for an already compiled operation reservation.

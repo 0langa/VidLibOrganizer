@@ -10,6 +10,7 @@ use vidlib_rename::PlanStore;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) native_selection: Arc<Mutex<Option<crate::entrypoint::PendingSelection>>>,
     pub metadata_provider: Arc<dyn vidlib_rename::metadata::MetadataProvider>,
     pub rename: Arc<Mutex<crate::commands::rename::RenameState>>,
     pub(crate) jobs: Arc<Mutex<Jobs>>,
@@ -25,6 +26,7 @@ impl AppState {
     pub fn open(app_data: &Path, preferences: PathBuf) -> Result<Self, OpError> {
         let coordinator = Arc::new(Coordinator::open(app_data)?);
         Ok(Self {
+            native_selection: Arc::default(),
             metadata_provider: Arc::new(crate::metadata::DesktopMetadataProvider::unavailable()),
             rename: Arc::new(Mutex::new(crate::commands::rename::RenameState::new(
                 vidlib_inventory::ProtectedPolicy {

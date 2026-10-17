@@ -192,6 +192,11 @@ pub fn scan_with_fs(
                         kind: EntryKind::Directory,
                         stamp: platform::stamp(&metadata, identity),
                     };
+                    if root.source_grant.source == GrantSource::NativeSelectedEntry {
+                        if let Some(base) = root.path.parent() {
+                            scanner.entry(root, base, &root.path, Ok(expected.clone()));
+                        }
+                    }
                     scanner.directory(
                         root,
                         &root.path,

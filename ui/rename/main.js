@@ -193,7 +193,7 @@ export function createRename() {
     saveRevision.disabled = !attachedPreset;
     loadPreset.disabled = !presetChoice.value;
     nextPresets.disabled = !presetCursor;
-    for (const action of ['folders', 'files']) host.querySelector(`[data-action=${action}]`).disabled = !isDesktop || !initialized || pending;
+    for (const action of ['folders', 'files', 'libraryRoots']) host.querySelector(`[data-action=${action}]`).disabled = !isDesktop || !initialized || pending;
     host.querySelector('[data-action=selection]').disabled = !isDesktop || !inventoryReady || pending;
     preview.disabled = !isDesktop || !inventoryReady || !selected.size || pending;
     apply.disabled = !isDesktop || !planRef || !counts || counts.changed === '0' || counts.blocked !== '0' || counts.needsReview !== '0' || pending;
@@ -217,6 +217,12 @@ export function createRename() {
       case 'finish': if(active===payload)active=null;break;
       case 'accept': if(!current(payload.task))return false;planRef=payload.result.planRef;counts=payload.result.counts;summary=payload.result.summary;return true;
       case 'session': revision=BigInt(payload);break;
+      case 'selection': {
+        generation++; revision=BigInt(payload.selection.revision);
+        payload.task.generation=generation; payload.task.revision=revision.toString();
+        transition('clearPlan'); reviewSummary.replaceChildren(); recoveryHost.replaceChildren(); recoveryView=null;
+        break;
+      }
       default: throw new Error('Unknown Rename transition');
     }
   }
@@ -333,25 +339,32 @@ export function createRename() {
     if(!transition('accept',{task,result}))return;reviewSummary.replaceChildren();appendSummary(reviewSummary,summary);
     say(`${counts.changed} changed · ${counts.unchanged} unchanged · ${counts.blocked} blocked · ${counts.needsReview} need review. Review every selected item before applying.`);
   }
+  async function useSelection(task, selection) {
+    if (!current(task) || !selection || !selection.sources.length) return;
+    transition('selection', { task, selection });
+    inventoryReady = false; selected.clear(); inventoryItems.clear(); overrides.clear();
+    mapping=null; mappingText.value=''; mappingFile.value='';
+    recipe.clearSelectionBindings(); syncSelection(); rows.replaceChildren();
+    sourceList.replaceChildren(
+      el('p', '', `${selection.sourceCount} native sources selected${BigInt(selection.sourceCount) > 200n ? ' · showing the first 200' : ''}`),
+      ...selection.sources.map(source => el('p', 'mono', source.display)),
+    );
+    say('Scanning selected sources… Previous item bindings and mappings cleared.');
+    await run(task, 'start_inventory', { revision: task.revision });
+    if (!current(task)) return;
+    inventoryReady = true;
+    await inventoryPage(task);
+    if (current(task)) say('Select items, choose a naming rule, then preview. Previous item bindings and mappings were cleared.');
+  }
   function choose(kind) {
     return perform(async task => {
       const selection = await call('select_sources', { request: { kind, revision: task.revision } });
-      if (!current(task) || !selection.sources.length) return;
-      inventoryReady = false; selected.clear(); inventoryItems.clear(); overrides.clear(); syncSelection(); rows.replaceChildren();
-      sourceList.replaceChildren(
-        el('p', '', `${selection.sourceCount} native sources selected${BigInt(selection.sourceCount) > 200n ? ' · showing the first 200' : ''}`),
-        ...selection.sources.map(source => el('p', 'mono', source.display)),
-      );
-      say('Scanning selected sources…');
-      await run(task, 'start_inventory', { revision: task.revision });
-      if (!current(task)) return;
-      inventoryReady = true;
-      await inventoryPage(task);
-      if (current(task)) say('Select items, choose a naming rule, then preview.');
-    }, { advance: true });
+      await useSelection(task, selection);
+    });
   }
-  host.querySelector('[data-action=folders]').addEventListener('click', () => choose('folders'));
-  host.querySelector('[data-action=files]').addEventListener('click', () => choose('files'));
+  for (const kind of ['folders', 'files', 'libraryRoots']) {
+    host.querySelector(`[data-action=${kind}]`).addEventListener('click', () => choose(kind));
+  }
   preview.addEventListener('click', () => {
     if (active || !inventoryReady || !selected.size) return;
     perform(async task => {
@@ -458,6 +471,18 @@ export function createRename() {
   syncSelection(); controls(); say(isDesktop ? 'Choose native sources to begin.' : 'Browser preview · read only. Desktop app required.');
   return {
     activate() {},
+    async acceptNative(selectionId) {
+      await ready;
+      if (!initialized || active?.mutation) return false;
+      invalidate(); transition('clearPlan'); controls();
+      let accepted=false;
+      await perform(async task => {
+        const selection=await call('accept_native_selection',{request:{selectionId,revision:task.revision}});
+        accepted=true;
+        await useSelection(task,selection);
+      });
+      return accepted;
+    },
     deactivate() {
       if (initialized) edited(); else invalidate();
       history.destroy(); recoveryHost.replaceChildren(); controls();

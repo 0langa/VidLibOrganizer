@@ -608,3 +608,61 @@ fn copy_mutations_reject_replaced_reviewed_parent_before_effect() {
         );
     }
 }
+
+#[test]
+fn current_root_guards_protect_native_effects_but_allow_descendants_and_observation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("media/library");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/video.mp4"), b"payload").unwrap();
+    let mut adapter = PlatformFs::default();
+    adapter.policy.guarded_roots.push(root.clone());
+    adapter
+        .capture_namespace(&grants(&root), &[root.join("nested/new.mp4")])
+        .unwrap();
+    for source in [&root, root.parent().unwrap()] {
+        let target = source.with_file_name("moved");
+        assert_eq!(
+            adapter
+                .rename_no_replace(source, &target, &stamp(source))
+                .unwrap_err()
+                .code,
+            ErrorCode::ProtectedEntry
+        );
+        assert!(source.exists());
+        assert!(!target.exists());
+    }
+    let file = root.join("nested/video.mp4");
+    let target = root.join("nested/renamed.mp4");
+    adapter
+        .rename_no_replace(&file, &target, &stamp(&file))
+        .unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"payload");
+    adapter
+        .remove_owned(&vidlib_fileops::platform::OwnedEntry {
+            path: target.clone(),
+            stamp: stamp(&target),
+            controlled_timestamps: vec![],
+        })
+        .unwrap();
+    fs::remove_dir(root.join("nested")).unwrap();
+    assert_eq!(
+        adapter
+            .remove_owned(&vidlib_fileops::platform::OwnedEntry {
+                path: root.clone(),
+                stamp: stamp(&root),
+                controlled_timestamps: vec![]
+            })
+            .unwrap_err()
+            .code,
+        ErrorCode::ProtectedEntry
+    );
+    assert!(root.exists());
+    let future = dir.path().join("future-root");
+    adapter.policy.guarded_roots.push(future.clone());
+    assert_eq!(
+        adapter.create_directory(&future).unwrap_err().code,
+        ErrorCode::ProtectedEntry
+    );
+    assert!(!future.exists());
+}

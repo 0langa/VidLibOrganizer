@@ -36,7 +36,9 @@ export function desktopBridge(fixture) {
       if (BigInt(r.revision) < BigInt(revision)) throw fixture.error;
       revision = r.revision; return null;
     }
-    if (command === 'select_sources') return { revision, sourceCount: '1', sources: [{ grantId: '00000000-0000-4000-8000-000000000004', display: 'Library' }] };
+    if (command === 'pending_native_selection') return bridge.pendingNative || null;
+    if (command === 'accept_native_selection') { bridge.pendingNative=null; revision=String(BigInt(revision)+1n); return {revision,sourceCount:'1',sources:[{grantId:'00000000-0000-4000-8000-000000000004',display:'Dropped folder'}]}; }
+    if (command === 'select_sources') { revision=String(BigInt(revision)+1n); return { revision, sourceCount: '1', sources: [{ grantId: '00000000-0000-4000-8000-000000000004', display: 'Library' }] }; }
     if (command === 'start_inventory') {
       const jobId = id(); complete(jobId, { inventoryId: '00000000-0000-4000-8000-000000000005', revision: r.revision, itemCount: '1' }); return jobId;
     }

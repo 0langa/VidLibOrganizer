@@ -113,6 +113,73 @@ pub(crate) fn material(
         Ok(expected)
     }
 }
+// Read-only material capture follows the exact explicitly selected entry after
+// durable in-place renames. Old subtree grants retain their historical meaning;
+// Copy/Move already have explicit destination grants. No parent grant is made.
+fn material_grants(op: &PendingOperation) -> Result<vidlib_inventory::GrantSet, OpError> {
+    use vidlib_inventory::{GrantSet, GrantSource, SourceGrant};
+    let mut grants = GrantSet::default();
+    for value in op.inspection["grants"]
+        .as_array()
+        .ok_or_else(|| error("missing native grants"))?
+    {
+        let native: NativePathRecord = serde_json::from_value(value["path"].clone())
+            .map_err(|_| error("invalid grant path"))?;
+        let mut grant = SourceGrant {
+            id: serde_json::from_value(value["id"].clone())
+                .map_err(|_| error("invalid grant id"))?,
+            source: serde_json::from_value(value["source"].clone())
+                .map_err(|_| error("invalid grant source"))?,
+            path: decode_path(&native).map_err(|_| error("unavailable grant path"))?,
+        };
+        if grant.source == GrantSource::NativeSelectedEntry
+            && op.inspection["recipe"]["destination"]["type"] == "same_directory"
+        {
+            for pending in op
+                .steps
+                .iter()
+                .chain(op.recovery_effects.iter().map(|e| &e.inverse))
+            {
+                let ExecutionAction::RenameEntry { source, target, .. } = &pending.step.action
+                else {
+                    continue;
+                };
+                let Some(fact) = pending.receipts.last() else {
+                    continue;
+                };
+                if !grant.path.starts_with(&source.path) {
+                    continue;
+                }
+                if fact.step_id != pending.step.id
+                    || fact.phase != CompletedPhase::Renamed
+                    || fact.before_path.as_ref() != Some(&encode_path(&source.path))
+                    || fact.after_path.as_ref() != Some(&encode_path(target))
+                    || fact
+                        .before
+                        .as_ref()
+                        .and_then(|s| s.physical_id.as_ref())
+                        .is_none()
+                    || fact.before.as_ref().and_then(|s| s.physical_id.as_ref())
+                        != fact.after.as_ref().and_then(|s| s.physical_id.as_ref())
+                {
+                    return Err(error(
+                        "selected entry rename lacks exact durable identity lineage",
+                    ));
+                }
+                if stamp(op, source)?.physical_id.as_ref()
+                    != fact.before.as_ref().and_then(|s| s.physical_id.as_ref())
+                {
+                    return Err(error(
+                        "selected entry receipt differs from canonical source identity",
+                    ));
+                }
+                rebase(&mut grant.path, &source.path, target);
+            }
+        }
+        grants.grants.push(grant);
+    }
+    Ok(grants)
+}
 // Durable lineage and grant authority do not depend on the pre-action pathname
 // still existing. Receipt-gap probing must establish these before the outcome.
 fn prestate_with_effects(
@@ -121,20 +188,10 @@ fn prestate_with_effects(
 ) -> Result<FileStamp, OpError> {
     let expected = stamp(op, entry)?;
     if let ExpectedIdentity::DirectoryAfterEffects { effects, .. } = &entry.identity {
-        let authorized = op.inspection["grants"]
-            .as_array()
-            .ok_or_else(|| error("missing native grants"))?
+        let authorized = material_grants(op)?
+            .grants
             .iter()
-            .map(|value| {
-                serde_json::from_value::<NativePathRecord>(value["path"].clone())
-                    .map_err(|_| error("invalid grant path"))
-                    .and_then(|path| {
-                        decode_path(&path).map_err(|_| error("unavailable grant path"))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .any(|grant| entry.path.starts_with(grant));
+            .any(|grant| entry.path.starts_with(&grant.path));
         if !authorized {
             return Err(error("directory material is outside native grants"));
         }
@@ -790,22 +847,7 @@ fn verified_material_inner(
             "directory stamp changed without proven child effects",
         ));
     }
-    let mut grants = vidlib_inventory::GrantSet::default();
-    for value in op.inspection["grants"]
-        .as_array()
-        .ok_or_else(|| error("missing native grants"))?
-    {
-        grants.grants.push(vidlib_inventory::SourceGrant {
-            id: serde_json::from_value(value["id"].clone()).map_err(|_| error("invalid grant"))?,
-            path: decode_path(
-                &serde_json::from_value::<NativePathRecord>(value["path"].clone())
-                    .map_err(|_| error("invalid grant path"))?,
-            )
-            .map_err(|_| error("unavailable grant path"))?,
-            source: serde_json::from_value(value["source"].clone())
-                .map_err(|_| error("invalid grant source"))?,
-        });
-    }
+    let mut grants = material_grants(op)?;
     if let Some(source) = relocated_from {
         for grant in &mut grants.grants {
             rebase(&mut grant.path, source, path);
@@ -817,7 +859,19 @@ fn verified_material_inner(
         .collect::<Vec<_>>();
     let candidates = directories
         .iter()
-        .map(|(p, _)| p.join(".vidlib-capture"))
+        .map(|(p, _)| {
+            // The explicitly selected root is also the read-only capture
+            // candidate for its observed parent. Keep the whole historical
+            // sibling/parent comparison below; never grant that parent.
+            grants
+                .grants
+                .iter()
+                .find(|g| {
+                    g.source == vidlib_inventory::GrantSource::NativeSelectedEntry
+                        && g.path.parent() == Some(p.as_path())
+                })
+                .map_or_else(|| p.join(".vidlib-capture"), |g| g.path.clone())
+        })
         .collect::<Vec<_>>();
     let fresh = fs.capture_namespace(&grants, &candidates)?;
     for (directory, id) in &directories {

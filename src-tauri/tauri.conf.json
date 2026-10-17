@@ -23,6 +23,7 @@
     "resources": {
       "resources/mediainfo/": "mediainfo/",
       "../tools/media-info-manifest.json": "mediainfo/manifest.json"
-    }
+    },
+    "windows": { "nsis": { "installerHooks": "installer/hooks.nsh" } }
   }
 }

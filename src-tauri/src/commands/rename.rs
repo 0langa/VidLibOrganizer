@@ -445,6 +445,7 @@ pub struct RenameState {
     plan_revision: u64,
     reviews: BTreeMap<StepId, RecoveryReview>,
     policy: ProtectedPolicy,
+    library_roots: Vec<std::path::PathBuf>,
 }
 fn lock(state: &AppState) -> Result<MutexGuard<'_, RenameState>> {
     state
@@ -484,6 +485,18 @@ pub fn update_inputs_owned(state: &AppState, request: InputRevision) -> Result<(
     let mut r = lock(state)?;
     set_revision(state, &mut r, request.revision)
 }
+fn refresh_library_policy(state: &AppState) -> Result<()> {
+    let mut roots = crate::selection::library_paths(state)?;
+    roots.sort();
+    roots.dedup();
+    let mut r = lock(state)?;
+    if roots != r.library_roots {
+        r.guard_library_roots(roots);
+        plans(state)?.invalidate();
+        r.reviews.clear();
+    }
+    Ok(())
+}
 fn fs_for(lease: &Lease, policy: &ProtectedPolicy) -> Result<PlatformFs> {
     let e = lease.epochs()?;
     Ok(PlatformFs {
@@ -493,7 +506,10 @@ fn fs_for(lease: &Lease, policy: &ProtectedPolicy) -> Result<PlatformFs> {
     })
 }
 fn reserve(r: &mut RenameState) -> Result<(JobId, JobControl)> {
-    if r.jobs.values().any(|j| j.status.state == "running") {
+    if r.jobs
+        .values()
+        .any(|j| j.status.state == "running" && !j.control.is_cancelled())
+    {
         return Err(busy());
     }
     if r.jobs.len() >= 64 {
@@ -556,6 +572,7 @@ pub fn cancel_owned(state: &AppState, request: JobRequest) -> Result<()> {
 }
 pub fn inventory_owned(state: &AppState, request: InventoryRequestDto) -> Result<JobId> {
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
+    refresh_library_policy(state)?;
     let mut r = lock(state)?;
     set_revision(state, &mut r, request.revision)?;
     plans(state)?.invalidate();
@@ -563,7 +580,7 @@ pub fn inventory_owned(state: &AppState, request: InventoryRequestDto) -> Result
     r.frozen_inputs = Arc::default();
     let mut input = InventoryRequest::new(r.roots.clone());
     input.generation = request.revision;
-    input.policy = r.policy.clone();
+    input.policy = r.effective_policy();
     let (id, control) = reserve(&mut r)?;
     let shared = state.rename.clone();
     let selection_generation = r.selection_generation;
@@ -730,6 +747,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         ));
     }
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
+    refresh_library_policy(state)?;
     let mut r = lock(state)?;
     set_revision(state, &mut r, request.revision)?;
     plans(state)?.invalidate();
@@ -737,7 +755,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         .inventory
         .clone()
         .ok_or_else(|| stale("Scan sources first"))?;
-    let policy = r.policy.clone();
+    let policy = r.effective_policy();
     let destination_grant = r.destination_grant.clone();
     let frozen_inputs = r.frozen_inputs.clone();
     let metadata_provider = state.metadata_provider.clone();
@@ -1122,6 +1140,7 @@ pub fn page_owned(state: &AppState, request: PageRequest) -> Result<Page> {
 }
 pub fn confirm_owned(state: &AppState, request: PlanRequest) -> Result<Confirmation> {
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
+    refresh_library_policy(state)?;
     let plan = {
         let _r = lock(state)?;
         plans(state)?.snapshot(request.plan_ref.into(), &lease)?
@@ -1141,8 +1160,9 @@ fn report_dto(report: vidlib_fileops::OperationReport) -> Value {
 }
 pub fn apply_owned(state: &AppState, request: ApplyRequest) -> Result<JobId> {
     let lease = state.coordinator.try_acquire(LeaseKind::Write)?;
+    refresh_library_policy(state)?;
     let mut r = lock(state)?;
-    let policy = r.policy.clone();
+    let policy = r.effective_policy();
     let plan = plans(state)?.consume_owned(request.plan_ref.into(), &request.nonce, &lease)?;
     let (id, control) = reserve(&mut r)?;
     plans(state)?.invalidate();
@@ -1248,6 +1268,7 @@ pub fn prepare_recovery_owned(
     request: OperationRequest,
 ) -> Result<RecoveryInspection> {
     let lease = state.coordinator.try_acquire(LeaseKind::Recovery)?;
+    refresh_library_policy(state)?;
     if lease.status()?.interrupted_legacy_write {
         return Err(OpError::new(
             ErrorCode::RecoveryRequired,
@@ -1258,7 +1279,7 @@ pub fn prepare_recovery_owned(
     }
     let r = lock(state)?;
     let binding = InputBinding::capture(&r);
-    let policy = r.policy.clone();
+    let policy = r.effective_policy();
     drop(r);
     let journal = Journal::open(&state.operations)?;
     let record = journal.operation(request.operation_id)?;
@@ -1408,6 +1429,7 @@ pub fn recovery_page_owned(state: &AppState, request: RecoveryPageRequest) -> Re
 }
 pub fn recovery_owned(state: &AppState, request: RecoveryRequest) -> Result<JobId> {
     let lease = state.coordinator.try_acquire(LeaseKind::Recovery)?;
+    refresh_library_policy(state)?;
     let mut r = lock(state)?;
     let review = r
         .reviews
@@ -1424,7 +1446,7 @@ pub fn recovery_owned(state: &AppState, request: RecoveryRequest) -> Result<JobI
     }) {
         return Err(stale("Recovery choice unavailable"));
     }
-    let policy = r.policy.clone();
+    let policy = r.effective_policy();
     let reviewed = review.preview.review(request.nonce)?;
     let (id, control) = reserve(&mut r)?;
     plans(state)?.invalidate();
@@ -1457,10 +1479,11 @@ pub struct UndoRequest {
 }
 pub fn undo_owned(state: &AppState, request: UndoRequest) -> Result<JobId> {
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
+    refresh_library_policy(state)?;
     let mut r = lock(state)?;
     set_revision(state, &mut r, request.revision)?;
     plans(state)?.invalidate();
-    let policy = r.policy.clone();
+    let policy = r.effective_policy();
     let selection_generation = r.selection_generation;
     let version = next_plan(state, &mut r)?;
     let (id, control) = reserve(&mut r)?;
@@ -1583,11 +1606,36 @@ impl RenameState {
         self.reviews.clear();
         Ok(())
     }
+    fn effective_policy(&self) -> ProtectedPolicy {
+        let mut policy = self.policy.clone();
+        for root in &self.library_roots {
+            if !policy.guarded_roots.contains(root) {
+                policy.guarded_roots.push(root.clone());
+            }
+        }
+        policy
+    }
+    pub(crate) fn guard_library_roots(&mut self, mut roots: Vec<std::path::PathBuf>) {
+        roots.sort();
+        roots.dedup();
+        // Library configuration owns only this layer. Removal must preserve
+        // independently protected roots and marker policy in the base layer.
+        self.library_roots = roots;
+    }
     pub(crate) fn replace_sources(&mut self, roots: Vec<RootBinding>) -> Result<()> {
         self.selection_generation = self
             .selection_generation
             .checked_add(1)
             .ok_or_else(|| stale("Selection generation overflow"))?;
+        // Native source replacement runs under a coordinator read lease; the
+        // legacy backend seam also supports retained recovery inspection.
+        // Cancel superseded readers; their generation checks
+        // prevent publication while a new read job starts.
+        for job in self.jobs.values() {
+            if job.status.state == "running" {
+                job.control.cancel();
+            }
+        }
         self.roots = roots;
         self.inventory = None;
         self.frozen_inputs = Arc::default();

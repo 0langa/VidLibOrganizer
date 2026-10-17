@@ -84,6 +84,22 @@ pub fn capture_context(completed: &OperationRecord) -> Result<UndoCaptureContext
         .grants
         .iter()
         .filter(|g| !parents.iter().any(|(p, _)| p == &g.path))
+        // A removed overlapping selected directory has no live parent to
+        // capture. Its enclosing explicit source grant already represents the
+        // original restore parent. Never manufacture a parent grant to climb
+        // out of the removed nested source; durable inverse lineage still owns
+        // every future directory and its native parent binding.
+        .filter(|g| {
+            g.source != GrantSource::NativeSelectedEntry
+                || !grants.grants.iter().any(|outer| {
+                    outer.source == GrantSource::NativeSelectedEntry
+                        && outer.path != g.path
+                        && g.path.starts_with(&outer.path)
+                        && !parents
+                            .iter()
+                            .any(|(p, _)| Some(p.as_path()) == g.path.parent())
+                })
+        })
         .map(|g| g.path.clone())
         .collect::<Vec<_>>();
     let mut candidates: Vec<_> = entries

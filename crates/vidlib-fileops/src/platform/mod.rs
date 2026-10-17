@@ -349,6 +349,19 @@ impl PlatformFs {
         }
         Ok(())
     }
+    /// Guard the exact effect, including a carrying ancestor. Observed parent
+    /// anchors and ordinary descendants are not root relocations. Recovery
+    /// calls this only when it actually mutates, not for receipt reconciliation.
+    fn permit_root_effect(&self, path: &Path) -> Result<(), OpError> {
+        if self.policy.guards_root_relocation(path) {
+            return Err(OpError::new(
+                ErrorCode::ProtectedEntry,
+                Phase::Verify,
+                "current protected root or carrying ancestor cannot be relocated",
+            ));
+        }
+        Ok(())
+    }
     fn permit_staging(&self, path: &Path) -> Result<(), OpError> {
         let parent = path.parent().ok_or_else(|| {
             OpError::new(
@@ -377,6 +390,8 @@ impl PlatformFs {
         reviewed_parents: Option<(&PhysicalId, &PhysicalId)>,
         controlled_timestamps: &[vidlib_rename::TimestampField],
     ) -> Result<MutationOutcome, OpError> {
+        self.permit_root_effect(source)?;
+        self.permit_root_effect(target)?;
         let (source_parent, source_name) = parent(source)?;
         let (target_parent, target_name) = parent(target)?;
         if let Some((expected_source_parent, expected_target_parent)) = reviewed_parents {
@@ -927,6 +942,7 @@ impl PlatformFs {
         reviewed_parent: Option<&PhysicalId>,
     ) -> Result<OwnedEntry, OpError> {
         self.permit(path)?;
+        self.permit_root_effect(path)?;
         let (parent, name) = parent(path)?;
         check_reviewed_parent(&parent, reviewed_parent, Phase::Create)?;
         native::mutation_supported(&parent, Phase::Create)?;
@@ -1001,6 +1017,7 @@ impl PlatformFs {
         entry: &OwnedEntry,
         reviewed_parent: Option<&PhysicalId>,
     ) -> Result<Durability, OpError> {
+        self.permit_root_effect(&entry.path)?;
         let (parent, name) = parent(&entry.path)?;
         native::mutation_supported(&parent, Phase::Remove)?;
         if reviewed_parent.is_some_and(|id| {

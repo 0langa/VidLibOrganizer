@@ -238,7 +238,9 @@ pub(crate) fn validate_rows_mode(
             original_target_parent.starts_with(&g.path)
                 || (g.path == row.source_path
                     && row.target_path.parent() == row.source_path.parent()
-                    && entry.kind == EntryKind::File)
+                    && (entry.kind == EntryKind::File
+                        || (entry.kind == EntryKind::Directory
+                            && g.source == vidlib_inventory::GrantSource::NativeSelectedEntry)))
         });
         if !authorized {
             issue(
@@ -256,10 +258,11 @@ pub(crate) fn validate_rows_mode(
                 .iter()
                 .any(|r| r == &row.target_path)
             || (entry.kind == EntryKind::Directory
-                && inventory
-                    .roots
-                    .iter()
-                    .any(|r| r.path == row.source_path || r.path.starts_with(&row.source_path)))
+                && inventory.roots.iter().any(|r| {
+                    (r.path == row.source_path || r.path.starts_with(&row.source_path))
+                        && r.source_grant.source
+                            != vidlib_inventory::GrantSource::NativeSelectedEntry
+                }))
         {
             issue(
                 row,

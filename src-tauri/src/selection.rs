@@ -11,6 +11,7 @@ use vidlib_inventory::{GrantSource, RootBinding};
 pub enum PickerKind {
     Folders,
     Files,
+    LibraryRoots,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -144,7 +145,9 @@ impl From<PatternSyntaxDto> for vidlib_rename::PatternSyntax {
         }
     }
 }
-/// Owned native adapter seam for native pickers and desktop integration tests.
+/// Legacy backend subtree selection seam. Retains NativeSelection semantics,
+/// including revision ownership and use while a recovery inspection is held.
+/// New picker/drop/argv entry producers use complete_picker_at instead.
 /// This is not an IPC command and never accepts UI path strings.
 pub fn install_selection(
     state: &AppState,
@@ -157,6 +160,25 @@ pub fn install_selection_at(
     paths: Vec<PathBuf>,
     expected_revision: Option<u64>,
 ) -> Result<SelectionDto, CommandError> {
+    install_selection_inner(state, paths, expected_revision, false)
+}
+fn install_selection_inner(
+    state: &AppState,
+    paths: Vec<PathBuf>,
+    expected_revision: Option<u64>,
+    advance: bool,
+) -> Result<SelectionDto, CommandError> {
+    crate::entrypoint::validate_paths(&paths)?;
+    let _lease = if advance {
+        Some(
+            state
+                .coordinator
+                .try_acquire(vidlib_fileops::coordinator::LeaseKind::Read)?,
+        )
+    } else {
+        None
+    };
+    let libraries = library_paths(state)?;
     let roots = paths
         .into_iter()
         .map(|path| {
@@ -167,7 +189,11 @@ pub fn install_selection_at(
                     e.to_string(),
                 )
             })?;
-            root.source_grant.source = GrantSource::NativeSelection;
+            root.source_grant.source = if advance {
+                GrantSource::NativeSelectedEntry
+            } else {
+                GrantSource::NativeSelection
+            };
             Ok(root)
         })
         .collect::<Result<Vec<_>, vidlib_fileops::OpError>>()?;
@@ -197,6 +223,13 @@ pub fn install_selection_at(
             )
         })?
         .invalidate();
+    let revision = if advance {
+        r.revision
+            .checked_add(1)
+            .ok_or_else(|| selection_error("Selection revision overflow"))?
+    } else {
+        r.revision
+    };
     let result = SelectionDto {
         sources: roots
             .iter()
@@ -206,41 +239,73 @@ pub fn install_selection_at(
                 display: r.path.to_string_lossy().into_owned(),
             })
             .collect(),
-        revision: r.revision.to_string(),
+        revision: revision.to_string(),
         source_count: roots.len().to_string(),
     };
     r.replace_sources(roots)?;
+    r.revision = revision;
+    r.guard_library_roots(libraries);
     Ok(result)
+}
+fn selection_error(message: impl Into<String>) -> CommandError {
+    vidlib_fileops::OpError::new(
+        vidlib_fileops::ErrorCode::InvalidPath,
+        vidlib_fileops::Phase::Read,
+        message,
+    )
+    .into()
+}
+pub(crate) fn library_paths(state: &AppState) -> Result<Vec<PathBuf>, CommandError> {
+    let _guard = state
+        .preferences_lock
+        .lock()
+        .map_err(|_| selection_error("Library preferences unavailable"))?;
+    crate::preferences::load(&state.preferences)
+        .map_err(selection_error)?
+        .into_iter()
+        .map(|path| {
+            RootBinding::new(PathBuf::from(path))
+                .map(|root| root.path)
+                .map_err(|error| selection_error(error.to_string()))
+        })
+        .collect()
+}
+/// The native dialog outcome is committed only after success. Cancellation has
+/// no revision, generation, grant, inventory, plan or nonce side effects.
+pub fn complete_picker_at(
+    state: &AppState,
+    paths: Option<Vec<PathBuf>>,
+    revision: u64,
+) -> Result<Option<SelectionDto>, CommandError> {
+    match paths {
+        Some(paths) if !paths.is_empty() => {
+            install_selection_inner(state, paths, Some(revision), true).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+pub fn select_library_roots_at(
+    state: &AppState,
+    revision: u64,
+) -> Result<Option<SelectionDto>, CommandError> {
+    complete_picker_at(state, Some(library_paths(state)?), revision)
 }
 #[tauri::command]
 pub async fn select_sources(
     request: PickerRequest,
     state: tauri::State<'_, AppState>,
-) -> Result<SelectionDto, CommandError> {
+) -> Result<Option<SelectionDto>, CommandError> {
     let picker = rfd::AsyncFileDialog::new().set_title("Choose Rename sources");
     let paths = match request.kind {
         PickerKind::Folders => picker.pick_folders().await,
         PickerKind::Files => picker.pick_files().await,
+        PickerKind::LibraryRoots => return select_library_roots_at(&state, request.revision),
     };
-    crate::commands::rename::update_inputs_owned(
+    complete_picker_at(
         &state,
-        InputRevision {
-            revision: request.revision,
-        },
-    )?;
-    if let Some(files) = paths {
-        install_selection_at(
-            &state,
-            files.into_iter().map(|f| f.path().to_path_buf()).collect(),
-            Some(request.revision),
-        )
-    } else {
-        Ok(SelectionDto {
-            sources: vec![],
-            source_count: "0".into(),
-            revision: request.revision.to_string(),
-        })
-    }
+        paths.map(|files| files.into_iter().map(|f| f.path().to_path_buf()).collect()),
+        request.revision,
+    )
 }
 
 /// Backend-only native destination picker seam; never accepts IPC path text.

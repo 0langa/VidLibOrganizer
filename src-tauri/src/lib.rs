@@ -1,5 +1,6 @@
 pub mod app_state;
 pub mod commands;
+pub mod entrypoint;
 pub mod jobs;
 mod preferences;
 pub mod rename_preferences;
@@ -31,7 +32,17 @@ fn load_libraries(state: State<'_, AppState>) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn save_libraries(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    save_libraries_owned(&state, paths)
+}
+/// Library configuration changes revoke previews across processes through the
+/// persisted policy epoch, before any newer configuration can be observed.
+pub fn save_libraries_owned(state: &AppState, paths: Vec<String>) -> Result<(), String> {
+    let lease = state
+        .coordinator
+        .try_acquire(vidlib_fileops::coordinator::LeaseKind::Write)
+        .map_err(|e| e.to_string())?;
     let _guard = state.preferences_lock.lock().map_err(|e| e.to_string())?;
+    lease.advance_policy().map_err(|e| e.to_string())?;
     preferences::save(&state.preferences, paths)
 }
 
@@ -202,16 +213,34 @@ fn job_error(message: String) -> OpError {
 }
 
 pub fn run() {
+    let native_paths = match entrypoint::parse_selection_arguments(std::env::args_os().skip(1)) {
+        Ok(paths) => paths,
+        Err(error) => {
+            rfd::MessageDialog::new()
+                .set_title("Selection arguments rejected")
+                .set_description(&error.message)
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            return;
+        }
+    };
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             let preferences = app.path().app_config_dir()?.join("libraries.json");
             let app_data = app.path().app_local_data_dir()?;
             let mut state = AppState::open(&app_data, preferences)?;
             state.metadata_provider = std::sync::Arc::new(metadata::DesktopMetadataProvider::from_resources(&app.path().resource_dir()?));
+            if let Some(paths) = native_paths { entrypoint::queue_native_paths(&state, paths).map_err(|error| std::io::Error::other(error.message))?; }
             app.manage(state);
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let state=window.state::<AppState>();
+                if let Err(error)=entrypoint::queue_native_paths(&state,paths.clone()) {
+                    rfd::MessageDialog::new().set_title("Selection rejected").set_description(&error.message).set_level(rfd::MessageLevel::Error).show();
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
                 if state.request_close() {
@@ -222,7 +251,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![load_libraries, save_libraries, pick_folder, start_scan, scan_status, scan_result, cancel_scan, apply_actions, reveal_file, export_report, selection::select_sources, selection::select_destination, commands::rename::update_rename_inputs, commands::rename::start_inventory, commands::rename::inventory_page, commands::rename::start_rename_preview, commands::rename::job_status, commands::rename::cancel_job, commands::rename::rename_page, commands::rename::export_rename_plan, commands::rename::confirm_rename, commands::rename::apply_rename, commands::rename::operation_history, commands::rename::history_revision, commands::rename::recovery_preview, commands::rename::recovery_page, commands::rename::start_recovery, commands::rename::start_undo, commands::rename::rename_session, rename_preferences::save_rename_preset, rename_preferences::load_rename_preset, rename_preferences::list_rename_presets, rename_preferences::import_rename_recipe, rename_preferences::export_rename_recipe])
+        .invoke_handler(tauri::generate_handler![load_libraries, save_libraries, pick_folder, start_scan, scan_status, scan_result, cancel_scan, apply_actions, reveal_file, export_report, selection::select_sources, selection::select_destination, entrypoint::pending_native_selection, entrypoint::accept_native_selection, entrypoint::discard_native_selection, commands::rename::update_rename_inputs, commands::rename::start_inventory, commands::rename::inventory_page, commands::rename::start_rename_preview, commands::rename::job_status, commands::rename::cancel_job, commands::rename::rename_page, commands::rename::export_rename_plan, commands::rename::confirm_rename, commands::rename::apply_rename, commands::rename::operation_history, commands::rename::history_revision, commands::rename::recovery_preview, commands::rename::recovery_page, commands::rename::start_recovery, commands::rename::start_undo, commands::rename::rename_session, rename_preferences::save_rename_preset, rename_preferences::load_rename_preset, rename_preferences::list_rename_presets, rename_preferences::import_rename_recipe, rename_preferences::export_rename_recipe])
         .run(tauri::generate_context!())
         .expect("Could not start VidLibOrganizer");
 }
