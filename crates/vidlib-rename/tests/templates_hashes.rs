@@ -351,7 +351,22 @@ fn full_file_hashes_include_bytes_after_first_mebibyte_and_share_one_read() {
             .filter(|v| v.key == FieldKey::Hash { algorithm })
             .map(|v| &v.value)
             .collect::<Vec<_>>();
-        assert_eq!(values.len(), 2);
+        let requested = req
+            .fields
+            .iter()
+            .filter(|f| f.key == FieldKey::Hash { algorithm })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values.len(),
+            requested.len(),
+            "publish each requested owner"
+        );
+        for field in requested {
+            assert!(inputs.values.iter().any(|v| v.scope == field.scope
+                && v.entry_id == field.entry_id
+                && v.rule_id == field.rule_id
+                && v.key == field.key));
+        }
         assert_ne!(values[0], values[1], "{algorithm:?} must include the tail");
     }
     let rows = evaluate(&inv, &recipe, &inputs).unwrap().rows;
@@ -800,4 +815,225 @@ fn destination_generated_values_cannot_alias_a_rule_named_destination() {
         .prepare(&requirements, &inventory, &JobControl::default())
         .unwrap();
     assert_eq!(inputs, again);
+}
+
+#[test]
+fn destination_only_hash_layout_and_shared_name_hash_retain_owner_scopes() {
+    for naming_hash in [false, true] {
+        let (_dir, inventory, mut recipe, _) = fixture(
+            &["clip.mkv"],
+            if naming_hash {
+                hash_recipe(HashAlgorithm::Sha256)
+            } else {
+                RuleParameters::Keep
+            },
+        );
+        let target = tempfile::tempdir().unwrap();
+        let grant = SourceGrant {
+            id: ids::GrantId::new(),
+            path: target.path().to_owned(),
+            source: GrantSource::NativeSelection,
+        };
+        recipe.destination = Destination::CopyTo {
+            grant_id: grant.id,
+            layout: DestinationLayout::FolderTemplate {
+                parts: vec![field(FieldKey::Hash {
+                    algorithm: HashAlgorithm::Sha256,
+                })],
+            },
+        };
+        let mut cache = FrozenInputCache::default();
+        let requirements = request(&recipe);
+        let inputs = cache
+            .prepare(&requirements, &inventory, &JobControl::default())
+            .unwrap();
+        let destination = inputs
+            .values
+            .iter()
+            .find(|v| v.scope == FrozenScope::Destination)
+            .unwrap();
+        let FrozenFieldValue::Text(hash) = &destination.value else {
+            panic!(
+                "destination hash was computed but not published: {:?}",
+                destination.value
+            )
+        };
+        assert_eq!(
+            hash,
+            "721c9525ade2ea8903d343ef25cf68b9bf4ab0aad56bb7b01fbe48d09bc7fcf4"
+        );
+        assert_eq!(destination.rule_id, None);
+        if naming_hash {
+            assert!(inputs.values.iter().any(|v| v.scope == FrozenScope::Rule
+                && v.rule_id.as_deref() == Some("r")
+                && v.value == destination.value));
+        }
+        let batch = evaluate(&inventory, &recipe, &inputs).unwrap();
+        let mut grants = batch.grants.clone();
+        grants.grants.push(grant);
+        let batch = resolve_destinations(batch, &recipe.destination, &grants).unwrap();
+        assert_ne!(batch.rows[0].status, RowStatus::Blocked);
+        assert_eq!(
+            batch.rows[0].target_path.parent().unwrap(),
+            target.path().join(hash)
+        );
+        assert_eq!(
+            batch.rows[0]
+                .target_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            if naming_hash {
+                format!("{hash}.mkv")
+            } else {
+                "clip.mkv".into()
+            }
+        );
+        assert_eq!(
+            cache
+                .prepare(&requirements, &inventory, &JobControl::default())
+                .unwrap(),
+            inputs
+        );
+        assert_eq!(
+            cache.content_bytes_read, 5,
+            "both owners and repeated preview share one verified content read"
+        );
+    }
+}
+
+#[test]
+fn hash_missing_choices_remain_scoped_while_other_owner_computes() {
+    let hash = FieldKey::Hash {
+        algorithm: HashAlgorithm::Sha256,
+    };
+    for missing_scope in [FrozenScope::Rule, FrozenScope::Destination] {
+        let (_dir, inventory, mut recipe, mut seed) =
+            fixture(&["clip.mkv"], hash_recipe(HashAlgorithm::Sha256));
+        let target = tempfile::tempdir().unwrap();
+        let grant = SourceGrant {
+            id: ids::GrantId::new(),
+            path: target.path().to_owned(),
+            source: GrantSource::NativeSelection,
+        };
+        recipe.destination = Destination::CopyTo {
+            grant_id: grant.id,
+            layout: DestinationLayout::FolderTemplate {
+                parts: vec![field(hash.clone())],
+            },
+        };
+        seed.values.push(FrozenValue {
+            scope: missing_scope,
+            entry_id: recipe.selection[0],
+            rule_id: None,
+            key: hash.clone(),
+            value: FrozenFieldValue::Missing {
+                decision: MissingDecision::Fallback("chosen-missing".into()),
+            },
+        });
+        let mut cache = FrozenInputCache::from_inputs(seed);
+        let inputs = cache
+            .prepare(&request(&recipe), &inventory, &JobControl::default())
+            .unwrap();
+        let batch = evaluate(&inventory, &recipe, &inputs).unwrap();
+        let mut grants = batch.grants.clone();
+        grants.grants.push(grant);
+        let batch = resolve_destinations(batch, &recipe.destination, &grants).unwrap();
+        let expected_hash = "721c9525ade2ea8903d343ef25cf68b9bf4ab0aad56bb7b01fbe48d09bc7fcf4";
+        let name = if missing_scope == FrozenScope::Rule {
+            "chosen-missing"
+        } else {
+            expected_hash
+        };
+        let folder = if missing_scope == FrozenScope::Destination {
+            "chosen-missing"
+        } else {
+            expected_hash
+        };
+        assert_eq!(
+            batch.rows[0].target_path,
+            target.path().join(folder).join(format!("{name}.mkv")),
+            "{missing_scope:?}"
+        );
+        assert_eq!(
+            cache
+                .prepare(&request(&recipe), &inventory, &JobControl::default())
+                .unwrap(),
+            inputs
+        );
+        assert_eq!(cache.content_bytes_read, 5);
+    }
+}
+
+#[test]
+fn hash_scoped_missing_choices_do_not_share_seeded_values() {
+    for seeded_text in [false, true] {
+        let (dir, inventory, mut recipe, mut seed) =
+            fixture(&["clip.mkv"], hash_recipe(HashAlgorithm::Sha256));
+        let target = tempfile::tempdir().unwrap();
+        let grant = SourceGrant {
+            id: ids::GrantId::new(),
+            path: target.path().to_owned(),
+            source: GrantSource::NativeSelection,
+        };
+        let key = FieldKey::Hash {
+            algorithm: HashAlgorithm::Sha256,
+        };
+        recipe.destination = Destination::CopyTo {
+            grant_id: grant.id,
+            layout: DestinationLayout::FolderTemplate {
+                parts: vec![field(key.clone())],
+            },
+        };
+        seed.values.push(FrozenValue {
+            scope: FrozenScope::Rule,
+            entry_id: recipe.selection[0],
+            rule_id: None,
+            key: key.clone(),
+            value: if seeded_text {
+                FrozenFieldValue::Text("seeded-rule-value".into())
+            } else {
+                FrozenFieldValue::Missing {
+                    decision: MissingDecision::Fallback("name-choice".into()),
+                }
+            },
+        });
+        if !seeded_text {
+            seed.values.push(FrozenValue {
+                scope: FrozenScope::Destination,
+                entry_id: recipe.selection[0],
+                rule_id: None,
+                key,
+                value: FrozenFieldValue::Missing {
+                    decision: MissingDecision::Fallback("folder-choice".into()),
+                },
+            });
+        }
+        let mut cache = FrozenInputCache::from_inputs(seed);
+        let inputs = cache
+            .prepare(&request(&recipe), &inventory, &JobControl::default())
+            .unwrap();
+        let batch = evaluate(&inventory, &recipe, &inputs).unwrap();
+        let mut grants = batch.grants.clone();
+        grants.grants.push(grant);
+        let batch = resolve_destinations(batch, &recipe.destination, &grants).unwrap();
+        let expected = if seeded_text {
+            "721c9525ade2ea8903d343ef25cf68b9bf4ab0aad56bb7b01fbe48d09bc7fcf4/seeded-rule-value.mkv"
+        } else {
+            "folder-choice/name-choice.mkv"
+        };
+        assert_eq!(batch.rows[0].target_path, target.path().join(expected));
+        assert_eq!(cache.content_bytes_read, if seeded_text { 5 } else { 0 });
+        assert_eq!(
+            cache
+                .prepare(&request(&recipe), &inventory, &JobControl::default())
+                .unwrap(),
+            inputs
+        );
+        std::fs::write(dir.path().join("clip.mkv"), b"changed content").unwrap();
+        let error = cache
+            .prepare(&request(&recipe), &inventory, &JobControl::default())
+            .expect_err("explicit hash choices must retain native source revalidation");
+        assert_eq!(error.code, RenameErrorCode::StaleInputs);
+    }
 }

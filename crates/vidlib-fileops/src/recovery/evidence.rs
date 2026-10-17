@@ -62,6 +62,22 @@ pub(crate) fn material(
     entry: &EntryPrestate,
     fs: &dyn Filesystem,
 ) -> Result<FileStamp, OpError> {
+    let expected = prestate_with_effects(op, entry)?;
+    if matches!(
+        entry.identity,
+        ExpectedIdentity::DirectoryAfterEffects { .. }
+    ) {
+        verified_material_inner(op, &entry.path, &expected, fs, true, None)
+    } else {
+        Ok(expected)
+    }
+}
+// Durable lineage and grant authority do not depend on the pre-action pathname
+// still existing. Receipt-gap probing must establish these before the outcome.
+fn prestate_with_effects(
+    op: &PendingOperation,
+    entry: &EntryPrestate,
+) -> Result<FileStamp, OpError> {
     let expected = stamp(op, entry)?;
     if let ExpectedIdentity::DirectoryAfterEffects { effects, .. } = &entry.identity {
         let authorized = op.inspection["grants"]
@@ -100,10 +116,8 @@ pub(crate) fn material(
                 }
             }
         }
-        verified_material_inner(op, &entry.path, &expected, fs, true)
-    } else {
-        Ok(expected)
     }
+    Ok(expected)
 }
 pub(crate) fn absent(fs: &dyn Filesystem, path: &Path) -> bool {
     matches!(fs.inspect(path), Err(e) if e.code == ErrorCode::SourceMissing)
@@ -372,7 +386,16 @@ pub(crate) fn probe(
         .any(|e| e.inverse.step.id == step.id);
     parents(op, step, inverse, fs)?;
     let (source, target) = paths(&step.action);
-    let mut before = source.map(|s| material(op, s, fs)).transpose()?;
+    let source_absent = source.is_some_and(|s| absent(fs, &s.path));
+    let mut before = source
+        .map(|s| {
+            if source_absent {
+                prestate_with_effects(op, s)
+            } else {
+                material(op, s, fs)
+            }
+        })
+        .transpose()?;
     if matches!(
         step.action,
         ExecutionAction::RemoveOwnedEmptyDirectory { .. }
@@ -393,7 +416,6 @@ pub(crate) fn probe(
     let source_present = source
         .zip(before.as_ref())
         .is_some_and(|(s, e)| fs.verify(&s.path, e).is_ok());
-    let source_absent = source.is_some_and(|s| absent(fs, &s.path));
     let target_absent = target.is_some_and(|t| absent(fs, t));
     let mut digest = None;
     let mut after = None;
@@ -423,6 +445,21 @@ pub(crate) fn probe(
                 RecoveryDisposition::NotApplied
             } else if source_absent {
                 let t = target.expect("rename target");
+                let expected = before.as_ref().expect("rename source");
+                if let Some(source) = source.filter(|s| {
+                    matches!(s.identity, ExpectedIdentity::DirectoryAfterEffects { .. })
+                }) {
+                    // Prove the exact carried namespace at its surviving location;
+                    // this is a read-only projection, never a fabricated receipt.
+                    before = Some(verified_material_inner(
+                        op,
+                        t,
+                        expected,
+                        fs,
+                        true,
+                        Some(&source.path),
+                    )?);
+                }
                 let observed = fs.verify(t, before.as_ref().expect("rename source"))?;
                 if let Some(d) = &digest {
                     if !digest_matches(fs, t, &observed.stamp, d)? {
@@ -528,6 +565,30 @@ pub(crate) fn probe(
             if source_present {
                 RecoveryDisposition::NotApplied
             } else if source_absent {
+                if matches!(
+                    step.action,
+                    ExecutionAction::RemoveOwnedEmptyDirectory { .. }
+                ) && matches!(
+                    owned.entry.identity,
+                    ExpectedIdentity::DirectoryAfterEffects { .. }
+                ) {
+                    let expected = before.as_ref().expect("owned directory prestate");
+                    let (directories, entries, _) = transformed_namespace(op)?;
+                    let creator = receipt(op, owned.created_by)?;
+                    if creator.phase != CompletedPhase::DirectoryCreated
+                        || creator.after_path.as_ref() != Some(&encode_path(&owned.entry.path))
+                        || !directories.iter().any(|(p, id)| {
+                            p == &owned.entry.path && Some(id) == expected.physical_id.as_ref()
+                        })
+                        || entries
+                            .keys()
+                            .any(|p| p != &owned.entry.path && p.starts_with(&owned.entry.path))
+                    {
+                        return Err(error(
+                            "absent owned directory lacks empty descendant evidence",
+                        ));
+                    }
+                }
                 RecoveryDisposition::Applied
             } else {
                 RecoveryDisposition::Unresolved
@@ -587,7 +648,7 @@ pub(crate) fn verified_material(
     expected: &FileStamp,
     fs: &dyn Filesystem,
 ) -> Result<FileStamp, OpError> {
-    verified_material_inner(op, path, expected, fs, false)
+    verified_material_inner(op, path, expected, fs, false, None)
 }
 fn verified_material_inner(
     op: &PendingOperation,
@@ -595,6 +656,7 @@ fn verified_material_inner(
     expected: &FileStamp,
     fs: &dyn Filesystem,
     force: bool,
+    relocated_from: Option<&Path>,
 ) -> Result<FileStamp, OpError> {
     if !force {
         if let Ok(observed) = fs.verify(path, expected) {
@@ -607,7 +669,28 @@ fn verified_material_inner(
     {
         return Err(error("compensation material or identity changed"));
     }
-    let (directories, entries, changed) = transformed_namespace(op)?;
+    let (mut directories, mut entries, changed) = transformed_namespace(op)?;
+    if let Some(source) = relocated_from {
+        if !directories
+            .iter()
+            .any(|(p, id)| p == source && Some(id) == expected.physical_id.as_ref())
+            || entries
+                .keys()
+                .any(|p| p.starts_with(path) && !p.starts_with(source))
+        {
+            return Err(error("directory rename lacks unique pre-action namespace"));
+        }
+        for (directory, _) in &mut directories {
+            rebase(directory, source, path);
+        }
+        entries = entries
+            .into_iter()
+            .map(|(mut p, value)| {
+                rebase(&mut p, source, path);
+                (p, value)
+            })
+            .collect();
+    }
     let factual = entries
         .get(path)
         .map(|(stamp, _)| stamp)
@@ -649,6 +732,11 @@ fn verified_material_inner(
             source: serde_json::from_value(value["source"].clone())
                 .map_err(|_| error("invalid grant source"))?,
         });
+    }
+    if let Some(source) = relocated_from {
+        for grant in &mut grants.grants {
+            rebase(&mut grant.path, source, path);
+        }
     }
     let directories = directories
         .into_iter()

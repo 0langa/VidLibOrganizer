@@ -101,7 +101,11 @@ impl Filesystem for CopyFs {
     }
     fn rename_reserved(&mut self, r: &RenameReservation) -> Result<MutationOutcome, OpError> {
         self.at("before-rename");
+        let directory = self.native.inspect(r.source())?.kind == EntryKind::Directory;
         let x = self.native.rename_reserved(r)?;
+        if directory {
+            self.at("after-directory-quarantine");
+        }
         self.at("after-rename");
         Ok(x)
     }

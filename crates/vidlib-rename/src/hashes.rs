@@ -95,6 +95,9 @@ impl InputRequirements {
 pub struct FrozenInputCache {
     pub(crate) retained: Option<FrozenInputs>,
     pub(crate) metadata_cache: Vec<crate::metadata::CacheEntry>,
+    // Only hashes computed through verified native content enter this cache.
+    // Frozen user values/missing decisions are scoped owners, not shared proof.
+    content_hashes: BTreeMap<(EntryId, HashAlgorithm), String>,
     /// Cumulative bytes read by this cache, including cancelled preparations.
     pub content_bytes_read: u64,
 }
@@ -105,12 +108,14 @@ impl FrozenInputCache {
             retained: Some(inputs),
             content_bytes_read: 0,
             metadata_cache: vec![],
+            content_hashes: BTreeMap::new(),
         }
     }
     /// Explicit regeneration; inventory ID/generation changes also reset retention.
     pub fn regenerate(&mut self) {
         self.retained = None;
         self.metadata_cache.clear();
+        self.content_hashes.clear();
     }
     pub fn prepare(
         &mut self,
@@ -148,6 +153,14 @@ impl FrozenInputCache {
                 "requested fields must belong to distinct observed primaries",
             ));
         }
+        let same_inventory = self.retained.as_ref().is_some_and(|old| {
+            old.inventory_id == inventory.id && old.generation == inventory.generation
+        });
+        let mut content_hashes = if same_inventory {
+            self.content_hashes.clone()
+        } else {
+            BTreeMap::new()
+        };
         let mut retained = self
             .retained
             .clone()
@@ -180,10 +193,12 @@ impl FrozenInputCache {
         let mut requested_hashes = BTreeMap::<EntryId, BTreeSet<HashAlgorithm>>::new();
         for field in &request.fields {
             if let FieldKey::Hash { algorithm } = field.key {
-                requested_hashes
-                    .entry(field.entry_id)
-                    .or_default()
-                    .insert(algorithm);
+                // Explicit choices still require the original native binding
+                // check, although they need no computed value or content read.
+                let algorithms = requested_hashes.entry(field.entry_id).or_default();
+                if lookup(&retained, field).is_none() {
+                    algorithms.insert(algorithm);
+                }
             }
         }
         for (id, algorithms) in requested_hashes {
@@ -193,16 +208,7 @@ impl FrozenInputCache {
             }
             let needed = algorithms
                 .into_iter()
-                .filter(|algorithm| {
-                    !retained.values.iter().any(|v| {
-                        v.entry_id == id
-                            && v.rule_id.is_none()
-                            && v.key
-                                == FieldKey::Hash {
-                                    algorithm: *algorithm,
-                                }
-                    })
-                })
+                .filter(|algorithm| !content_hashes.contains_key(&(id, *algorithm)))
                 .collect::<BTreeSet<_>>();
             // Even cached hashes revalidate the source binding/material stamp, without reading contents.
             let hashes = vidlib_inventory::with_verified_content(inventory, id, |reader| {
@@ -216,13 +222,7 @@ impl FrozenInputCache {
                 }
             })?;
             for (algorithm, hash) in hashes {
-                retained.values.push(FrozenValue {
-                    scope: Default::default(),
-                    entry_id: id,
-                    rule_id: None,
-                    key: FieldKey::Hash { algorithm },
-                    value: FrozenFieldValue::Text(hash),
-                });
+                content_hashes.insert((id, algorithm), hash);
             }
         }
         let mut output = retained.clone();
@@ -245,7 +245,29 @@ impl FrozenInputCache {
                     },
                 })
             } else {
-                lookup(&retained, field).cloned()
+                lookup(&retained, field)
+                    .map(|previous| {
+                        let mut value = previous.clone();
+                        if matches!(field.key, FieldKey::Hash { .. }) {
+                            value.scope = field.scope;
+                            value.rule_id = field.rule_id.clone();
+                        }
+                        value
+                    })
+                    .or_else(|| {
+                        let FieldKey::Hash { algorithm } = field.key else {
+                            return None;
+                        };
+                        content_hashes
+                            .get(&(field.entry_id, algorithm))
+                            .map(|hash| FrozenValue {
+                                scope: field.scope,
+                                entry_id: field.entry_id,
+                                rule_id: field.rule_id.clone(),
+                                key: field.key.clone(),
+                                value: FrozenFieldValue::Text(hash.clone()),
+                            })
+                    })
             };
             let value = previous.unwrap_or_else(|| FrozenValue {
                 scope: field.scope,
@@ -269,7 +291,9 @@ impl FrozenInputCache {
                 },
             });
             // Default counters follow the current explicit primary vector. Explicit overrides stay frozen.
-            if field.key != FieldKey::Counter && lookup(&retained, field).is_none() {
+            if !matches!(field.key, FieldKey::Counter | FieldKey::Hash { .. })
+                && lookup(&retained, field).is_none()
+            {
                 retained.values.push(value.clone());
             }
             if !output.values.iter().any(|v| {
@@ -283,6 +307,7 @@ impl FrozenInputCache {
         }
         check_cancel(control)?;
         self.retained = Some(retained);
+        self.content_hashes = content_hashes;
         Ok(output)
     }
 }
@@ -302,7 +327,6 @@ fn lookup<'a>(inputs: &'a FrozenInputs, field: &RequestedInput) -> Option<&'a Fr
                     && v.entry_id == field.entry_id
                     && v.rule_id.is_none()
                     && v.key == field.key
-                    && (v.scope == field.scope || matches!(field.key, FieldKey::Hash { .. }))
             })
         })
 }

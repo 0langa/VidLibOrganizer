@@ -476,7 +476,7 @@ fn copy_phase_crash_child() {
         f.run(&mut adapter, &JobControl::default()).unwrap();
         panic!("inverse deletion boundary not reached");
     }
-    if boundary == "after-directory-remove" || boundary == "folder-after-directory" {
+    if boundary == "after-directory-remove" || boundary.starts_with("folder-") {
         directory_plan(&mut f, &target, true);
     } else {
         destination_plan(&mut f, &target, true);
@@ -2130,4 +2130,116 @@ fn selected_nested_directories_carry_children_after_parent_collision() {
             b"child bytes"
         );
     }
+}
+
+fn recover_folder_crash(boundary: &str, choice: RecoveryChoice) {
+    let (_root, target, fixture, coordinator, mut journal) = crashed_copy(boundary);
+    let op = journal.pending().unwrap().remove(0);
+    let originals = op
+        .steps
+        .iter()
+        .flat_map(|s| s.receipts.clone())
+        .collect::<Vec<_>>();
+    let mut native = PlatformFs::default();
+    let preview = reconcile(&op, &mut native).unwrap();
+    assert!(
+        preview.unresolved_groups.is_empty(),
+        "{boundary}: {:?}",
+        preview.actions
+    );
+    let nonce = preview.review_nonce();
+    let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    let report = apply_recovery(
+        preview.review(nonce).unwrap(),
+        choice,
+        &lease,
+        &mut journal,
+        &mut native,
+        &JobControl::default(),
+    )
+    .unwrap_or_else(|e| panic!("{boundary} {choice:?}: {e:?}"));
+    let completed = journal.operation(op.operation_id).unwrap();
+    for fact in originals {
+        assert!(completed
+            .steps
+            .iter()
+            .flat_map(|s| &s.receipts)
+            .any(|r| r == &fact));
+    }
+    assert!(journal.pending().unwrap().is_empty());
+    match choice {
+        RecoveryChoice::Resume => {
+            assert_eq!(report.state, OperationState::Completed);
+            assert!(!fixture.join("media/Tree").exists());
+            assert_eq!(
+                fs::read(target.path().join("Tree/sub/child.mkv")).unwrap(),
+                b"child bytes"
+            );
+        }
+        RecoveryChoice::Restore => {
+            assert_eq!(report.state, OperationState::Cancelled);
+            assert_eq!(
+                fs::read(fixture.join("media/Tree/sub/child.mkv")).unwrap(),
+                b"child bytes"
+            );
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+        }
+    }
+}
+#[test]
+fn folder_directory_quarantine_receipt_gap_restores() {
+    recover_folder_crash("folder-after-directory-quarantine", RecoveryChoice::Restore);
+}
+#[test]
+fn folder_move_resume_after_child_effects() {
+    for boundary in ["folder-after-publish", "folder-after-remove"] {
+        recover_folder_crash(boundary, RecoveryChoice::Resume);
+    }
+}
+#[test]
+fn folder_move_resume_after_source_directory_removal() {
+    recover_folder_crash("after-directory-remove", RecoveryChoice::Resume);
+}
+#[test]
+fn folder_inverse_directory_removal_receipt_gap_restores() {
+    let (_root, target, fixture, coordinator, mut journal) = crashed_copy("after-directory-remove");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "copy_restore_crash_child", "--nocapture"])
+        .env("VIDLIB_RESTORE_FIXTURE", &fixture)
+        .env("VIDLIB_RESTORE_BOUNDARY", "after-owned-directory-remove")
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(86));
+    let op = journal.pending().unwrap().remove(0);
+    assert!(op.recovery_effects.iter().any(|e| e.inverse.state
+        == journal::StepState::IntentDurable
+        && matches!(
+            e.inverse.step.action,
+            ExecutionAction::RemoveOwnedEmptyDirectory { .. }
+        )));
+    let mut native = PlatformFs::default();
+    let preview = reconcile(&op, &mut native).unwrap();
+    assert!(
+        preview.unresolved_groups.is_empty(),
+        "owned directory removal must be provable: {:?}",
+        preview.actions
+    );
+    let nonce = preview.review_nonce();
+    let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    let report = apply_recovery(
+        preview.review(nonce).unwrap(),
+        RecoveryChoice::Restore,
+        &lease,
+        &mut journal,
+        &mut native,
+        &JobControl::default(),
+    )
+    .unwrap();
+    assert_eq!(report.state, OperationState::Cancelled);
+    assert!(journal.pending().unwrap().is_empty());
+    assert_eq!(
+        fs::read(fixture.join("media/Tree/sub/child.mkv")).unwrap(),
+        b"child bytes"
+    );
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
 }

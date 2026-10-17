@@ -252,7 +252,13 @@ pub(crate) fn compile_group(
         ));
     }
     // Compile typed future parent bindings; never synthesize a native identity.
-    let map = parent_map(op, None)?;
+    // A quarantined directory restored by rename keeps its actual identity.
+    // Track its planned location separately from the live path used to verify
+    // that identity while compiling later child effects before any mutation.
+    let mut map = parent_map(op, None)?
+        .into_iter()
+        .map(|(path, id)| (path.clone(), path, id))
+        .collect::<Vec<_>>();
     let mut future = BTreeMap::new();
     let mut result = Vec::new();
     let mut previous = None;
@@ -271,12 +277,12 @@ pub(crate) fn compile_group(
                     path: encode_path(p),
                 });
             }
-            let (_, id) = map
+            let (_, observed_path, id) = map
                 .iter()
                 .rev()
-                .find(|(path, _)| path == p)
+                .find(|(path, _, _)| path == p)
                 .ok_or_else(|| error("inverse parent lacks reviewed authority"))?;
-            if fs.inspect(p)?.stamp.physical_id.as_ref() != Some(id) {
+            if fs.inspect(observed_path)?.stamp.physical_id.as_ref() != Some(id) {
                 return Err(error("inverse parent replaced"));
             }
             Ok(ParentAuthority::Observed(id.clone()))
@@ -285,6 +291,11 @@ pub(crate) fn compile_group(
         let target_parent = parent(target)?;
         if let ExecutionAction::CreateDirectory { target } = &step.action {
             future.insert(target.clone(), step.id);
+        }
+        if let ExecutionAction::RenameEntry { source, target, .. } = &step.action {
+            for (planned_path, _, _) in &mut map {
+                rebase(planned_path, &source.path, target);
+            }
         }
         let mut depends_on: Vec<_> = previous.into_iter().collect();
         for parent in [&source_parent, &target_parent] {

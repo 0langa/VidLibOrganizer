@@ -410,7 +410,7 @@ fn resume(
         let (sp, tp) = parents(&op, &pending.step, false, fs)?;
         let source =
             source.ok_or_else(|| error("creation execution belongs to its phase owner"))?;
-        let expected = stamp(&op, source)?;
+        let expected = material(&op, source, fs)?;
         fs.verify(&source.path, &expected)?;
         if !target.is_some_and(|t| absent(fs, t)) {
             return Err(error("compiled resume target is occupied or unavailable"));

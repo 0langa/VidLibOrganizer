@@ -87,10 +87,7 @@ fn frozen_value<'a>(
         })
         .or_else(|| {
             inputs.values.iter().find(|v| {
-                v.entry_id == entry.id
-                    && v.rule_id.is_none()
-                    && &v.key == key
-                    && (v.scope == scope || matches!(key, FieldKey::Hash { .. }))
+                v.entry_id == entry.id && v.rule_id.is_none() && &v.key == key && v.scope == scope
             })
         })
         .map(|v| &v.value)

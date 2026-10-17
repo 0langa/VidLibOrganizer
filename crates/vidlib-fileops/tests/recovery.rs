@@ -1104,3 +1104,59 @@ fn failed_v5_restore_migration_retains_original_evidence() {
         1
     );
 }
+
+#[test]
+fn directory_after_effects_rename_gap_requires_complete_surviving_namespace() {
+    use vidlib_rename::{ExecutionAction, ExpectedIdentity};
+    for tamper in ["none", "unknown-child", "missing-child", "replacement"] {
+        let mut f = Fixture::new(&[("a", "new")]);
+        fs::create_dir(f.media.join("Tree")).unwrap();
+        fs::write(f.media.join("Tree/child"), b"owned bytes").unwrap();
+        let media = f.media.clone();
+        crash_child::replan(&mut f, media.clone(), &[("Tree", "Moved")]);
+        let step = &mut f.plan.execution.groups[0].steps[0];
+        let ExecutionAction::RenameEntry { source, .. } = &mut step.action else {
+            unreachable!()
+        };
+        let ExpectedIdentity::Observed(original) = &source.identity else {
+            unreachable!()
+        };
+        source.identity = ExpectedIdentity::DirectoryAfterEffects {
+            original: original.clone(),
+            created_by: None,
+            effects: vec![],
+        };
+        let step = step.clone();
+        let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+        let op = journal.begin(&f.plan.execution).unwrap();
+        journal.intent(op, &step).unwrap();
+        fs::rename(media.join("Tree"), media.join("Moved")).unwrap();
+        match tamper {
+            "unknown-child" => fs::write(media.join("Moved/foreign"), b"external").unwrap(),
+            "missing-child" => fs::remove_file(media.join("Moved/child")).unwrap(),
+            "replacement" => {
+                fs::rename(media.join("Moved"), media.join("Parked")).unwrap();
+                fs::create_dir(media.join("Moved")).unwrap();
+            }
+            _ => {}
+        }
+        let pending = journal.operation(op).unwrap();
+        let preview = reconcile(&pending, &mut PlatformFs::default()).unwrap();
+        assert_eq!(
+            preview.actions[0].disposition,
+            if tamper == "none" {
+                RecoveryDisposition::Applied
+            } else {
+                RecoveryDisposition::Unresolved
+            },
+            "{tamper}"
+        );
+        assert!(
+            journal.operation(op).unwrap().steps[0].receipts.is_empty(),
+            "read-only proof must not mint a durable fact"
+        );
+        if tamper == "unknown-child" {
+            assert_eq!(fs::read(media.join("Moved/foreign")).unwrap(), b"external");
+        }
+    }
+}
