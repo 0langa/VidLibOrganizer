@@ -374,16 +374,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Implements R01–R03/R10 through `apply_text(input: &NameParts, rule: &TextRule) -> Result<NameParts, RuleIssue>` and `resolve_segment(current: &str, selector: &SegmentSelector) -> Result<Range<usize>, RuleIssue>` using 4.2 semantics. Public positions are logical grapheme positions; the returned Rust Range is a checked zero-based, half-open UTF-8 byte range for safe slicing. NameParts separates stem/ext; rules produce intermediate explanations for evaluate.
 
-- [ ] **Step 1 — Red:** Add table-driven `text_rule_goldens`, `segment_resolves_each_current_input`, `unicode_graphemes_are_not_split`, `case_exceptions_and_roman_are_explicit`, and `extension_requires_explicit_mode`. Include prefix/suffix/insert, ordered replacement, removal/range/crop, move/copy/reverse, trim/collapse, translation/transliteration, every case mode, Keep/Fixed/Remove stem, extension add/remove/replace/case, and WholeName.
+- [x] **Step 1 — Red:** Add table-driven `text_rule_goldens`, `segment_resolves_each_current_input`, `unicode_graphemes_are_not_split`, `case_exceptions_and_roman_are_explicit`, and `extension_requires_explicit_mode`. Include prefix/suffix/insert, ordered replacement, removal/range/crop, move/copy/reverse, trim/collapse, translation/transliteration, every case mode, Keep/Fixed/Remove stem, extension add/remove/replace/case, and WholeName.
   ```rust
   assert_eq!(actual.filename(), "BBC Show III.mkv");
   assert_eq!(reversed.stem, "e\u{301}faC");
   assert_eq!(ordinary.ext, "MKV"); // stem-only lowercase leaves ext unchanged
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test text`.
-- [ ] **Step 3 — Implement:** Resolve grapheme/delimiter ranges, apply only within the segment, reassemble NameParts, and validate without implicit sanitization. Add transliteration only when the recipe enables it; preserve original/current fields separately.
-- [ ] **Step 4 — Verify green:** Text goldens, contract tests and Clippy; test negative/zero/out-of-range positions and expanded Unicode case mappings.
-- [ ] **Step 5 — Commit:** `feat: add composable Unicode text and extension rules`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test text`.
+- [x] **Step 3 — Implement:** Resolve grapheme/delimiter ranges, apply only within the segment, reassemble NameParts, and validate without implicit sanitization. Add transliteration only when the recipe enables it; preserve original/current fields separately.
+- [x] **Step 4 — Verify green:** Text goldens, contract tests and Clippy; test negative/zero/out-of-range positions and expanded Unicode case mappings.
+- [x] **Step 5 — Commit:** `feat: add composable Unicode text and extension rules`.
 
 ### Task 12: Bounded PCRE2 rule pipeline
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–10 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 11 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–11 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -806,6 +806,8 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 09: `e5bcb84` | Test-first inverse plans through the existing graph/executor/recovery, checked v7 historical lineage, current poststate and complete historical subtree validation, stable 200-row history and explicit visibility/Undo removal preserving recovery/outbox facts. Final 289 workspace tests, scoped Clippy/fmt and Windows compile pass. Independent combined review approved with no findings. Missing historical subtree evidence blocks directory Undo; large inverse transaction scale is not qualified. Windows runtime and hardware durability remain pending. Next eligible: Task 10. |
 
 | 2026-10-17 | Task 10: `48b8984`, review fix `571475f`; evidence `cb30132` | Usable native-selection Rename preview/confirmation/jobs/history/recovery/Undo slice, testable desktop library and bounded exact IPC. Four review findings fixed: ordered pending requests, recovery revocation on edit/source replacement, full history PageQuery with checked v8 live-data revision, and all-action recovery paging under one review. Initial 306-test workspace run passed; final 218 affected Rust +15 real Chromium +4 Node tests, scoped static checks and core Windows compile pass. v1–v7 SQL/checksum preservation and v8 rollback/overflow tested. Independent review plus scoped re-review approved. Three minor findings deferred for final triage. Actual Windows runtime/packaging/hardware pending; this is Keep/FixedStem only, not the complete release. Next eligible: Task 11. |
+
+| 2026-10-17 | Task 11: `d3beffd`, review fix `c32ef33` | Backend Unicode text/case/extension rules, current-input grapheme and literal-pair segments, explicit transliteration, ordered operations and per-row explanations. Independent review plus scoped fix review approved; Unicode titlecase sentence-state defect corrected. Initial 330-workspace run passed; final 72 text/contract/graph tests plus scoped Clippy/fmt/diff pass, with earlier Windows compile evidence. Dotted-I exact title spelling remains a deferred minor for final triage. Delimited/Between semantics are documented; no unsupported frontend controls added. Next eligible: Task 12. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
