@@ -289,16 +289,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Produces `plan` from 4.2 and an identity-based graph of ExecutionSteps/data. Native Filesystem effects stay in fileops; graph data belongs to rename. Namespace capture from Task 02 returns this shared data contract.
 
-- [ ] **Step 1 — Red:** Add `swap_and_three_cycle_plan_without_overwrite`, `case_only_rename_uses_reserved_temp`, `parent_and_child_keep_one_location_model`, `target_parent_case_policy_controls_collisions`, `root_and_marker_protected`, `outside_destination_and_ancestor_cycle_blocked`, and `hidden_page_conflict_blocks_entire_approval`.
+- [x] **Step 1 — Red:** Add `swap_and_three_cycle_plan_without_overwrite`, `case_only_rename_uses_reserved_temp`, `parent_and_child_keep_one_location_model`, `target_parent_case_policy_controls_collisions`, `root_and_marker_protected`, `outside_destination_and_ancestor_cycle_blocked`, and `hidden_page_conflict_blocks_entire_approval`.
   ```rust
   assert!(plan.rows.iter().any(|r| r.status == RowStatus::Blocked));
   assert_eq!(plan.summary.blocked_count, 1);
   assert_eq!(final_child_path, expected_renamed_parent.join("new.mkv"));
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test graph`.
-- [ ] **Step 3 — Implement:** Resolve final paths globally, use per-parent name policy, derive strongly connected rename dependencies and recorded temporary reservations, update current locations when ancestors move, and expose carried-descendant counts. Validate source/destination ancestry, Windows names/lengths/ADS/device targets, grants, collision suffixes frozen in preview, and protected roots. Conflicting descendant exclusions become issues rather than impossible promises.
-- [ ] **Step 4 — Verify green:** Graph tests include invalid Unicode display aliases, long/UNC paths, case-sensitive siblings, hard-link paths and target-created-after-preview preflight fixtures. Domain graph tests never write source fixtures.
-- [ ] **Step 5 — Commit:** `feat: plan collision-safe hierarchical renames`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test graph`.
+- [x] **Step 3 — Implement:** Resolve final paths globally, use per-parent name policy, derive strongly connected rename dependencies and recorded temporary reservations, update current locations when ancestors move, and expose carried-descendant counts. Validate source/destination ancestry, Windows names/lengths/ADS/device targets, grants, collision suffixes frozen in preview, and protected roots. Conflicting descendant exclusions become issues rather than impossible promises.
+- [ ] **Step 4 — Verify green (portable complete; Windows runtime fixtures pending):** Graph tests include invalid Unicode display aliases, long/UNC paths, case-sensitive siblings, hard-link paths and target-created-after-preview preflight fixtures. Domain graph tests never write source fixtures. Windows-specific native path assertions are compiled, not executed in this Linux session.
+- [x] **Step 5 — Commit:** `feat: plan collision-safe hierarchical renames`.
 
 ### Task 07: Journaled in-place rename execution
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–05 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks and Task 05's installed Windows app checks remain incomplete. Task 06 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–06 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks and Task 06's Windows path fixtures remain incomplete. Task 07 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -799,6 +799,7 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 03: `07f9a50` | Test-first strict recipes, typed template/frozen inputs, backend-owned execution models and session-scoped PlanStore with revoked references/nonces. 18 contracts and 106 total portable tests pass; Clippy, fmt and Windows-target compile pass. Independent review approved. Deferred Minor: duplicated plan/provenance grants consistency at publication, for final review. Future rule evaluation, Task 06 graph and Task 10 invalidation wiring remain open. Next eligible: Task 04. |
 | 2026-10-17 | Task 04: `16c5def`, fix `16fdb4b`; evidence `3f589ec`, `39f166c` | Real-file WAL/FULL journal, exact native compiled steps, atomic receipts/outbox, pending states and checked migrations. 126 portable tests passed before review; all 25 covering journal tests pass after the performance fix, with scoped Clippy/fmt. Indexed hot-path work scales with batch size; v1→v2 migration preserves existing evidence. Independent review and scoped fix review clean. Task 03 action-model omission corrected. Task 08 owns audited non-application recovery; Task 19 owns separately durable staging creation/streaming phases. Windows runtime pending. Next eligible: Task 05. |
 | 2026-10-17 | Task 05: `bc34cf5` | Independent fs4 lease handles, startup recovery gate, exact persisted epochs/v3 migration, private plan registry and legacy duplicate job coordination. 161 full workspace Rust tests including 15 Linux desktop tests and 3 Node UI tests pass; scoped Clippy, fmt and Windows-target fileops compile pass. Lossless ICO→PNG unblocked desktop baseline. Independent review clean. Interrupted legacy batches remain conservatively gated until Tasks 08/27; installed Windows two-app/runtime checks pending. Next eligible: Task 06. |
+| 2026-10-17 | Task 06: `fa5051e`, corrections `838cb03`, review fix `a68207e` | Pure identity-based final paths, collision suffixes, protected cycle reservations, hierarchical material prestates and whole-selection preflight. Final focused 39 graph +18 contract tests and 3 policy tests pass; scoped Clippy/fmt pass. Earlier 189-test workspace run preceded final focused corrections. Windows-target fixtures compiled; runtime pending. Independent review and scoped fix review clean, including unselected carried-descendant path limits. Task 03 grant-snapshot consistency finding resolved. Native reservation execution and namespace inspection persistence remain Task 07. Next eligible: Task 07. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -813,3 +814,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 04 journal runtime: app-local WAL/FULL reopen, commit/Busy failures, checked migrations and receipt/outbox atomicity. GNU-target bundled-SQLite compile passed for the initial implementation; actual Windows runtime remains pending.
 
 - [ ] Windows Task 05 installed app/runtime: two installed instances contending on shared app data during real scans, mutation/recovery, window close, fixed-local-volume validation and MSVC/offline packaging. Real backend subprocess contention and GNU-target compile pass; Windows runtime remains pending.
+
+- [ ] Windows Task 06 path runtime: UNC/extended paths, device namespace refusal, native UTF-16/unpaired surrogates and case-sensitive NTFS directory facts. Native graph/name assertions are compiled; no Windows runtime pass is claimed.
