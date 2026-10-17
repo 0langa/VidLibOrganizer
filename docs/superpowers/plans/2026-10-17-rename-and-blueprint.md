@@ -272,16 +272,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Produces Coordinator/Lease and recovery gate from 4.3. Extend desktop state with Arc-managed plan/job registries and app-data paths, while retaining libraries.json preferences. Use fs4's OS shared/exclusive lock adapter, owned by RAII guards; each lease owns a separately opened lock-file handle and is not Clone, so one reader's Drop cannot release another reader's lock.
 
-- [ ] **Step 1 — Red:** Add `readers_exclude_writer`, `writer_excludes_second_process`, `panic_releases_lease`, `startup_pending_journal_blocks_writes`, `other_process_epoch_revokes_old_plan`, and desktop tests that duplicate scans/actions use the same coordinator. A spawned fixture process must actually contend on the same lock file.
+- [x] **Step 1 — Red:** Add `readers_exclude_writer`, `writer_excludes_second_process`, `panic_releases_lease`, `startup_pending_journal_blocks_writes`, `other_process_epoch_revokes_old_plan`, and desktop tests that duplicate scans/actions use the same coordinator. A spawned fixture process must actually contend on the same lock file.
   ```rust
   assert_eq!(writer_attempt.unwrap_err().code, ErrorCode::Busy);
   assert_eq!(new_write.unwrap_err().code, ErrorCode::RecoveryRequired);
   assert!(coordinator.try_acquire(LeaseKind::Recovery).is_ok());
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test coordinator`; run desktop job tests where Tauri dependencies exist.
-- [ ] **Step 3 — Implement:** Short process-local locks plus shared read/exclusive write OS lock file; check pending journals while holding the relevant lock. Integrate existing duplicate scan/action entry points and close-window handling. Cache browsing is allowed; new physical scans wait/refuse while a write/recovery is active. Return typed busy status and release all guards on error/panic.
-- [ ] **Step 4 — Verify green:** Coordinator subprocess tests and existing job tests. Verify two installed app processes cannot mutate concurrently, not just two threads of one Jobs struct.
-- [ ] **Step 5 — Commit:** `feat: coordinate collection reads writes and recovery`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test coordinator`; run desktop job tests where Tauri dependencies exist.
+- [x] **Step 3 — Implement:** Short process-local locks plus shared read/exclusive write OS lock file; check pending journals while holding the relevant lock. Integrate existing duplicate scan/action entry points and close-window handling. Cache browsing is allowed; new physical scans wait/refuse while a write/recovery is active. Return typed busy status and release all guards on error/panic.
+- [ ] **Step 4 — Verify green (portable complete; installed Windows app checks pending):** Coordinator subprocess tests and existing job tests. Verify two installed app processes cannot mutate concurrently, not just two threads of one Jobs struct.
+- [x] **Step 5 — Commit:** `feat: coordinate collection reads writes and recovery`.
 
 ### Task 06: Validate final paths and build dependency graphs
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–04 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks remain incomplete. Task 05 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–05 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks and Task 05's installed Windows app checks remain incomplete. Task 06 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -798,6 +798,7 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 02: `7328356`, `8fe6590`, fix `f051627` | Test-first no-replace adapters, native per-parent facts and shared name validation. 88 portable tests pass; 18 platform tests passed on tmpfs and overlayfs; Linux/Windows-target Clippy and fmt pass. Independent review plus scoped fix re-review clean. Windows production mutations fail closed; native NTFS/exFAT/SMB, locking/case/reparse/metadata/flush qualification pending. Deferred Minor: Windows staging writer-sharing lifecycle (Task 19/final review). Next eligible: Task 03. |
 | 2026-10-17 | Task 03: `07f9a50` | Test-first strict recipes, typed template/frozen inputs, backend-owned execution models and session-scoped PlanStore with revoked references/nonces. 18 contracts and 106 total portable tests pass; Clippy, fmt and Windows-target compile pass. Independent review approved. Deferred Minor: duplicated plan/provenance grants consistency at publication, for final review. Future rule evaluation, Task 06 graph and Task 10 invalidation wiring remain open. Next eligible: Task 04. |
 | 2026-10-17 | Task 04: `16c5def`, fix `16fdb4b`; evidence `3f589ec`, `39f166c` | Real-file WAL/FULL journal, exact native compiled steps, atomic receipts/outbox, pending states and checked migrations. 126 portable tests passed before review; all 25 covering journal tests pass after the performance fix, with scoped Clippy/fmt. Indexed hot-path work scales with batch size; v1→v2 migration preserves existing evidence. Independent review and scoped fix review clean. Task 03 action-model omission corrected. Task 08 owns audited non-application recovery; Task 19 owns separately durable staging creation/streaming phases. Windows runtime pending. Next eligible: Task 05. |
+| 2026-10-17 | Task 05: `bc34cf5` | Independent fs4 lease handles, startup recovery gate, exact persisted epochs/v3 migration, private plan registry and legacy duplicate job coordination. 161 full workspace Rust tests including 15 Linux desktop tests and 3 Node UI tests pass; scoped Clippy, fmt and Windows-target fileops compile pass. Lossless ICO→PNG unblocked desktop baseline. Independent review clean. Interrupted legacy batches remain conservatively gated until Tasks 08/27; installed Windows two-app/runtime checks pending. Next eligible: Task 06. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -805,8 +806,10 @@ During execution append task commits, commands/results, pending Windows capabili
 ### Pending platform checks
 
 - [ ] Windows Task 01 runtime: native UTF-16/unpaired surrogates, relative-handle/reparse traversal, physical identity, Unicode case policy and filesystem-specific timestamps. Cross-target checks passed; runtime remains pending.
-- [ ] Desktop baseline tests: workspace-local GTK/WebKit dependencies compile; baseline `generate_context!` fails because `src-tauri/icons/icon.png` is missing. Task 05 desktop integration will add the supporting asset and rerun tests.
+- [x] Linux desktop baseline resolved in Task 05: faithful RGBA PNG added from the existing ICO; 161 full workspace tests pass, including 15 desktop tests, using the workspace-local GTK/WebKit SDK. This is Linux desktop evidence; Windows runtime remains pending.
 
 - [ ] Windows Task 02 red/green qualification: NTFS file/folder/case-only and late-target collision, locked files, per-parent case-sensitive/insensitive siblings, reparse ancestry, metadata setters/flush; exFAT/removable and SMB. Native fixtures are written/compiled, runtime pending; production mutations remain gated. Linux tmpfs/overlayfs evidence is recorded in `docs/verification/filesystem-capabilities.md`; other Linux mutation filesystems remain unsupported until qualified.
 
 - [ ] Windows Task 04 journal runtime: app-local WAL/FULL reopen, commit/Busy failures, checked migrations and receipt/outbox atomicity. GNU-target bundled-SQLite compile passed for the initial implementation; actual Windows runtime remains pending.
+
+- [ ] Windows Task 05 installed app/runtime: two installed instances contending on shared app data during real scans, mutation/recovery, window close, fixed-local-volume validation and MSVC/offline packaging. Real backend subprocess contention and GNU-target compile pass; Windows runtime remains pending.
