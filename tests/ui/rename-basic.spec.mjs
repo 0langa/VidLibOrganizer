@@ -63,3 +63,17 @@ test('old_recovery_page_response_is_ignored_after_edit',async({page})=>{
   await open(page);await page.evaluate(()=>{testBridge.recoveryActions=205;testBridge.history={items:[],pendingOperations:['pending'],legacyUnresolved:false};});await page.getByRole('button',{name:'Refresh history'}).click();await page.getByRole('button',{name:'Review recovery pending'}).click();await expect(page.getByTestId('recovery-action')).toHaveCount(200);
   await page.evaluate(()=>testBridge.delayRecoveryPageOnce=true);await page.getByRole('button',{name:'Next recovery page'}).click();await expect.poll(()=>page.evaluate(()=>testBridge.pendingRecoveryPages.length)).toBe(1);await page.getByLabel('Naming rule').selectOption('fixedStem');await page.evaluate(()=>testBridge.pendingRecoveryPages.shift()());await expect.poll(()=>page.evaluate(()=>testBridge.releasedRecoveryPages)).toBe(1);await expect(page.getByTestId('recovery-action')).toHaveCount(0);await expect(page.getByRole('button',{name:'Restore interrupted group',exact:true})).toHaveCount(0);
 });
+
+test('nested_rename_request_matches_shared_camel_case_golden', async ({ page }) => {
+  await open(page);
+  await page.evaluate(async request => {
+    const { call } = await import('/api.js');
+    await call('update_rename_inputs', { request: { revision: request.revision } });
+    await call('start_rename_preview', { request });
+  }, fixture.renameRequest);
+  const sent = await page.evaluate(() => testBridge.calls.findLast(call => call.command === 'start_rename_preview').args);
+  expect(sent).toEqual({ request: fixture.renameRequest });
+  expect(sent.request.selectionFilter.size.min).toBe('9007199254740993');
+  expect(sent.request.selectionFilter.createdNs.max).toBe('1700000000000000000123456789');
+  expect(sent.request.rowOverrides[0].newName).toBe('=literal,名.mkv');
+});

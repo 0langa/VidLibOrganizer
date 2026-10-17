@@ -150,11 +150,26 @@ pub struct RenameRequestDto {
     pub rule: NamingRule,
     pub fixed_stem: String,
     #[serde(default)]
-    pub selection_filter: Option<SelectionFilter>,
+    pub selection_filter: Option<crate::selection::SelectionFilterDto>,
     #[serde(default)]
     pub numbering_scope: NumberingScope,
     #[serde(default)]
-    pub row_overrides: Vec<RowOverride>,
+    pub row_overrides: Vec<RowOverrideDto>,
+}
+/// Desktop literal edit; core mapping/recipe data keeps its portable names.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RowOverrideDto {
+    pub entry_id: EntryId,
+    pub new_name: String,
+}
+impl From<RowOverrideDto> for RowOverride {
+    fn from(value: RowOverrideDto) -> Self {
+        Self {
+            entry_id: value.entry_id,
+            new_name: value.new_name,
+        }
+    }
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -534,6 +549,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             .into());
         }
         if let Some(filter) = request.selection_filter {
+            let filter: SelectionFilter = filter.into();
             let allowed = select(&inventory, &filter)?
                 .into_iter()
                 .collect::<BTreeSet<_>>();
@@ -551,13 +567,13 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             generation: inventory.generation,
             rows: vec![],
         };
-        let evaluated = evaluate_with_mappings(
-            &inventory,
-            &recipe,
-            &inputs,
-            &mappings,
-            &request.row_overrides,
-        )?;
+        let overrides = request
+            .row_overrides
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<RowOverride>>();
+        let evaluated =
+            evaluate_with_mappings(&inventory, &recipe, &inputs, &mappings, &overrides)?;
         // Capture originals, including unselected carried descendants. A selected
         // file itself authorizes parent occupancy without granting sibling sources.
         let selected: BTreeSet<_> = evaluated.rows.iter().map(|r| r.entry_id).collect();
@@ -1100,7 +1116,7 @@ mod tests {
             .unwrap()
             .id;
         let parsed = serde_json::from_value::<RenameRequestDto>(
-            json!({"revision":"2","selectedIds":ids,"rule":"keep","fixedStem":"","selectionFilter":{"extensions":["mkv"]},"numberingScope":"files","rowOverrides":[{"entry_id":movie,"new_name":"edited.mkv"}]}),
+            json!({"revision":"2","selectedIds":ids,"rule":"keep","fixedStem":"","selectionFilter":{"extensions":["mkv"],"maxDepth":0,"include":[{"field":"name","syntax":"wildcard","value":"A.*","caseSensitive":false}],"size":{"min":"1","max":"1"}},"numberingScope":"files","rowOverrides":[{"entryId":movie,"newName":"edited.mkv"}]}),
         );
         assert!(
             parsed.is_ok(),

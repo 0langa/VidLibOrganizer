@@ -1141,3 +1141,204 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
     )
     .is_ok());
 }
+
+#[test]
+fn nested_rename_wire_golden_is_camel_case_and_exact() {
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../tests/ui/fixtures/command-contracts.json"
+    ))
+    .unwrap();
+    let literal = &golden["renameRequest"];
+    let mut filter_only = literal.clone();
+    filter_only["rowOverrides"] = json!([]);
+    let mut override_only = literal.clone();
+    override_only["selectionFilter"] = Value::Null;
+    let failures = [
+        ("complete", literal.clone()),
+        ("filter only", filter_only),
+        ("override only", override_only),
+    ]
+    .into_iter()
+    .filter_map(|(label, payload)| {
+        serde_json::from_value::<RenameRequestDto>(payload)
+            .err()
+            .map(|error| format!("{label}: {error}"))
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        failures.is_empty(),
+        "camelCase request variants rejected: {failures:?}"
+    );
+    let parsed = serde_json::from_value::<RenameRequestDto>(literal.clone());
+    assert!(
+        parsed.is_ok(),
+        "agreed nested camelCase golden rejected: {:?}",
+        parsed.err()
+    );
+    for (wire, expected) in [(json!({}), true), (json!({"recursive":false}), false)] {
+        let mut payload = literal.clone();
+        payload["selectionFilter"] = wire;
+        let request: RenameRequestDto = serde_json::from_value(payload).unwrap();
+        let filter: vidlib_rename::SelectionFilter = request.selection_filter.unwrap().into();
+        assert_eq!(filter.recursive, expected);
+    }
+    let request = parsed.unwrap();
+    assert_eq!(request.revision, 9_007_199_254_740_993);
+    let filter: vidlib_rename::SelectionFilter = request.selection_filter.unwrap().into();
+    assert!(filter.recursive);
+    assert_eq!(filter.max_depth, Some(4));
+    assert_eq!(filter.excluded_ids, vec![request.selected_ids[1]]);
+    assert_eq!(
+        filter.kinds,
+        vec![
+            vidlib_inventory::EntryKind::File,
+            vidlib_inventory::EntryKind::ReparsePoint
+        ]
+    );
+    assert_eq!(filter.extensions, vec!["mkv", "mp4"]);
+    assert_eq!(filter.name_length.as_ref().unwrap().max, Some(256));
+    assert_eq!(filter.path_length.as_ref().unwrap().min, Some(1));
+    assert_eq!(
+        filter.size.as_ref().unwrap().min,
+        Some(9_007_199_254_740_993)
+    );
+    assert_eq!(filter.size.as_ref().unwrap().max, Some(u64::MAX));
+    assert_eq!(
+        filter.created_ns.as_ref().unwrap().min,
+        Some(-9_007_199_254_740_993)
+    );
+    assert_eq!(
+        filter.created_ns.as_ref().unwrap().max,
+        Some(1_700_000_000_000_000_000_123_456_789)
+    );
+    assert_eq!(filter.modified_ns.as_ref().unwrap().min, Some(0));
+    assert_eq!(
+        filter.accessed_ns.as_ref().unwrap().max,
+        Some(9_007_199_254_740_993)
+    );
+    assert_eq!(filter.attributes.as_ref().unwrap().required, 2);
+    assert_eq!(filter.attributes.as_ref().unwrap().forbidden, 1);
+    assert_eq!(
+        filter.include[0].field,
+        vidlib_rename::SelectionField::RelativePath
+    );
+    assert_eq!(
+        filter.include[0].syntax,
+        vidlib_rename::PatternSyntax::Wildcard
+    );
+    assert_eq!(filter.include[0].value, "Original.*");
+    assert!(!filter.include[0].case_sensitive);
+    assert_eq!(
+        filter.exclude[0].field,
+        vidlib_rename::SelectionField::FullPath
+    );
+    assert_eq!(
+        filter.exclude[0].syntax,
+        vidlib_rename::PatternSyntax::Regex
+    );
+    assert!(filter.exclude[0].case_sensitive);
+    let edit: vidlib_rename::RowOverride = request.row_overrides.into_iter().next().unwrap().into();
+    assert_eq!(edit.entry_id, request.selected_ids[0]);
+    assert_eq!(edit.new_name, "=literal,名.mkv");
+    // Desktop casing is a conversion boundary; portable recipe data stays stable.
+    let core = serde_json::to_value(filter).unwrap();
+    assert_eq!(core["max_depth"], 4);
+    assert_eq!(core["created_ns"]["min"], "-9007199254740993");
+    assert_eq!(core["include"][0]["field"], "relative_path");
+    assert_eq!(core["include"][0]["case_sensitive"], false);
+    assert_eq!(
+        serde_json::to_value(edit).unwrap()["new_name"],
+        "=literal,名.mkv"
+    );
+}
+#[test]
+fn nested_rename_wire_rejects_unknown_fields_tags_and_numeric_bounds() {
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../tests/ui/fixtures/command-contracts.json"
+    ))
+    .unwrap();
+    let literal = &golden["renameRequest"];
+    assert!(
+        serde_json::from_value::<RenameRequestDto>(literal.clone()).is_ok(),
+        "valid golden must be accepted before negative checks"
+    );
+    for pointer in [
+        "",
+        "/selectionFilter",
+        "/selectionFilter/include/0",
+        "/selectionFilter/size",
+        "/selectionFilter/attributes",
+        "/rowOverrides/0",
+    ] {
+        let mut invalid = literal.clone();
+        invalid
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), json!(true));
+        assert!(
+            serde_json::from_value::<RenameRequestDto>(invalid).is_err(),
+            "unknown field at {pointer}"
+        );
+    }
+    for (pointer, old, new) in [
+        ("/selectionFilter", "maxDepth", "max_depth"),
+        ("/selectionFilter", "excludedIds", "excluded_ids"),
+        ("/selectionFilter", "createdNs", "created_ns"),
+        (
+            "/selectionFilter/include/0",
+            "caseSensitive",
+            "case_sensitive",
+        ),
+        ("/rowOverrides/0", "entryId", "entry_id"),
+        ("/rowOverrides/0", "newName", "new_name"),
+    ] {
+        let mut invalid = literal.clone();
+        let object = invalid
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        let value = object.remove(old).unwrap();
+        object.insert(new.into(), value);
+        assert!(
+            serde_json::from_value::<RenameRequestDto>(invalid).is_err(),
+            "portable member {new} accepted on desktop wire"
+        );
+    }
+    for (pointer, value) in [
+        ("/selectionFilter/kinds/0", json!("File")),
+        ("/selectionFilter/include/0/field", json!("relative_path")),
+        ("/selectionFilter/include/0/syntax", json!("unknown")),
+    ] {
+        let mut invalid = literal.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            serde_json::from_value::<RenameRequestDto>(invalid).is_err(),
+            "invalid desktop tag at {pointer}"
+        );
+    }
+    for pointer in [
+        "/selectionFilter/size/min",
+        "/selectionFilter/size/max",
+        "/selectionFilter/nameLength/min",
+        "/selectionFilter/pathLength/min",
+        "/selectionFilter/createdNs/min",
+        "/selectionFilter/modifiedNs/min",
+        "/selectionFilter/accessedNs/max",
+    ] {
+        for value in [
+            json!(2),
+            json!(9007199254740992u64),
+            json!(9007199254740992.0),
+        ] {
+            let mut invalid = literal.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                serde_json::from_value::<RenameRequestDto>(invalid).is_err(),
+                "numeric quantity accepted at {pointer}"
+            );
+        }
+    }
+}

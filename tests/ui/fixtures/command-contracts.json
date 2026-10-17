@@ -65,5 +65,80 @@
       "filter": "",
       "expectedRevision": "2"
     }
+  },
+  "renameRequest": {
+    "revision": "9007199254740993",
+    "selectedIds": [
+      "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000008"
+    ],
+    "rule": "keep",
+    "fixedStem": "",
+    "numberingScope": "files",
+    "selectionFilter": {
+      "recursive": true,
+      "maxDepth": 4,
+      "excludedIds": [
+        "00000000-0000-4000-8000-000000000008"
+      ],
+      "kinds": [
+        "file",
+        "reparsePoint"
+      ],
+      "extensions": [
+        "mkv",
+        "mp4"
+      ],
+      "nameLength": {
+        "min": "1",
+        "max": "256"
+      },
+      "pathLength": {
+        "min": "1",
+        "max": null
+      },
+      "size": {
+        "min": "9007199254740993",
+        "max": "18446744073709551615"
+      },
+      "createdNs": {
+        "min": "-9007199254740993",
+        "max": "1700000000000000000123456789"
+      },
+      "modifiedNs": {
+        "min": "0",
+        "max": null
+      },
+      "accessedNs": {
+        "min": null,
+        "max": "9007199254740993"
+      },
+      "attributes": {
+        "required": 2,
+        "forbidden": 1
+      },
+      "include": [
+        {
+          "field": "relativePath",
+          "syntax": "wildcard",
+          "value": "Original.*",
+          "caseSensitive": false
+        }
+      ],
+      "exclude": [
+        {
+          "field": "fullPath",
+          "syntax": "regex",
+          "value": "excluded",
+          "caseSensitive": true
+        }
+      ]
+    },
+    "rowOverrides": [
+      {
+        "entryId": "00000000-0000-4000-8000-000000000003",
+        "newName": "=literal,名.mkv"
+      }
+    ]
   }
 }

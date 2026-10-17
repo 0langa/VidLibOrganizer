@@ -1,4 +1,4 @@
-//! Native picker adapter; only backend PathBuf values enter source authority.
+//! Native picker and desktop filter adapters. Only backend PathBuf values enter source authority.
 use crate::{
     app_state::AppState,
     commands::rename::{CommandError, InputRevision},
@@ -31,6 +31,118 @@ pub struct SelectionDto {
 pub struct SourceDto {
     pub grant_id: vidlib_inventory::ids::GrantId,
     pub display: String,
+}
+/// Desktop command data has camelCase members/tags. Portable recipe structs
+/// keep their existing schema; conversion happens before backend selection.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectionFilterDto {
+    pub excluded_ids: Vec<vidlib_inventory::ids::EntryId>,
+    pub recursive: Option<bool>,
+    pub max_depth: Option<u32>,
+    pub kinds: Vec<SelectionKindDto>,
+    pub extensions: Vec<String>,
+    // These shared exact ranges/attributes already have camelCase-compatible
+    // min/max and required/forbidden fields, with strict decimal decoding.
+    pub name_length: Option<vidlib_rename::U64Range>,
+    pub path_length: Option<vidlib_rename::U64Range>,
+    pub size: Option<vidlib_rename::U64Range>,
+    pub created_ns: Option<vidlib_rename::I128Range>,
+    pub modified_ns: Option<vidlib_rename::I128Range>,
+    pub accessed_ns: Option<vidlib_rename::I128Range>,
+    pub attributes: Option<vidlib_rename::AttributeFilter>,
+    pub include: Vec<SelectionPatternDto>,
+    pub exclude: Vec<SelectionPatternDto>,
+}
+impl From<SelectionFilterDto> for vidlib_rename::SelectionFilter {
+    fn from(value: SelectionFilterDto) -> Self {
+        Self {
+            excluded_ids: value.excluded_ids,
+            recursive: value.recursive.unwrap_or_else(|| Self::default().recursive),
+            max_depth: value.max_depth,
+            kinds: value.kinds.into_iter().map(Into::into).collect(),
+            extensions: value.extensions,
+            name_length: value.name_length,
+            path_length: value.path_length,
+            size: value.size,
+            created_ns: value.created_ns,
+            modified_ns: value.modified_ns,
+            accessed_ns: value.accessed_ns,
+            attributes: value.attributes,
+            include: value.include.into_iter().map(Into::into).collect(),
+            exclude: value.exclude.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectionPatternDto {
+    pub field: SelectionFieldDto,
+    pub syntax: PatternSyntaxDto,
+    pub value: String,
+    pub case_sensitive: bool,
+}
+impl From<SelectionPatternDto> for vidlib_rename::SelectionPattern {
+    fn from(value: SelectionPatternDto) -> Self {
+        Self {
+            field: value.field.into(),
+            syntax: value.syntax.into(),
+            value: value.value,
+            case_sensitive: value.case_sensitive,
+        }
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionKindDto {
+    File,
+    Directory,
+    Symlink,
+    ReparsePoint,
+    Other,
+    Unknown,
+}
+impl From<SelectionKindDto> for vidlib_inventory::EntryKind {
+    fn from(value: SelectionKindDto) -> Self {
+        match value {
+            SelectionKindDto::File => Self::File,
+            SelectionKindDto::Directory => Self::Directory,
+            SelectionKindDto::Symlink => Self::Symlink,
+            SelectionKindDto::ReparsePoint => Self::ReparsePoint,
+            SelectionKindDto::Other => Self::Other,
+            SelectionKindDto::Unknown => Self::Unknown,
+        }
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionFieldDto {
+    Name,
+    RelativePath,
+    FullPath,
+}
+impl From<SelectionFieldDto> for vidlib_rename::SelectionField {
+    fn from(value: SelectionFieldDto) -> Self {
+        match value {
+            SelectionFieldDto::Name => Self::Name,
+            SelectionFieldDto::RelativePath => Self::RelativePath,
+            SelectionFieldDto::FullPath => Self::FullPath,
+        }
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PatternSyntaxDto {
+    Wildcard,
+    Regex,
+}
+impl From<PatternSyntaxDto> for vidlib_rename::PatternSyntax {
+    fn from(value: PatternSyntaxDto) -> Self {
+        match value {
+            PatternSyntaxDto::Wildcard => Self::Wildcard,
+            PatternSyntaxDto::Regex => Self::Regex,
+        }
+    }
 }
 /// Owned native adapter seam for native pickers and desktop integration tests.
 /// This is not an IPC command and never accepts UI path strings.
