@@ -220,17 +220,17 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Consumes FileStamp/native paths; produces Filesystem, PlatformFs populated NamespaceSnapshot, per-parent DirectoryFacts, capability evidence and OpError. NamespaceSnapshot/DirectoryFacts are defined by Task 01. The Filesystem seam exposes native primitives and does not depend on future Rename recipe/step types. Use the Windows API binding for handle-aware inspection/rename and Linux `renameat2(RENAME_NOREPLACE)` through rustix; unsupported targets fail closed. Do not call private Rust std internals or use an existence-check/overwriting rename fallback.
 
-- [ ] **Step 1 — Red:** Add `existing_target_never_replaced`, `target_created_after_inspection_is_not_overwritten`, `directory_case_policy_is_per_parent`, `reparse_ancestor_rejected`, and Windows locked/case-only/directory tests. Assert both source/destination contents survive the conflict and sibling directories retain their distinct case policy.
+- [x] **Step 1 — Red:** Add `existing_target_never_replaced`, `target_created_after_inspection_is_not_overwritten`, `directory_case_policy_is_per_parent`, `reparse_ancestor_rejected`, and Windows locked/case-only/directory tests. Assert both source/destination contents survive the conflict and sibling directories retain their distinct case policy.
   ```rust
   assert_eq!(err.code, ErrorCode::DestinationExists);
   assert_eq!(std::fs::read(&target)?, b"existing");
   assert!(source.exists());
   assert_ne!(insensitive.case_sensitive, sensitive.case_sensitive);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test platform`; Windows: `cargo test -p vidlib-fileops --test windows_platform -- --nocapture`.
-- [ ] **Step 3 — Implement:** Pin the public Filesystem seam and no-replace primitives using the `windows` crate under cfg(windows) and rustix under cfg(target_os="linux"), native handle identity/freshness/reparse checks, per-directory case/length/reserved-name facts, create-new staging ownership, flush/durability outcomes, and typed unsupported results. Add capability fixtures and record tested API/OS/filesystem combinations. Distinguish deterministic process-termination recovery from unsupported hardware/power-loss guarantees; a journal does not make a whole batch atomic. Prove metadata setters now, but expose them through recipes only in Task 20.
-- [ ] **Step 4 — Verify green/platform gate:** Run both tests on their platforms; record NTFS file+folder behavior, exFAT/removable and SMB capabilities or explicit unsupported outcomes. A Linux-only session leaves Windows rows pending and continues Tasks 03/06/11–16 without assuming Windows support.
-- [ ] **Step 5 — Commit:** `feat: add verified no-replace filesystem adapters` with the actual capability evidence.
+- [ ] **Step 2 — Verify red (portable complete; Windows pending):** `cargo test -p vidlib-fileops --test platform`; Windows: `cargo test -p vidlib-fileops --test windows_platform -- --nocapture`.
+- [x] **Step 3 — Implement:** Pin the public Filesystem seam and no-replace primitives using the `windows` crate under cfg(windows) and rustix under cfg(target_os="linux"), native handle identity/freshness/reparse checks, per-directory case/length/reserved-name facts, create-new staging ownership, flush/durability outcomes, and typed unsupported results. Add capability fixtures and record tested API/OS/filesystem combinations. Distinguish deterministic process-termination recovery from unsupported hardware/power-loss guarantees; a journal does not make a whole batch atomic. Prove metadata setters now, but expose them through recipes only in Task 20.
+- [ ] **Step 4 — Verify green/platform gate (Linux complete; Windows pending):** Run both tests on their platforms; record NTFS file+folder behavior, exFAT/removable and SMB capabilities or explicit unsupported outcomes. A Linux-only session leaves Windows rows pending and continues Tasks 03/06/11–16 without assuming Windows support.
+- [x] **Step 5 — Commit:** `feat: add verified no-replace filesystem adapters` with the actual capability evidence.
 
 ### Task 03: Versioned recipes and deterministic plan models
 
@@ -788,14 +788,14 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Task 01 is implemented, verified on Linux, and reviewed; Task 02 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–02 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks remain incomplete. Task 03 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
 | 2026-10-17 | Plan authored; Context7 and repository checked | Start Task 01 in an isolated worktree after reviewing the plan and selecting execution method. |
-
 | 2026-10-17 | Execution setup; base `711b422` | Cloned `0langa/VidLibOrganizer`; isolated worktree `.worktrees/rename-blueprint`, branch `feat/rename-blueprint`; all three specs read; 36 portable baseline tests and UI syntax passed. Rust 1.99.1 installed. Task 01 is first incomplete. Windows checks pending; continue portable work. |
 | 2026-10-17 | Task 01: `d734f55`, fixes `dfc7e4e`, `aff67d5` | Test-first native inventory, exact codecs, no-follow relative-handle traversal, per-binding evidence and coverage. 27 inventory +36 existing portable tests pass; Linux and Windows-target Clippy and fmt pass. Independent review and two scoped fix re-reviews completed. Windows runtime pending. Deferred Minor: overlap diagnostic paths need rebasing; final branch review must triage. Next eligible: Task 02. |
+| 2026-10-17 | Task 02: `7328356`, `8fe6590`, fix `f051627` | Test-first no-replace adapters, native per-parent facts and shared name validation. 88 portable tests pass; 18 platform tests passed on tmpfs and overlayfs; Linux/Windows-target Clippy and fmt pass. Independent review plus scoped fix re-review clean. Windows production mutations fail closed; native NTFS/exFAT/SMB, locking/case/reparse/metadata/flush qualification pending. Deferred Minor: Windows staging writer-sharing lifecycle (Task 19/final review). Next eligible: Task 03. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -804,3 +804,5 @@ During execution append task commits, commands/results, pending Windows capabili
 
 - [ ] Windows Task 01 runtime: native UTF-16/unpaired surrogates, relative-handle/reparse traversal, physical identity, Unicode case policy and filesystem-specific timestamps. Cross-target checks passed; runtime remains pending.
 - [ ] Desktop baseline tests: workspace-local GTK/WebKit dependencies compile; baseline `generate_context!` fails because `src-tauri/icons/icon.png` is missing. Task 05 desktop integration will add the supporting asset and rerun tests.
+
+- [ ] Windows Task 02 red/green qualification: NTFS file/folder/case-only and late-target collision, locked files, per-parent case-sensitive/insensitive siblings, reparse ancestry, metadata setters/flush; exFAT/removable and SMB. Native fixtures are written/compiled, runtime pending; production mutations remain gated. Linux tmpfs/overlayfs evidence is recorded in `docs/verification/filesystem-capabilities.md`; other Linux mutation filesystems remain unsupported until qualified.
