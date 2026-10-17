@@ -3,7 +3,7 @@ export function defaultRecipe() {
   return {schema_version:1,revision:'1',selection:[],selection_filter:null,numbering_order:[],numbering_scope:'files',rules:[{id:crypto.randomUUID(),enabled:true,segment:{type:'stem'},parameters:{type:'keep'}}],companions:{type:'none'},destination:{type:'same_directory'},collision_policy:{type:'block'},metadata_changes:[]};
 }
 // Typed data controls only: selection and transformations are resolved in Rust.
-export function ruleFields(host, rule, index, change, signal, invalid) {
+export function ruleFields(host, rule, index, change, signal, invalid, draft) {
   const listen = (node,event,handler) => node.addEventListener(event,handler,{signal});
   function field(label, value, update, kind='text') {
     const wrap=el('label','',label), input=el('input'); input.type=kind; input.setAttribute('aria-label',label);
@@ -24,18 +24,19 @@ export function ruleFields(host, rule, index, change, signal, invalid) {
     const next=type==='fixedStem'?{type:'fixed_stem',value:'renamed'}:type==='text'?{type:'text',operation:{type:'fixed',value:''}}:{type:'keep'};
     change({parameters:next,...(type==='fixedStem'?{segment:{type:'stem'}}:{})},true);
   });
-  if(parameters.type==='fixed_stem') field(index===0?'New stem':`New stem ${index+1}`,parameters.value,value=>change({parameters:{...parameters,value}}));
-  else if(parameters.type==='text' && ['fixed','keep'].includes(parameters.operation?.type)) {
+  if(draft===undefined && parameters.type==='fixed_stem') field(index===0?'New stem':`New stem ${index+1}`,parameters.value,value=>change({parameters:{...parameters,value}}));
+  else if(draft===undefined && parameters.type==='text' && ['fixed','keep'].includes(parameters.operation?.type)) {
     select('Text operation',parameters.operation.type,[['fixed','Set selected text'],['keep','Keep selected text']],type=>change({parameters:{type:'text',operation:type==='fixed'?{type,value:''}:{type}}},true));
     if(parameters.operation.type==='fixed') field('Replacement text',parameters.operation.value,value=>change({parameters:{type:'text',operation:{...parameters.operation,value}}}));
-  } else if(parameters.type!=='keep') {
-    const label=el('label','','Rule parameters (JSON)'), input=el('textarea');input.setAttribute('aria-label',`Rule ${index+1} parameters`);input.value=JSON.stringify(parameters,null,2);
+  } else if(draft!==undefined || parameters.type!=='keep') {
+    const label=el('label','','Rule parameters (JSON)'), input=el('textarea');input.setAttribute('aria-label',`Rule ${index+1} parameters`);input.value=draft ?? JSON.stringify(parameters,null,2);
+    if(draft!==undefined)input.setCustomValidity('Enter a valid tagged rule JSON object.');
     listen(input,'input',()=>{
       try {
         const value=JSON.parse(input.value);
         if(!value || Array.isArray(value) || typeof value.type!=='string') throw new Error('A tagged rule object is required.');
         invalid(false);input.setCustomValidity('');change({parameters:value});
-      } catch {input.setCustomValidity('Enter a valid tagged rule JSON object.');invalid(true);}
+      } catch {input.setCustomValidity('Enter a valid tagged rule JSON object.');invalid(true,input.value);}
     });label.append(input);host.append(label);
   }
   if(parameters.type==='fixed_stem') return;

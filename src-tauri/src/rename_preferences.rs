@@ -49,6 +49,37 @@ fn storage(state: &AppState) -> Result<std::path::PathBuf, CommandError> {
     }
     Ok(directory)
 }
+/// An independently opened OS advisory lock, held until the returned file drops.
+/// The permanent empty lock file is never removed/replaced or treated as authority.
+fn publication_lock(directory: &std::path::Path) -> Result<std::fs::File, CommandError> {
+    use fs4::fs_std::FileExt;
+    let path = directory
+        .parent()
+        .ok_or_else(|| error("Missing app-local storage"))?
+        .join("rename-presets.lock");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if !metadata.is_file() || linked(&metadata) => {
+            return Err(error("Preset lock must be a regular app-owned file"))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(failure) => return Err(error(failure.to_string())),
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|failure| error(failure.to_string()))?;
+    if !FileExt::try_lock_exclusive(&file).map_err(|failure| error(failure.to_string()))? {
+        let mut busy = error("Another instance is saving presets. Retry after it finishes.");
+        busy.code = "presetBusy".into();
+        busy.retryable = true;
+        return Err(busy);
+    }
+    Ok(file)
+}
 fn linked(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -183,12 +214,23 @@ fn write_snapshot(
     })
 }
 pub fn save_owned(state: &AppState, request: SavePresetRequest) -> Result<PresetDto, CommandError> {
+    save_with_publication(state, request, |directory, current, bytes| {
+        write_snapshot(directory, current, bytes, true, sync_directory)
+    })
+}
+fn save_with_publication(
+    state: &AppState,
+    request: SavePresetRequest,
+    publish: impl FnOnce(&std::path::Path, &std::path::Path, &[u8]) -> Result<(), CommandError>,
+) -> Result<PresetDto, CommandError> {
     let recipe = PresetStore::import(request.recipe_json.as_bytes())?;
     let _guard = state
         .rename_preferences_lock
         .lock()
         .map_err(|_| error("Preset storage unavailable"))?;
     let directory = storage(state)?;
+    // Cover the head check, apparent-orphan recovery and final publication together.
+    let _publication_lock = publication_lock(&directory)?;
     let mut store = match request.preset_id {
         Some(id) => {
             let previous = read_snapshot(&directory.join(format!("{id}.current.json")))?;
@@ -243,7 +285,7 @@ pub fn save_owned(state: &AppState, request: SavePresetRequest) -> Result<Preset
     }
     // Prepare every fallible response step before the current-record commit point.
     let response = dto(snapshot)?;
-    write_snapshot(&directory, &current, &bytes, true, sync_directory)?;
+    publish(&directory, &current, &bytes)?;
     Ok(response)
 }
 pub fn load_owned(state: &AppState, request: LoadPresetRequest) -> Result<PresetDto, CommandError> {
@@ -396,6 +438,179 @@ mod tests {
     use super::*;
     fn document() -> String {
         r#"{"schema_version":1,"revision":"1","selection":[],"numbering_order":[],"rules":[],"companions":{"type":"none"},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"},"metadata_changes":[]}"#.into()
+    }
+    #[test]
+    fn independent_instances_cannot_publish_stale_or_regressing_heads() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let state_a = AppState::open(dir.path(), dir.path().join("libraries.json")).unwrap();
+        let state_b = AppState::open(dir.path(), dir.path().join("libraries.json")).unwrap();
+        let original = save_owned(
+            &state_a,
+            SavePresetRequest {
+                preset_id: None,
+                expected_revision: None,
+                recipe_json: document(),
+            },
+        )
+        .unwrap();
+        let id = original.preset_id;
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let first = std::thread::spawn(move || {
+            save_with_publication(
+                &state_a,
+                SavePresetRequest {
+                    preset_id: Some(id),
+                    expected_revision: Some("1".into()),
+                    recipe_json: document().replace("\"revision\":\"1\"", "\"revision\":\"2\""),
+                },
+                |directory, current, bytes| {
+                    paused_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    write_snapshot(directory, current, bytes, true, sync_directory)
+                },
+            )
+        });
+        paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // A has published archive 2 but has not published its active head.
+        let second = save_owned(
+            &state_b,
+            SavePresetRequest {
+                preset_id: Some(id),
+                expected_revision: Some("1".into()),
+                recipe_json: document().replace("\"revision\":\"1\"", "\"revision\":\"3\""),
+            },
+        );
+        resume_tx.send(()).unwrap();
+        let committed = first.join().unwrap().unwrap();
+        let active = load_owned(
+            &state_b,
+            LoadPresetRequest {
+                preset_id: id,
+                revision: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            second.is_err(),
+            "B published revision {:?} while A was paused; A then replaced current with {}",
+            second.as_ref().ok().map(|v| &v.revision),
+            active.revision
+        );
+        assert_eq!(second.err().unwrap().code, "presetBusy");
+        assert_eq!(committed.revision, "2");
+        assert_eq!(active.recipe_json, committed.recipe_json);
+        // After the kernel lock releases, the stale expected head must still fail.
+        assert!(save_owned(
+            &state_b,
+            SavePresetRequest {
+                preset_id: Some(id),
+                expected_revision: Some("1".into()),
+                recipe_json: document()
+            }
+        )
+        .is_err());
+        let next = save_owned(
+            &state_b,
+            SavePresetRequest {
+                preset_id: Some(id),
+                expected_revision: Some("2".into()),
+                recipe_json: document(),
+            },
+        )
+        .unwrap();
+        assert_eq!(next.revision, "3");
+        assert_eq!(
+            load_owned(
+                &state_b,
+                LoadPresetRequest {
+                    preset_id: id,
+                    revision: None
+                }
+            )
+            .unwrap()
+            .revision,
+            "3"
+        );
+    }
+    #[test]
+    fn stale_lock_file_grants_nothing_and_failed_writer_releases_kernel_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_a = AppState::open(dir.path(), dir.path().join("libraries.json")).unwrap();
+        let state_b = AppState::open(dir.path(), dir.path().join("libraries.json")).unwrap();
+        std::fs::write(
+            dir.path().join("rename-presets.lock"),
+            b"stale owner marker is not authority",
+        )
+        .unwrap();
+        let old = save_owned(
+            &state_a,
+            SavePresetRequest {
+                preset_id: None,
+                expected_revision: None,
+                recipe_json: document(),
+            },
+        )
+        .unwrap();
+        assert!(save_with_publication(
+            &state_a,
+            SavePresetRequest {
+                preset_id: Some(old.preset_id),
+                expected_revision: Some("1".into()),
+                recipe_json: document()
+            },
+            |_, _, _| Err(error("injected prepublication failure"))
+        )
+        .is_err());
+        assert_eq!(
+            load_owned(
+                &state_b,
+                LoadPresetRequest {
+                    preset_id: old.preset_id,
+                    revision: None
+                }
+            )
+            .unwrap()
+            .revision,
+            "1"
+        );
+        let next = save_owned(
+            &state_b,
+            SavePresetRequest {
+                preset_id: Some(old.preset_id),
+                expected_revision: Some("1".into()),
+                recipe_json: document(),
+            },
+        )
+        .unwrap();
+        assert_eq!(next.revision, "2");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn preset_lock_link_cannot_redirect_lock_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(dir.path(), dir.path().join("libraries.json")).unwrap();
+        let outside = dir.path().join("unrelated.txt");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("rename-presets.lock")).unwrap();
+        assert!(save_owned(
+            &state,
+            SavePresetRequest {
+                preset_id: None,
+                expected_revision: None,
+                recipe_json: document()
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("rename-presets"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
     #[test]
     fn failed_save_preserves_previous() {

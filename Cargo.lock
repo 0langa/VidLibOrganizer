@@ -4441,6 +4441,7 @@ dependencies = [
 name = "vidlib-tauri"
 version = "0.2.0"
 dependencies = [
+ "fs4",
  "rfd",
  "serde",
  "serde_json",

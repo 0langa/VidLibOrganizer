@@ -18,6 +18,7 @@ vidlib-engine = { path = "../crates/vidlib-engine" }
 vidlib-fileops = { path = "../crates/vidlib-fileops" }
 
 tempfile = "3"
+fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

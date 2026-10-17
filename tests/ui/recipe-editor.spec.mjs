@@ -101,6 +101,57 @@ test('unfinished_advanced_rule_edit_cannot_preview_previous_valid_recipe',async(
   await page.getByLabel('Rule 1 parameters').fill('{broken');
   expect(await page.evaluate(()=>{try{editor.getRecipe();return false;}catch{return true;}})).toBe(true);
   expect(await page.evaluate(()=>changes.length)).toBeGreaterThan(0);
-  await page.getByLabel('Rule 1 parameters').fill(JSON.stringify({type:'template',parts:[{type:'literal',value:'fixed'}]}));
-  expect(await page.evaluate(()=>editor.getRecipe().rules[0].parameters.parts[0].value)).toBe('fixed');
+  await page.getByRole('button',{name:'Add rule',exact:true}).click();
+  await expect(page.getByLabel('Rule 1 parameters')).toHaveValue('{broken');
+  expect(await page.evaluate(()=>{try{editor.getRecipe();return false;}catch{return true;}})).toBe(true);
+  await page.getByRole('button',{name:'Move rule 1 down',exact:true}).click();
+  await expect(page.getByLabel('Rule 2 parameters')).toHaveValue('{broken');
+  expect(await page.evaluate(()=>{try{editor.getRecipe();return false;}catch{return true;}})).toBe(true);
+  await page.getByLabel('Naming rule',{exact:true}).selectOption('fixedStem');
+  await expect(page.getByLabel('Rule 2 parameters')).toHaveValue('{broken');
+  expect(await page.evaluate(()=>{try{editor.getRecipe();return false;}catch{return true;}})).toBe(true);
+  await page.getByLabel('Rule 2 parameters').fill(JSON.stringify({type:'template',parts:[{type:'literal',value:'fixed'}]}));
+  expect(await page.evaluate(()=>editor.getRecipe().rules[1].parameters.parts[0].value)).toBe('fixed');
+});
+
+test('invalid_draft_survives_structural_edits_and_blocks_preview_and_save',async({page})=>{
+  const {desktopBridge}=await import('./fixtures/desktop-bridge.js');
+  await page.addInitScript(desktopBridge,golden);
+  await page.addInitScript(()=>{
+    const invoke=window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke=(command,args)=>command==='import_rename_recipe'?Promise.resolve({recipeJson:args.request.recipeJson}):invoke(command,args);
+  });
+  await page.goto('/');await page.getByRole('button',{name:'Rename',exact:true}).click();
+  await page.getByRole('button',{name:'Choose folders',exact:true}).click();await page.getByLabel('Select original.mp4').check();
+  const recipe={...original,rules:[{id:'template',enabled:true,segment:{type:'stem'},parameters:{type:'template',parts:[{type:'literal',value:'safe'}]}}]};
+  await page.getByLabel('Import recipe file').setInputFiles({name:'recipe.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(recipe))});
+  await page.getByTestId('rename-preview').click();await expect(page.getByTestId('rename-apply')).toBeEnabled();
+  const previews=await page.evaluate(()=>testBridge.calls.filter(c=>c.command==='start_rename_preview').length);
+  await page.getByLabel('Rule 1 parameters').fill('{broken');await expect(page.getByTestId('rename-apply')).toBeDisabled();
+  await page.getByRole('button',{name:'Add rule',exact:true}).click();await page.getByRole('button',{name:'Move rule 1 down',exact:true}).click();
+  await expect(page.getByLabel('Rule 2 parameters')).toHaveValue('{broken');
+  await page.getByTestId('rename-preview').click();await expect(page.getByTestId('rename-status')).toContainText('Complete the invalid rule JSON');
+  await page.getByRole('button',{name:'Save new preset',exact:true}).click();await expect(page.getByTestId('rename-status')).toContainText('Complete the invalid rule JSON');
+  expect(await page.evaluate(()=>testBridge.calls.filter(c=>c.command==='start_rename_preview').length)).toBe(previews);
+  expect(await page.evaluate(()=>testBridge.calls.filter(c=>c.command==='save_rename_preset'))).toEqual([]);
+  await expect(page.getByTestId('rename-apply')).toBeDisabled();
+  await expect(page.getByLabel('Rule 2 parameters')).toHaveValue('{broken');
+  await page.getByLabel('Rule 2 parameters').fill(JSON.stringify({type:'template',parts:[{type:'literal',value:'fixed'}]}));
+  await page.getByTestId('rename-preview').click();await expect(page.getByTestId('rename-apply')).toBeEnabled();
+});
+
+test('unfinished_draft_remains_visible_after_advanced_type_was_edited',async({page})=>{
+  await mount(page);
+  await page.evaluate(value=>{value.rules=[{id:'template',enabled:true,segment:{type:'stem'},parameters:{type:'template',parts:[{type:'literal',value:'safe'}]}}];editor.setRecipe(value);},original);
+  await page.getByLabel('Rule 1 parameters').fill('{"type":"keep"}');
+  await page.getByLabel('Rule 1 parameters').fill('{broken');
+  await page.getByRole('button',{name:'Add rule',exact:true}).click();
+  await expect(page.getByLabel('Rule 1 parameters')).toHaveValue('{broken');
+  await expect(page.getByRole('button',{name:'Undo edit',exact:true})).toBeDisabled();
+  await page.getByLabel('Naming rule',{exact:true}).selectOption('fixedStem');
+  await expect(page.getByLabel('Rule 1 parameters')).toHaveValue('{broken');
+  expect(await page.evaluate(()=>{try{editor.getRecipe();return false;}catch{return true;}})).toBe(true);
+  await page.getByLabel('Rule 1 parameters').fill('{"type":"keep"}');
+  expect(await page.evaluate(()=>editor.getRecipe().rules[0].parameters)).toEqual({type:'keep'});
+  await expect(page.getByRole('button',{name:'Undo edit',exact:true})).toBeEnabled();
 });
