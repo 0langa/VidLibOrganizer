@@ -201,7 +201,7 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Produces IDs, native path codec, FileStamp/RootBinding/Inventory/ScopeCoverage/JobControl and `scan` from 4.1; no dependency on Rename or Blueprint. Tests use actual temporary directories and a read-only OS adapter seam for injected stat/listing failures.
 
-- [ ] **Step 1 — Red:** Add `scan_keeps_unique_empty_and_nonvideo_entries`, `overlap_deduplicates_paths_not_hardlinks`, `failed_stat_retains_listed_child`, `path_codec_round_trips_native_units`, and `cancellation_preserves_coverage`. Fixture has `a.mkv`, zero-byte `b.mp4`, `notes.txt`, a nested directory, overlap, a link, and two hard-link paths. Required assertions:
+- [x] **Step 1 — Red:** Add `scan_keeps_unique_empty_and_nonvideo_entries`, `overlap_deduplicates_paths_not_hardlinks`, `failed_stat_retains_listed_child`, `path_codec_round_trips_native_units`, and `cancellation_preserves_coverage`. Fixture has `a.mkv`, zero-byte `b.mp4`, `notes.txt`, a nested directory, overlap, a link, and two hard-link paths. Required assertions:
   ```rust
   assert!(inventory.entries.iter().any(|e| e.display_name == "b.mp4"));
   assert_eq!(hardlink_entries.len(), 2);
@@ -209,10 +209,10 @@ Implement task order unless the following dependencies allow safe parallel work.
   assert!(failed_scope.listed_names.contains(&failed_name));
   assert_eq!(decode_path(&encode_path(&native_path))?, native_path);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-inventory --test inventory --test path_codec`; it must fail because the public inventory contract is missing, not because a test touched a user directory.
-- [ ] **Step 3 — Implement:** Add workspace member, serde/uuid/walkdir dependencies and the 4.1 interface; native timestamp precision, no-follow traversal, per-directory coverage, read-only volume/file identity adapters, protected marker/staging exclusions. Supply deterministic injected cancellation/failure fixture support. JSON exact-number/path tests belong here.
-- [ ] **Step 4 — Verify green:** Same command, then `cargo clippy -p vidlib-inventory --all-targets -- -D warnings`. Exercise non-UTF8 Unix bytes and Windows UTF-16 fixture paths; report unsupported transformations without lossy lookup.
-- [ ] **Step 5 — Commit:** `feat: add native-path collection inventory`. Include only this crate and required workspace/lock changes.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-inventory --test inventory --test path_codec`; it must fail because the public inventory contract is missing, not because a test touched a user directory.
+- [x] **Step 3 — Implement:** Add workspace member, serde/uuid/walkdir dependencies and the 4.1 interface; native timestamp precision, no-follow traversal, per-directory coverage, read-only volume/file identity adapters, protected marker/staging exclusions. Supply deterministic injected cancellation/failure fixture support. JSON exact-number/path tests belong here.
+- [x] **Step 4 — Verify green:** Same command, then `cargo clippy -p vidlib-inventory --all-targets -- -D warnings`. Exercise non-UTF8 Unix bytes and Windows UTF-16 fixture paths; report unsupported transformations without lossy lookup.
+- [x] **Step 5 — Commit:** `feat: add native-path collection inventory`. Include only this crate and required workspace/lock changes.
 
 ### Task 02: Prove the no-replace filesystem adapters
 
@@ -788,12 +788,19 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Planning status: user-approved specs; this canonical plan is ready for review and fresh-session execution. No implementation checkbox has been completed by writing this document. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Task 01 is implemented, verified on Linux, and reviewed; Task 02 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
 | 2026-10-17 | Plan authored; Context7 and repository checked | Start Task 01 in an isolated worktree after reviewing the plan and selecting execution method. |
 
+| 2026-10-17 | Execution setup; base `711b422` | Cloned `0langa/VidLibOrganizer`; isolated worktree `.worktrees/rename-blueprint`, branch `feat/rename-blueprint`; all three specs read; 36 portable baseline tests and UI syntax passed. Rust 1.99.1 installed. Task 01 is first incomplete. Windows checks pending; continue portable work. |
+| 2026-10-17 | Task 01: `d734f55`, fixes `dfc7e4e`, `aff67d5` | Test-first native inventory, exact codecs, no-follow relative-handle traversal, per-binding evidence and coverage. 27 inventory +36 existing portable tests pass; Linux and Windows-target Clippy and fmt pass. Independent review and two scoped fix re-reviews completed. Windows runtime pending. Deferred Minor: overlap diagnostic paths need rebasing; final branch review must triage. Next eligible: Task 02. |
+
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
-| 2026-10-17 | Execution setup; base `711b422` | Cloned `0langa/VidLibOrganizer`; isolated worktree `.worktrees/rename-blueprint`, branch `feat/rename-blueprint`; all three specs read; 36 portable baseline tests and UI syntax passed. Rust 1.99.1 installed. Task 01 is first incomplete. Windows checks pending; continue portable work. |
+
+### Pending platform checks
+
+- [ ] Windows Task 01 runtime: native UTF-16/unpaired surrogates, relative-handle/reparse traversal, physical identity, Unicode case policy and filesystem-specific timestamps. Cross-target checks passed; runtime remains pending.
+- [ ] Desktop baseline tests: workspace-local GTK/WebKit dependencies compile; baseline `generate_context!` fails because `src-tauri/icons/icon.png` is missing. Task 05 desktop integration will add the supporting asset and rerun tests.
