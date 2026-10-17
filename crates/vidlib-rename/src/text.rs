@@ -45,8 +45,16 @@ pub struct TextRule {
     pub segment: SegmentSelector,
     pub operation: TextOperation,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleIssueCode {
+    InvalidInput,
+    RegexLimit,
+    RegexNative,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleIssue {
+    pub code: RuleIssueCode,
+    pub native_code: Option<i32>,
     pub message: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +171,8 @@ pub enum TextOperation {
 
 fn issue(message: &str) -> RuleIssue {
     RuleIssue {
+        code: RuleIssueCode::InvalidInput,
+        native_code: None,
         message: message.into(),
     }
 }
@@ -200,22 +210,35 @@ impl NameParts {
 /// preserves spelling (including a trailing dot). WholeName explicitly re-splits it.
 pub fn apply_text(input: &NameParts, rule: &TextRule) -> Result<NameParts, RuleIssue> {
     validate_operation(&rule.operation)?;
-    let target = rule.segment.target();
+    apply_segment(
+        input,
+        &rule.segment,
+        matches!(
+            rule.operation,
+            TextOperation::Remove | TextOperation::Fixed { .. }
+        ),
+        |selected| transform(selected, &rule.operation),
+    )
+}
+
+/// Shared current-input selection, reassembly and component validation.
+pub(crate) fn apply_segment(
+    input: &NameParts,
+    selector: &SegmentSelector,
+    clear_empty_extension: bool,
+    transform: impl FnOnce(&str) -> Result<String, RuleIssue>,
+) -> Result<NameParts, RuleIssue> {
+    let target = selector.target();
     let current = input.segment(target);
-    let range = resolve_segment(&current, &rule.segment)?;
-    let replacement = transform(&current[range.clone()], &rule.operation)?;
+    let range = resolve_segment(&current, selector)?;
+    let replacement = transform(&current[range.clone()])?;
     let mut transformed = current;
     transformed.replace_range(range, &replacement);
     let mut output = input.clone();
     match target {
         NameSegment::Stem => output.stem = transformed,
         NameSegment::Extension => {
-            if transformed != input.ext
-                || matches!(
-                    rule.operation,
-                    TextOperation::Remove | TextOperation::Fixed { .. }
-                )
-            {
+            if transformed != input.ext || clear_empty_extension {
                 output.extension_present = !transformed.is_empty();
             }
             output.ext = transformed;

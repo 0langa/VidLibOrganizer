@@ -1,0 +1,3 @@
+# Bundle PCRE2 into offline builds, including Windows; never require a system DLL.
+[env]
+PCRE2_SYS_STATIC = { value = "1", force = true }

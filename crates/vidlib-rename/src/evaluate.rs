@@ -18,7 +18,7 @@ pub fn evaluate(
         .map(|entry| (entry.id, entry))
         .collect::<BTreeMap<_, _>>();
     validate_inventory(inventory, recipe, &entries)?;
-    recipe.validate()?;
+    let compiled_regex = recipe.validate_and_compile_regex()?;
     validate_inputs(inventory, recipe, inputs)?;
     if recipe.companions != CompanionPolicy::None
         || recipe.destination != Destination::SameDirectory
@@ -32,7 +32,10 @@ pub fn evaluate(
     for rule in recipe.rules.iter().filter(|r| r.enabled) {
         if !matches!(
             rule.parameters,
-            RuleParameters::Keep | RuleParameters::FixedStem { .. } | RuleParameters::Text { .. }
+            RuleParameters::Keep
+                | RuleParameters::FixedStem { .. }
+                | RuleParameters::Text { .. }
+                | RuleParameters::Regex { .. }
         ) {
             return Err(RenameError::new(
                 RenameErrorCode::UnsupportedRule,
@@ -82,22 +85,32 @@ pub fn evaluate(
         };
         let mut current = original.clone();
         for rule in recipe.rules.iter().filter(|r| r.enabled) {
-            let operation = match &rule.parameters {
-                RuleParameters::Keep => TextOperation::Keep,
-                RuleParameters::FixedStem { value } => TextOperation::Fixed {
-                    value: value.clone(),
-                },
-                RuleParameters::Text { operation } => operation.clone(),
-                RuleParameters::Template { .. } => unreachable!("rejected before evaluating rows"),
-            };
             let before = current.segment(rule.segment.target());
-            match apply_text(
-                &current,
-                &TextRule {
-                    segment: rule.segment.clone(),
-                    operation,
-                },
-            ) {
+            let result = match &rule.parameters {
+                RuleParameters::Regex { .. } => {
+                    crate::text::apply_segment(&current, &rule.segment, false, |selected| {
+                        compiled_regex[rule.id.as_str()].apply(selected)
+                    })
+                }
+                parameters => {
+                    let operation = match parameters {
+                        RuleParameters::Keep => TextOperation::Keep,
+                        RuleParameters::FixedStem { value } => TextOperation::Fixed {
+                            value: value.clone(),
+                        },
+                        RuleParameters::Text { operation } => operation.clone(),
+                        _ => unreachable!("rejected before evaluating rows"),
+                    };
+                    apply_text(
+                        &current,
+                        &TextRule {
+                            segment: rule.segment.clone(),
+                            operation,
+                        },
+                    )
+                }
+            };
+            match result {
                 Ok(next) => {
                     row.explanations.push(RuleExplanation {
                         rule_id: rule.id.clone(),
@@ -109,7 +122,11 @@ pub fn evaluate(
                 Err(issue) => {
                     row.status = RowStatus::Blocked;
                     row.issues.push(PlanIssue {
-                        code: RenameErrorCode::InvalidRuleInput,
+                        code: match issue.code {
+                            RuleIssueCode::InvalidInput => RenameErrorCode::InvalidRuleInput,
+                            RuleIssueCode::RegexLimit => RenameErrorCode::RegexLimit,
+                            RuleIssueCode::RegexNative => RenameErrorCode::RegexNative,
+                        },
                         entry_id: Some(*id),
                         rule_id: Some(rule.id.clone()),
                         message: issue.message,

@@ -34,6 +34,7 @@ pub enum RuleParameters {
     FixedStem { value: String },
     Template { parts: Vec<TemplatePart> },
     Text { operation: crate::TextOperation },
+    Regex { rule: crate::RegexRule },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -228,6 +229,36 @@ impl RecipeV1 {
     }
 
     pub fn validate(&self) -> Result<(), RenameError> {
+        self.validate_and_compile_regex().map(|_| ())
+    }
+
+    /// Compilation is shared with evaluation so enabled expressions compile once
+    /// per evaluation, before any rows, rather than again during validation.
+    pub(crate) fn validate_and_compile_regex(
+        &self,
+    ) -> Result<std::collections::BTreeMap<&str, crate::CompiledRegexRule>, RenameError> {
+        self.validate_structure()?;
+        self.rules
+            .iter()
+            .filter(|rule| rule.enabled)
+            .filter_map(|rule| {
+                if let RuleParameters::Regex { rule: parameters } = &rule.parameters {
+                    Some(
+                        crate::CompiledRegexRule::compile(parameters)
+                            .map(|compiled| (rule.id.as_str(), compiled))
+                            .map_err(|mut error| {
+                                error.message = format!("rule {}: {}", rule.id, error.message);
+                                error
+                            }),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn validate_structure(&self) -> Result<(), RenameError> {
         use std::collections::BTreeSet;
         if self.schema_version != 1 {
             return Err(RenameError::new(
@@ -304,7 +335,7 @@ impl RecipeV1 {
                 RuleParameters::Text { operation } => {
                     crate::text::validate_operation(operation).map_err(|e| invalid(e.message))?
                 }
-                RuleParameters::Keep => {}
+                RuleParameters::Keep | RuleParameters::Regex { .. } => {}
             }
         }
         if let Destination::Granted { layout, .. } = &self.destination {

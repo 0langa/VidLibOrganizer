@@ -13,3 +13,6 @@ pub mod validate;
 
 pub mod text;
 pub use text::*;
+
+pub mod regex;
+pub use regex::*;
