@@ -56,6 +56,8 @@ fn preview(state: &AppState) -> UiPlanRef {
         preview_owned(
             state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 2,
                 selected_ids: selected,
                 rule: NamingRule::FixedStem,
@@ -378,6 +380,8 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 2,
                 selected_ids: selected,
                 rule: NamingRule::FixedStem,
@@ -443,6 +447,8 @@ fn directory_capture_preserves_unselected_nested_children_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 2,
                 selected_ids: vec![id],
                 rule: NamingRule::FixedStem,
@@ -582,6 +588,8 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 2,
                 selected_ids: vec![choose("private")],
                 rule: NamingRule::FixedStem,
@@ -600,6 +608,8 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 3,
                 selected_ids: vec![choose("clip.mp4")],
                 rule: NamingRule::FixedStem,
@@ -676,6 +686,8 @@ fn empty_directory_rename_retains_complete_namespace_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 2,
                 selected_ids: vec![id],
                 rule: NamingRule::FixedStem,
@@ -879,6 +891,8 @@ fn recovery_all_actions_are_reachable_through_one_review() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 2,
                 selected_ids: selected,
                 rule: NamingRule::FixedStem,
@@ -1108,6 +1122,8 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
         preview_owned(
             &state,
             RenameRequestDto {
+                recipe_json: None,
+                rebind_selection: false,
                 revision: 4,
                 selected_ids: vec![item],
                 rule: NamingRule::FixedStem,
@@ -1122,6 +1138,8 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
     assert!(preview_owned(
         &state,
         RenameRequestDto {
+            recipe_json: None,
+            rebind_selection: false,
             revision: 3,
             selected_ids: vec![item],
             rule: NamingRule::FixedStem,
@@ -1340,5 +1358,210 @@ fn nested_rename_wire_rejects_unknown_fields_tags_and_numeric_bounds() {
                 "numeric quantity accepted at {pointer}"
             );
         }
+    }
+}
+
+#[test]
+fn saved_ordered_recipe_preview_rebinds_explicitly_and_revokes_after_edit() {
+    use vidlib_tauri::rename_preferences::*;
+    let (_dir, state) = fixture();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let selected = vec![page.items[0]["itemId"].clone()];
+    let recipe = json!({"schema_version":1,"revision":"9007199254740993","selection":[],"numbering_order":[],"numbering_scope":"files","rules":[
+        {"id":"first","enabled":true,"segment":{"type":"stem"},"parameters":{"type":"fixed_stem","value":"one"}},
+        {"id":"second","enabled":true,"segment":{"type":"stem"},"parameters":{"type":"text","operation":{"type":"fixed","value":"two"}}},
+        {"id":"disabled","enabled":false,"segment":{"type":"stem"},"parameters":{"type":"fixed_stem","value":"wrong"}}
+    ],"companions":{"type":"none"},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"},"metadata_changes":[]});
+    let saved = save_owned(
+        &state,
+        SavePresetRequest {
+            preset_id: None,
+            expected_revision: None,
+            recipe_json: recipe.to_string(),
+        },
+    )
+    .unwrap();
+    let loaded = load_owned(
+        &state,
+        LoadPresetRequest {
+            preset_id: saved.preset_id,
+            revision: Some("1".into()),
+        },
+    )
+    .unwrap();
+    let parsed = serde_json::from_value::<RenameRequestDto>(
+        json!({"revision":"2","selectedIds":selected,"rule":"keep","fixedStem":"","recipeJson":loaded.recipe_json,"rebindSelection":true}),
+    );
+    assert!(
+        parsed.is_ok(),
+        "ordered recipe DTO rejected: {:?}",
+        parsed.err()
+    );
+    let result = wait(&state, preview_owned(&state, parsed.unwrap()).unwrap());
+    let reference: UiPlanRef = serde_json::from_value(result["planRef"].clone()).unwrap();
+    let rows = page_owned(
+        &state,
+        PageRequest {
+            plan_ref: reference,
+            query: PageQuery::new(2),
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.items[0]["newName"], "two.mp4");
+    let confirmation = confirm_owned(
+        &state,
+        PlanRequest {
+            plan_ref: reference,
+        },
+    )
+    .unwrap();
+    update_inputs_owned(&state, InputRevision { revision: 3 }).unwrap();
+    assert!(apply_owned(
+        &state,
+        ApplyRequest {
+            plan_ref: reference,
+            nonce: confirmation.nonce
+        }
+    )
+    .is_err());
+    let unknown = "00000000-0000-4000-8000-000000000099";
+    let parsed:RenameRequestDto=serde_json::from_value(json!({"revision":"4","selectedIds":[unknown],"recipeJson":loaded.recipe_json,"rebindSelection":true})).unwrap();
+    let job = preview_owned(&state, parsed).unwrap();
+    for _ in 0..500 {
+        let result = status_owned(&state, JobRequest { job_id: job }).unwrap();
+        if result.state != "running" {
+            assert_eq!(result.error.unwrap().code, "unknownEntry");
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("job timeout");
+}
+
+#[test]
+fn recipe_document_boundaries_and_retained_exclusions_fail_closed() {
+    let (_dir, state) = fixture();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let selected = vec![page.items[0]["itemId"].clone()];
+    let empty = json!({"schema_version":1,"revision":"1","selection":[],"numbering_order":[],"rules":[],"companions":{"type":"none"},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"},"metadata_changes":[]});
+    for (label, document, want) in [
+        ("oversize", " ".repeat(1024 * 1024 + 1), "importLimit"),
+        (
+            "version",
+            empty
+                .to_string()
+                .replace("\"schema_version\":1", "\"schema_version\":2"),
+            "unknownRecipeVersion",
+        ),
+        (
+            "unknown tag",
+            empty.to_string().replace("same_directory", "script"),
+            "invalidRecipe",
+        ),
+    ] {
+        let request:RenameRequestDto=serde_json::from_value(json!({"revision":"2","selectedIds":selected,"recipeJson":document,"rebindSelection":true})).unwrap();
+        match preview_owned(&state, request) {
+            Err(error) => assert_eq!(error.code, want, "{label}"),
+            Ok(job) => {
+                let mut completed = false;
+                for _ in 0..500 {
+                    let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+                    if status.state != "running" {
+                        assert_eq!(status.error.unwrap().code, want, "{label}");
+                        completed = true;
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert!(completed, "{label} timed out");
+            }
+        }
+    }
+    for (label, document, rebind, want) in [
+        ("no implicit rebind", empty.clone(), false, "staleState"),
+        (
+            "unknown exclusion",
+            {
+                let mut value = empty.clone();
+                value["selection_filter"] =
+                    json!({"excluded_ids":["00000000-0000-4000-8000-000000000099"]});
+                value
+            },
+            true,
+            "unknownEntry",
+        ),
+    ] {
+        let request:RenameRequestDto=serde_json::from_value(json!({"revision":"2","selectedIds":selected,"recipeJson":document.to_string(),"rebindSelection":rebind})).unwrap();
+        let job = preview_owned(&state, request).unwrap();
+        let mut finished = false;
+        for _ in 0..500 {
+            let status = status_owned(&state, JobRequest { job_id: job }).unwrap();
+            if status.state != "running" {
+                assert_eq!(status.error.unwrap().code, want, "{label}");
+                finished = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(finished, "{label} timed out");
+    }
+}
+
+#[test]
+fn preset_document_wire_matches_shared_camel_case_golden_without_schema_rewriting() {
+    use vidlib_tauri::rename_preferences::*;
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../tests/ui/fixtures/command-contracts.json"
+    ))
+    .unwrap();
+    let request: SavePresetRequest =
+        serde_json::from_value(golden["presetSaveRequest"].clone()).unwrap();
+    let document: RecipeDocumentRequest =
+        serde_json::from_value(golden["recipeDocumentRequest"].clone()).unwrap();
+    assert_eq!(request.recipe_json, document.recipe_json);
+    let recipe =
+        vidlib_rename::presets::PresetStore::import(document.recipe_json.as_bytes()).unwrap();
+    assert_eq!(recipe.revision, 9007199254740993);
+    assert_eq!(
+        recipe.numbering_scope,
+        vidlib_rename::NumberingScope::Directories
+    );
+    assert!(!recipe.rules[1].enabled);
+    assert!(matches!(
+        recipe.rules[1].segment,
+        vidlib_rename::SegmentSelector::Between { occurrence: 2, .. }
+    ));
+    let dto = PresetDto {
+        preset_id: serde_json::from_value(golden["presetDto"]["presetId"].clone()).unwrap(),
+        revision: "9007199254740993".into(),
+        recipe_json: document.recipe_json,
+    };
+    assert_eq!(serde_json::to_value(dto).unwrap(), golden["presetDto"]);
+    for bad in [
+        json!({"recipe_json":"{}"}),
+        json!({"recipeJson":{}}),
+        json!({"recipeJson":"{}","path":"/media"}),
+    ] {
+        assert!(serde_json::from_value::<RecipeDocumentRequest>(bad).is_err());
     }
 }

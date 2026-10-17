@@ -18,6 +18,7 @@ pub struct AppState {
     pub blueprint: PathBuf,
     pub(crate) preferences: PathBuf,
     pub(crate) preferences_lock: Arc<Mutex<()>>,
+    pub(crate) rename_preferences_lock: Arc<Mutex<()>>,
 }
 impl AppState {
     pub fn open(app_data: &Path, preferences: PathBuf) -> Result<Self, OpError> {
@@ -40,6 +41,7 @@ impl AppState {
             coordinator,
             preferences,
             preferences_lock: Arc::new(Mutex::new(())),
+            rename_preferences_lock: Arc::new(Mutex::new(())),
         })
     }
     /// True prevents closing while a local writer/recovery lease is active.

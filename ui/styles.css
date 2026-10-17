@@ -1704,3 +1704,12 @@ dialog::backdrop{
 .rename-dialog .button { margin:8px; }
 .rename-view .rename-rules { flex-wrap:wrap; }
 .rename-view .rename-rules input { min-height:40px; width:240px; max-width:100%; padding:10px 14px; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:5px; }
+
+/* Shared recipe editor; all controls stay within Rename until embedded by Blueprint. */
+.rename-view .rename-rules { flex-direction:column; }
+.rename-view .recipe-rule { min-width:0; display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; border:1px solid var(--border); padding:16px; border-radius:6px; }
+.rename-view .recipe-toolbar { grid-column:1 / -1; display:flex; gap:8px; flex-wrap:wrap; }
+.rename-view .rename-rules input[type=checkbox] { min-height:0; width:20px; height:20px; padding:0; }
+.rename-view .recipe-rule textarea { width:100%; min-height:140px; resize:vertical; color:var(--text); background:var(--surface); border:1px solid var(--border); padding:10px; }
+.rename-view .recipe-presets { display:flex; align-items:end; gap:10px; flex-wrap:wrap; border:1px solid var(--border); padding:16px; }
+.rename-view .recipe-presets p { flex-basis:100%; overflow-wrap:anywhere; }

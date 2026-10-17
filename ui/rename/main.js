@@ -3,6 +3,7 @@ import { $, el } from '../dom.js';
 import { formatExactBytes } from '../exact.js';
 import { watchJob } from '../jobs.js';
 import { createRecipeEditor } from '../recipe/editor.js';
+import { defaultRecipe } from '../recipe/fields.js';
 import { renderPreview, reviewConfirmation } from './preview.js';
 import { createHistory } from './history.js';
 
@@ -23,8 +24,81 @@ export function createRename() {
   let ready = Promise.resolve(), active = null, planRef = null, counts = null;
   let inventoryReady = false, recoveryView = null;
   const selected = new Set();
-  const recipe = createRecipeEditor({ recipe: { rule: 'keep', fixedStem: '' }, onChange: edited });
-  host.querySelector('.rename-editor').append(recipe.element);
+  const recipe = createRecipeEditor({ recipe: defaultRecipe(), onChange: edited });
+  const editorHost = host.querySelector('.rename-editor');
+  const presets = el('fieldset', 'recipe-presets');
+  presets.append(el('legend', '', 'Recipe presets'));
+  const presetChoice = el('select'); presetChoice.setAttribute('aria-label', 'Saved preset');
+  const blank = el('option', '', 'Choose a saved preset'); blank.value = ''; presetChoice.append(blank);
+  const presetStatus = el('p'); presetStatus.dataset.testid = 'recipe-preset-status';
+  let attachedPreset = null, presetBusy = false, presetCursor = null;
+  function presetButton(title, action) {
+    const button = el('button', 'button', title); button.type = 'button';
+    button.addEventListener('click', action); presets.append(button); return button;
+  }
+  function rememberPreset(value) {
+    let option = [...presetChoice.options].find(option => option.value === value.presetId);
+    if (!option) { option = el('option'); option.value = value.presetId; presetChoice.append(option); }
+    option.textContent = `${value.presetId.slice(0, 8)} · revision ${value.revision}`;
+    presetChoice.value = value.presetId;
+  }
+  async function presetAction(work) {
+    if (presetBusy || !initialized || !isDesktop || active?.mutation) return;
+    presetBusy = true; controls(); const ticket = generation;
+    try { await work(() => ticket === generation); } catch (error) { if (ticket === generation) failed(error); }
+    finally { presetBusy = false; controls(); }
+  }
+  presets.append(presetChoice);
+  presetButton('Refresh presets', () => presetAction(async current => {
+    const result = await call('list_rename_presets', { request: { cursor: null } });
+    if (!current()) return;
+    presetChoice.replaceChildren(blank);
+    result.items.forEach(rememberPreset); presetCursor = result.nextCursor;
+  }));
+  const nextPresets = presetButton('Next presets', () => presetAction(async current => {
+    const result = await call('list_rename_presets', { request: { cursor: presetCursor } });
+    if (!current()) return;
+    presetChoice.replaceChildren(blank); result.items.forEach(rememberPreset); presetCursor = result.nextCursor;
+  }));
+  const loadPreset = presetButton('Load preset', () => presetAction(async current => {
+    const result = await call('load_rename_preset', { request: { presetId: presetChoice.value, revision: null } });
+    if (!current()) return;
+    recipe.setRecipe(JSON.parse(result.recipeJson)); attachedPreset = result;
+    presetStatus.textContent = `Attached preset ${result.presetId.slice(0, 8)} · revision ${result.revision}`;
+    edited();
+  }));
+  function savePreset(fresh) {
+    return presetAction(async current => {
+      const result = await call('save_rename_preset', { request: { presetId: fresh ? null : attachedPreset.presetId, expectedRevision: fresh ? null : attachedPreset.revision, recipeJson: JSON.stringify(recipe.getRecipe()) } });
+      if (!current()) return;
+      attachedPreset = result; rememberPreset(result);
+      presetStatus.textContent = `Saved preset ${result.presetId.slice(0, 8)} · revision ${result.revision}`;
+    });
+  }
+  presetButton('Save new preset', () => savePreset(true));
+  const saveRevision = presetButton('Save preset revision', () => savePreset(false));
+  presetButton('Export recipe', () => presetAction(async current => {
+    const result = await call('export_rename_recipe', { request: { recipeJson: JSON.stringify(recipe.getRecipe()) } });
+    if (!current()) return;
+    const url = URL.createObjectURL(new Blob([result.recipeJson], { type: 'application/json' }));
+    const link = el('a'); link.href = url; link.download = 'rename-recipe.json'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }));
+  const importLabel = el('label', '', 'Import recipe file'), importFile = el('input');
+  importFile.type = 'file'; importFile.accept = '.json,application/json'; importFile.setAttribute('aria-label', 'Import recipe file');
+  importFile.addEventListener('change', () => {
+    const file = importFile.files[0]; importFile.value = ''; if (!file) return;
+    presetAction(async current => {
+      if (file.size > 1024 * 1024) throw new Error('Recipe exceeds 1 MiB.');
+      const result = await call('import_rename_recipe', { request: { recipeJson: await file.text() } });
+      if (!current()) return;
+      recipe.setRecipe(JSON.parse(result.recipeJson)); attachedPreset = null;
+      presetStatus.textContent = 'Imported recipe. Save as a new preset to keep it.'; edited();
+    });
+  });
+  importLabel.append(importFile); presets.append(importLabel, presetStatus);
+  presetChoice.addEventListener('change', controls);
+  editorHost.append(presets, el('p', '', 'Preview binds this recipe to the currently checked items in selection order. Saved exclusions remain and must match the current inventory.'), recipe.element);
 
   function say(message) { status.textContent = message; }
   function failed(error) {
@@ -33,6 +107,10 @@ export function createRename() {
   function controls() {
     const pending = active !== null;
     recipe.element.disabled = !initialized || Boolean(active?.mutation);
+    presets.disabled = !isDesktop || !initialized || presetBusy || Boolean(active?.mutation);
+    saveRevision.disabled = !attachedPreset;
+    loadPreset.disabled = !presetChoice.value;
+    nextPresets.disabled = !presetCursor;
     for (const action of ['folders', 'files']) host.querySelector(`[data-action=${action}]`).disabled = !isDesktop || !initialized || pending;
     host.querySelector('[data-action=selection]').disabled = !isDesktop || !inventoryReady || pending;
     preview.disabled = !isDesktop || !inventoryReady || !selected.size || pending;
@@ -170,7 +248,7 @@ export function createRename() {
   preview.addEventListener('click', () => {
     if (active || !inventoryReady || !selected.size) return;
     perform(async task => {
-      const result = await run(task, 'start_rename_preview', { revision: task.revision, selectedIds: [...selected], ...recipe.getRecipe() });
+      const result = await run(task, 'start_rename_preview', { revision: task.revision, selectedIds: [...selected], recipeJson: JSON.stringify(recipe.getRecipe()), rebindSelection: true });
       await acceptPlan(task, result);
     }, { advance: true });
   });

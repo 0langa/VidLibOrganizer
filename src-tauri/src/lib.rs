@@ -2,6 +2,7 @@ pub mod app_state;
 pub mod commands;
 pub mod jobs;
 mod preferences;
+pub mod rename_preferences;
 pub mod selection;
 
 use app_state::AppState;
@@ -219,7 +220,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![load_libraries, save_libraries, pick_folder, start_scan, scan_status, scan_result, cancel_scan, apply_actions, reveal_file, export_report, selection::select_sources, commands::rename::update_rename_inputs, commands::rename::start_inventory, commands::rename::inventory_page, commands::rename::start_rename_preview, commands::rename::job_status, commands::rename::cancel_job, commands::rename::rename_page, commands::rename::confirm_rename, commands::rename::apply_rename, commands::rename::operation_history, commands::rename::history_revision, commands::rename::recovery_preview, commands::rename::recovery_page, commands::rename::start_recovery, commands::rename::start_undo, commands::rename::rename_session])
+        .invoke_handler(tauri::generate_handler![load_libraries, save_libraries, pick_folder, start_scan, scan_status, scan_result, cancel_scan, apply_actions, reveal_file, export_report, selection::select_sources, commands::rename::update_rename_inputs, commands::rename::start_inventory, commands::rename::inventory_page, commands::rename::start_rename_preview, commands::rename::job_status, commands::rename::cancel_job, commands::rename::rename_page, commands::rename::confirm_rename, commands::rename::apply_rename, commands::rename::operation_history, commands::rename::history_revision, commands::rename::recovery_preview, commands::rename::recovery_page, commands::rename::start_recovery, commands::rename::start_undo, commands::rename::rename_session, rename_preferences::save_rename_preset, rename_preferences::load_rename_preset, rename_preferences::list_rename_presets, rename_preferences::import_rename_recipe, rename_preferences::export_rename_recipe])
         .run(tauri::generate_context!())
         .expect("Could not start VidLibOrganizer");
 }

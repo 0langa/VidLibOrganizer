@@ -144,10 +144,16 @@ pub struct InventoryPageRequest {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameRequestDto {
+    #[serde(default)]
+    pub recipe_json: Option<String>,
+    #[serde(default)]
+    pub rebind_selection: bool,
     #[serde(with = "exact::u64_decimal")]
     pub revision: u64,
     pub selected_ids: Vec<EntryId>,
+    #[serde(default)]
     pub rule: NamingRule,
+    #[serde(default)]
     pub fixed_stem: String,
     #[serde(default)]
     pub selection_filter: Option<crate::selection::SelectionFilterDto>,
@@ -171,12 +177,15 @@ impl From<RowOverrideDto> for RowOverride {
         }
     }
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NamingRule {
+    #[default]
     Keep,
     FixedStem,
-    Template { parts: Vec<TemplatePart> },
+    Template {
+        parts: Vec<TemplatePart>,
+    },
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -494,6 +503,18 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
     {
         return Err(stale("Preview inputs exceed limits"));
     }
+    if request
+        .recipe_json
+        .as_ref()
+        .is_some_and(|json| json.len() > presets::RECIPE_BYTE_LIMIT)
+    {
+        return Err(RenameError::new(RenameErrorCode::ImportLimit, "recipe exceeds 1 MiB").into());
+    }
+    if request.recipe_json.is_some() && request.selection_filter.is_some() {
+        return Err(stale(
+            "Configure the selection filter inside the recipe document",
+        ));
+    }
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
     let mut r = lock(state)?;
     set_revision(state, &mut r, request.revision)?;
@@ -512,29 +533,46 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
     drop(r);
     spawn(state, id, move || {
         let fs = fs_for(&lease, &policy)?;
-        let mut recipe = RecipeV1 {
-            schema_version: 1,
-            revision: request.revision,
-            selection: request.selected_ids.clone(),
-            selection_filter: None,
-            numbering_order: request.selected_ids.clone(),
-            numbering_scope: request.numbering_scope,
-            rules: vec![Rule {
-                id: "name".into(),
-                enabled: true,
-                segment: SegmentSelector::Stem,
-                parameters: match request.rule {
-                    NamingRule::Keep => RuleParameters::Keep,
-                    NamingRule::Template { parts } => RuleParameters::Template { parts },
-                    NamingRule::FixedStem => RuleParameters::FixedStem {
-                        value: request.fixed_stem,
+        // Parse/validate (including bounded regex compilation) on the worker.
+        let imported = request
+            .recipe_json
+            .as_deref()
+            .map(|json| presets::PresetStore::import(json.as_bytes()))
+            .transpose()?;
+        let mut recipe = if let Some(mut recipe) = imported {
+            if request.rebind_selection {
+                recipe.selection = request.selected_ids.clone();
+                recipe.numbering_order = request.selected_ids.clone();
+            } else if recipe.selection != request.selected_ids {
+                return Err(stale("Saved selection differs. Explicitly bind the recipe to the current checked items."));
+            }
+            recipe.revision = request.revision;
+            recipe
+        } else {
+            RecipeV1 {
+                schema_version: 1,
+                revision: request.revision,
+                selection: request.selected_ids.clone(),
+                selection_filter: None,
+                numbering_order: request.selected_ids.clone(),
+                numbering_scope: request.numbering_scope,
+                rules: vec![Rule {
+                    id: "name".into(),
+                    enabled: true,
+                    segment: SegmentSelector::Stem,
+                    parameters: match request.rule {
+                        NamingRule::Keep => RuleParameters::Keep,
+                        NamingRule::Template { parts } => RuleParameters::Template { parts },
+                        NamingRule::FixedStem => RuleParameters::FixedStem {
+                            value: request.fixed_stem,
+                        },
                     },
-                },
-            }],
-            companions: CompanionPolicy::None,
-            destination: Destination::SameDirectory,
-            collision_policy: CollisionPolicy::Block,
-            metadata_changes: vec![],
+                }],
+                companions: CompanionPolicy::None,
+                destination: Destination::SameDirectory,
+                collision_policy: CollisionPolicy::Block,
+                metadata_changes: vec![],
+            }
         };
         let known = inventory
             .entries
@@ -548,8 +586,11 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             )
             .into());
         }
-        if let Some(filter) = request.selection_filter {
-            let filter: SelectionFilter = filter.into();
+        if let Some(filter) = request
+            .selection_filter
+            .map(Into::into)
+            .or_else(|| recipe.selection_filter.clone())
+        {
             let allowed = select(&inventory, &filter)?
                 .into_iter()
                 .collect::<BTreeSet<_>>();
@@ -1169,6 +1210,8 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        recipe_json: None,
+                        rebind_selection: false,
                         revision,
                         selected_ids,
                         rule: NamingRule::Keep,
@@ -1350,6 +1393,8 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        recipe_json: None,
+                        rebind_selection: false,
                         revision: 2,
                         selected_ids: vec![item],
                         rule: NamingRule::FixedStem,

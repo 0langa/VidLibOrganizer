@@ -140,5 +140,18 @@
         "newName": "=literal,名.mkv"
       }
     ]
+  },
+  "recipeDocumentRequest": {
+    "recipeJson": "{\"schema_version\":1,\"revision\":\"9007199254740993\",\"selection\":[],\"numbering_order\":[],\"numbering_scope\":\"directories\",\"selection_filter\":{\"recursive\":false,\"excluded_ids\":[]},\"rules\":[{\"id\":\"first\",\"enabled\":true,\"segment\":{\"type\":\"stem\"},\"parameters\":{\"type\":\"fixed_stem\",\"value\":\"first\"}},{\"id\":\"second\",\"enabled\":false,\"segment\":{\"type\":\"between\",\"target\":\"stem\",\"opening\":\"[\",\"closing\":\"]\",\"occurrence\":2,\"include_delimiters\":false},\"parameters\":{\"type\":\"text\",\"operation\":{\"type\":\"fixed\",\"value\":\"second\"}}}],\"companions\":{\"type\":\"none\"},\"destination\":{\"type\":\"same_directory\"},\"collision_policy\":{\"type\":\"block\"},\"metadata_changes\":[]}"
+  },
+  "presetSaveRequest": {
+    "presetId": null,
+    "expectedRevision": null,
+    "recipeJson": "{\"schema_version\":1,\"revision\":\"9007199254740993\",\"selection\":[],\"numbering_order\":[],\"numbering_scope\":\"directories\",\"selection_filter\":{\"recursive\":false,\"excluded_ids\":[]},\"rules\":[{\"id\":\"first\",\"enabled\":true,\"segment\":{\"type\":\"stem\"},\"parameters\":{\"type\":\"fixed_stem\",\"value\":\"first\"}},{\"id\":\"second\",\"enabled\":false,\"segment\":{\"type\":\"between\",\"target\":\"stem\",\"opening\":\"[\",\"closing\":\"]\",\"occurrence\":2,\"include_delimiters\":false},\"parameters\":{\"type\":\"text\",\"operation\":{\"type\":\"fixed\",\"value\":\"second\"}}}],\"companions\":{\"type\":\"none\"},\"destination\":{\"type\":\"same_directory\"},\"collision_policy\":{\"type\":\"block\"},\"metadata_changes\":[]}"
+  },
+  "presetDto": {
+    "presetId": "00000000-0000-4000-8000-000000000099",
+    "revision": "9007199254740993",
+    "recipeJson": "{\"schema_version\":1,\"revision\":\"9007199254740993\",\"selection\":[],\"numbering_order\":[],\"numbering_scope\":\"directories\",\"selection_filter\":{\"recursive\":false,\"excluded_ids\":[]},\"rules\":[{\"id\":\"first\",\"enabled\":true,\"segment\":{\"type\":\"stem\"},\"parameters\":{\"type\":\"fixed_stem\",\"value\":\"first\"}},{\"id\":\"second\",\"enabled\":false,\"segment\":{\"type\":\"between\",\"target\":\"stem\",\"opening\":\"[\",\"closing\":\"]\",\"occurrence\":2,\"include_delimiters\":false},\"parameters\":{\"type\":\"text\",\"operation\":{\"type\":\"fixed\",\"value\":\"second\"}}}],\"companions\":{\"type\":\"none\"},\"destination\":{\"type\":\"same_directory\"},\"collision_policy\":{\"type\":\"block\"},\"metadata_changes\":[]}"
   }
 }
