@@ -1,7 +1,10 @@
 //! Owned desktop boundary. Native inventory, plans, grants and recovery stay here.
 #[path = "destination_dto.rs"]
 mod destination_dto;
+#[path = "metadata_dto.rs"]
+mod metadata_dto;
 use crate::app_state::AppState;
+pub use metadata_dto::MetadataChangeSetDto;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -146,6 +149,8 @@ pub struct InventoryPageRequest {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameRequestDto {
+    #[serde(default)]
+    pub metadata_changes: Option<MetadataChangeSetDto>,
     #[serde(default)]
     pub destination: Option<DestinationDto>,
     #[serde(default)]
@@ -672,6 +677,10 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
                 metadata_changes: vec![],
             }
         };
+        if let Some(changes) = request.metadata_changes {
+            recipe.metadata_changes =
+                vidlib_rename::metadata::MetadataChangeSet::from(changes).changes();
+        }
         if let Some(destination) = request.destination {
             recipe.destination = destination.into();
         }
@@ -1350,6 +1359,7 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        metadata_changes: None,
                         destination: None,
                         recipe_json: None,
                         rebind_selection: false,
@@ -1536,6 +1546,7 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        metadata_changes: None,
                         destination: None,
                         recipe_json: None,
                         rebind_selection: false,

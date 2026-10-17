@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 11;
+pub(super) const VERSION: i64 = 12;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -587,3 +587,8 @@ mod boxed_owned {
         OwnedCodec::deserialize(deserializer).map(Box::new)
     }
 }
+
+// Exact resolved metadata prestate commits with intent, never reconstructed after an effect.
+pub(super) const V12_SQL: &str = r#"
+CREATE TABLE metadata_prestates(operation_id TEXT NOT NULL, step_id TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(operation_id,step_id), FOREIGN KEY(operation_id,step_id) REFERENCES steps(operation_id,id));
+"#;

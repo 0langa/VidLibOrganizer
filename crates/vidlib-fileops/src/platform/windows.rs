@@ -478,10 +478,18 @@ pub(super) fn metadata(file: &File, update: &MetadataUpdate) -> Result<(), OpErr
             | FILE_ATTRIBUTE_ARCHIVE
             | FILE_ATTRIBUTE_NORMAL)
             .0;
-        if attributes & !supported != 0 {
+        let current = file
+            .metadata()
+            .map_err(|e| io_error(e, Phase::Metadata))?
+            .file_attributes();
+        if (attributes ^ current) & !supported != 0 {
             return Err(OpError::unsupported(Phase::Metadata));
         }
-        info.FileAttributes = attributes;
+        info.FileAttributes = if attributes & !FILE_ATTRIBUTE_NORMAL.0 == 0 {
+            FILE_ATTRIBUTE_NORMAL.0
+        } else {
+            attributes & !FILE_ATTRIBUTE_NORMAL.0
+        };
     }
     if let Some(readonly) = update.readonly {
         if info.FileAttributes == 0 {
@@ -629,6 +637,113 @@ mod qualification {
         );
         drop(held);
         assert_eq!(std::fs::read(source).unwrap(), b"safe");
+    }
+    #[test]
+    fn native_metadata_explicit_flags_times_and_precision() {
+        let dir = tempfile::tempdir().unwrap();
+        for is_directory in [false, true] {
+            let path = dir
+                .path()
+                .join(if is_directory { "folder" } else { "file" });
+            if is_directory {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"metadata").unwrap();
+            }
+            let (parent, name) = super::super::parent(&path).unwrap();
+            let file = open_mutable_child(&parent, name, Phase::Metadata).unwrap();
+            let original = observation(&file).unwrap().stamp;
+            for bit in [1, 2, 4, 32] {
+                let before = observation(&file)
+                    .unwrap()
+                    .stamp
+                    .windows_attributes
+                    .unwrap();
+                let desired = (before | bit) & !FILE_ATTRIBUTE_NORMAL.0;
+                metadata(
+                    &file,
+                    &MetadataUpdate {
+                        windows_attributes: Some(desired),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    observation(&file).unwrap().stamp.windows_attributes,
+                    Some(desired)
+                );
+                let cleared = desired & !bit;
+                metadata(
+                    &file,
+                    &MetadataUpdate {
+                        windows_attributes: Some(cleared),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    observation(&file)
+                        .unwrap()
+                        .stamp
+                        .windows_attributes
+                        .unwrap()
+                        & bit,
+                    0
+                );
+                assert_eq!(
+                    observation(&file)
+                        .unwrap()
+                        .stamp
+                        .windows_attributes
+                        .unwrap()
+                        & !0xa7,
+                    before & !0xa7
+                );
+            }
+            let value = 1_600_000_000_123_456_700;
+            metadata(
+                &file,
+                &MetadataUpdate {
+                    created_ns: Some(value),
+                    modified_ns: Some(value + 100),
+                    accessed_ns: Some(value + 200),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let after = observation(&file).unwrap().stamp;
+            assert_eq!(
+                (after.created_ns, after.modified_ns, after.accessed_ns),
+                (Some(value), Some(value + 100), Some(value + 200))
+            );
+            assert_eq!(
+                metadata(
+                    &file,
+                    &MetadataUpdate {
+                        modified_ns: Some(value + 1),
+                        ..Default::default()
+                    }
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::Unsupported
+            );
+            assert_eq!(
+                observation(&file).unwrap().stamp.modified_ns,
+                Some(value + 100)
+            );
+            metadata(
+                &file,
+                &MetadataUpdate {
+                    created_ns: original.created_ns,
+                    modified_ns: original.modified_ns,
+                    accessed_ns: original.accessed_ns,
+                    windows_attributes: original.windows_attributes,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
     }
     #[test]
     fn native_case_only_and_directory_moves_preserve_identity() {

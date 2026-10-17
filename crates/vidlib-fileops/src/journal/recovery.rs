@@ -66,7 +66,12 @@ impl Journal {
         })
     }
 
-    pub(crate) fn rearm_inverse(&mut self, op: OperationId, step: StepId) -> Result<(), OpError> {
+    pub(crate) fn rearm_inverse(
+        &mut self,
+        op: OperationId,
+        step: StepId,
+        before: Option<&FileStamp>,
+    ) -> Result<(), OpError> {
         self.write(Some(op),Some(step),|tx|{
             let linked:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM recovery_effects WHERE operation_id=?1 AND inverse_step=?2)",params![op.to_string(),step.to_string()],|r|r.get(0)).map_err(sql_error)?;
             if !linked || load_current_step(tx,op,step)?.state!=StepState::Planned{return Err(invalid("inverse requires an audited non-application reset"));}
@@ -76,6 +81,7 @@ impl Journal {
             if blocked { return Err(invalid("inverse dependency is incomplete")); }
             let current=load_current_step(tx,op,step)?;
             validate_resolved_inputs(&current.step,&load_prerequisites(tx,op,&current.step)?)?;
+            persist_metadata_prestate(tx, op, &current.step, before)?;
             tx.execute("UPDATE steps SET state='IntentDurable' WHERE operation_id=?1 AND id=?2",params![op.to_string(),step.to_string()]).map_err(sql_error)?;
             tx.execute("UPDATE operations SET state='RecoveryRequired' WHERE id=?1",[op.to_string()]).map_err(sql_error)?;
             Ok(())
@@ -98,19 +104,6 @@ impl Journal {
             tx.execute("UPDATE operations SET state='Running' WHERE id=?1", [op.to_string()]).map_err(sql_error)?;
             Ok(())
         })
-    }
-    pub(crate) fn recovery_intent(
-        &mut self,
-        op: OperationId,
-        original: StepId,
-        inverse: &ExecutionStep,
-        parents: (&PhysicalId, &PhysicalId),
-    ) -> Result<(), OpError> {
-        self.recovery_chain(
-            op,
-            original,
-            &[(inverse.clone(), parents.0.clone(), parents.1.clone())],
-        )
     }
     pub(crate) fn recovery_chain(
         &mut self,

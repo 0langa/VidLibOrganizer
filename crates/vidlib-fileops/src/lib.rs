@@ -2,6 +2,7 @@ pub mod coordinator;
 pub mod error;
 pub mod events;
 pub mod journal;
+pub mod metadata;
 pub mod platform;
 pub mod rename;
 pub use error::{ErrorCode, OpError, Phase};

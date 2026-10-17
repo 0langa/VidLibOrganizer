@@ -1052,7 +1052,7 @@ fn v5_migration_preserves_receipts_without_inventing_restore_scope() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     assert_restore_preserves_completed_group(&media, &coordinator, &mut journal);
 }

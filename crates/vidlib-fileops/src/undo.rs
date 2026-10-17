@@ -138,7 +138,10 @@ pub fn plan_undo(
         if pending.state != StepState::CompletionDurable {
             continue;
         }
-        if !matches!(pending.step.action, ExecutionAction::RenameEntry { .. }) {
+        if !matches!(
+            pending.step.action,
+            ExecutionAction::RenameEntry { .. } | ExecutionAction::SetMetadata { .. }
+        ) {
             return Err(OpError::new(
                 ErrorCode::Unsupported,
                 Phase::Verify,
@@ -149,8 +152,10 @@ pub fn plan_undo(
             .receipts
             .last()
             .ok_or_else(|| invalid("retained effect has no receipt"))?;
-        if receipt.phase != crate::events::CompletedPhase::Renamed
-            || receipt.after.is_none()
+        if !matches!(
+            receipt.phase,
+            crate::events::CompletedPhase::Renamed | crate::events::CompletedPhase::MetadataSet
+        ) || receipt.after.is_none()
             || receipt.after_path.is_none()
         {
             return Err(invalid("retained rename has no poststate"));
@@ -233,7 +238,12 @@ pub fn plan_undo(
                 if kind == EntryKind::Directory {
                     directory_material(completed, namespace, &current, stamp)
                 } else {
-                    check_stamp(&actual.stamp, stamp, Phase::Verify).map(|_| actual.stamp.clone())
+                    crate::metadata::verify_fields(
+                        &actual.stamp,
+                        stamp,
+                        &metadata_intents(completed, *id),
+                    )
+                    .map(|_| actual.stamp.clone())
                 }
             }
             _ => Err(invalid("current poststate is missing or has changed kind")),
@@ -464,6 +474,7 @@ pub fn plan_undo(
     };
     let mut result =
         plan(&inventory, &batch, namespace, version).map_err(|e| invalid(e.to_string()))?;
+    append_metadata_undo(completed, &mut result)?;
     result.inverse_of = Some(completed.operation_id);
     result.execution.inverse_of = result.inverse_of;
     Ok(result)
@@ -569,6 +580,41 @@ fn plan_copy_undo(
     ns: &NamespaceSnapshot,
     version: PlanRef,
 ) -> Result<RenamePlan, OpError> {
+    // Explicit access time is part of owned-copy poststate even though ordinary
+    // file identity checks intentionally tolerate reader-generated access time.
+    for pending in op
+        .steps
+        .iter()
+        .filter(|s| s.state == StepState::CompletionDurable)
+    {
+        if let ExecutionAction::SetMetadata { entry, changes } = &pending.step.action {
+            if changes.iter().any(|c| {
+                matches!(
+                    c,
+                    MetadataChange::Timestamp {
+                        field: TimestampField::Accessed,
+                        ..
+                    }
+                )
+            }) {
+                let receipt = pending
+                    .receipts
+                    .last()
+                    .and_then(|r| r.after.as_ref())
+                    .ok_or_else(|| invalid("metadata receipt missing"))?;
+                let expected = latest_metadata_post(op, &entry.path, receipt);
+                let actual = ns
+                    .parents
+                    .iter()
+                    .flat_map(|p| &p.entries)
+                    .find(|e| e.absolute_path == entry.path)
+                    .ok_or_else(|| invalid("metadata target missing"))?;
+                if actual.stamp.accessed_ns != expected.accessed_ns {
+                    return Err(invalid("explicit access timestamp poststate changed"));
+                }
+            }
+        }
+    }
     let context = capture_context(op)?;
     if context.grants != ns.grants {
         return Err(invalid("historical destination grants changed"));
@@ -723,9 +769,14 @@ fn plan_copy_undo(
                         true,
                         source.path.clone(),
                         if directory {
-                            directory_material(op, ns, target, stamp)?
+                            directory_material(
+                                op,
+                                ns,
+                                target,
+                                latest_metadata_post(op, target, stamp),
+                            )?
                         } else {
-                            observed(target, stamp, false)?
+                            observed(target, latest_metadata_post(op, target, stamp), false)?
                         },
                     )
                 }
@@ -776,7 +827,7 @@ fn plan_copy_undo(
                         false,
                         removed.is_some(),
                         original_source,
-                        observed(target, stamp, false)?,
+                        observed(target, latest_metadata_post(op, target, stamp), false)?,
                     )
                 }
                 ExecutionAction::CreateDirectory { target } => {
@@ -796,7 +847,12 @@ fn plan_copy_undo(
                             .iter()
                             .find(|(_, _, _, _, creator)| *creator == original.step.id)
                             .map_or_else(|| target.clone(), |(path, ..)| path.clone()),
-                        directory_material(op, ns, target, stamp)?,
+                        directory_material(
+                            op,
+                            ns,
+                            target,
+                            latest_metadata_post(op, target, stamp),
+                        )?,
                     )
                 }
                 _ => continue,
@@ -887,7 +943,55 @@ fn plan_copy_undo(
                         temporary: false,
                     },
                 ));
-            } else {
+            }
+            if moving && !directory {
+                let restored_by = steps
+                    .iter()
+                    .rev()
+                    .find(|s| match &s.action {
+                        ExecutionAction::RenameEntry { target: p, .. }
+                        | ExecutionAction::PublishCopy { target: p, .. } => *p == target,
+                        _ => false,
+                    })
+                    .map(|s| s.id)
+                    .ok_or_else(|| invalid("restored file receipt missing"))?;
+                let mut prior = restored_by;
+                for metadata in op
+                    .steps
+                    .iter()
+                    .rev()
+                    .filter(|s| s.state == StepState::CompletionDurable)
+                {
+                    if let ExecutionAction::SetMetadata { entry, changes } = &metadata.step.action {
+                        if entry.path != source {
+                            continue;
+                        }
+                        let changes = crate::metadata::inverse_changes(
+                            metadata
+                                .receipts
+                                .last()
+                                .ok_or_else(|| invalid("metadata receipt missing"))?,
+                            changes,
+                        )?;
+                        if changes.is_empty() {
+                            continue;
+                        }
+                        let id = next();
+                        steps.push(mk(
+                            id,
+                            ExecutionAction::SetMetadata {
+                                entry: EntryPrestate {
+                                    path: target.clone(),
+                                    identity: ExpectedIdentity::FromReceipt { step_id: prior },
+                                },
+                                changes,
+                            },
+                        ));
+                        prior = id;
+                    }
+                }
+            }
+            if !native_move {
                 let owned = if directory {
                     OwnedEntryPrestate {
                         entry: EntryPrestate {
@@ -1102,4 +1206,142 @@ fn plan_copy_undo(
         frozen_inputs: frozen,
         grants,
     })
+}
+
+fn metadata_intents(op: &OperationRecord, id: EntryId) -> Vec<MetadataChange> {
+    op.steps
+        .iter()
+        .filter(|s| s.step.entry_id == id && s.state == StepState::CompletionDurable)
+        .filter_map(|s| match &s.step.action {
+            ExecutionAction::SetMetadata { changes, .. } => Some(changes.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+fn append_metadata_undo(op: &OperationRecord, result: &mut RenamePlan) -> Result<(), OpError> {
+    for row in &mut result.rows {
+        if matches!(row.status, RowStatus::Blocked | RowStatus::NeedsReview) {
+            continue;
+        }
+        let mut changes = Vec::new();
+        for step in
+            op.steps.iter().rev().filter(|s| {
+                s.step.entry_id == row.entry_id && s.state == StepState::CompletionDurable
+            })
+        {
+            if let ExecutionAction::SetMetadata {
+                changes: intent, ..
+            } = &step.step.action
+            {
+                changes.extend(crate::metadata::inverse_changes(
+                    step.receipts
+                        .last()
+                        .ok_or_else(|| invalid("metadata receipt missing"))?,
+                    intent,
+                )?);
+            }
+        }
+        if changes.is_empty() {
+            continue;
+        }
+        row.status = RowStatus::Changed;
+        let index = result
+            .execution
+            .groups
+            .iter()
+            .position(|g| g.steps.iter().any(|s| s.entry_id == row.entry_id))
+            .or_else(|| result.execution.groups.iter().position(|g| g.steps.iter().any(|step| {
+                result.execution.provenance.inventory.entries.iter().any(|e| e.id == step.entry_id && e.kind == EntryKind::Directory)
+                    && matches!(&step.action, ExecutionAction::RenameEntry { source, target, .. } if row.source_path.starts_with(&source.path) || row.target_path.starts_with(target))
+            })))
+            .or_else(|| {
+                result
+                    .execution
+                    .groups
+                    .iter()
+                    .position(|g| g.id == row.group_id)
+            })
+            .unwrap_or_else(|| {
+                result.execution.groups.push(ExecutionGroup {
+                    id: row.group_id,
+                    depends_on: vec![],
+                    steps: vec![],
+                });
+                result.execution.groups.len() - 1
+            });
+        let directory = result
+            .execution
+            .provenance
+            .inventory
+            .entries
+            .iter()
+            .any(|e| e.id == row.entry_id && e.kind == EntryKind::Directory);
+        if directory {
+            crate::metadata::original_directory_targets(op, row.entry_id, &mut changes)?;
+        }
+        let group = &mut result.execution.groups[index];
+        let mut identity = group
+            .steps
+            .iter()
+            .rev()
+            .find(|s| s.entry_id == row.entry_id)
+            .map_or_else(
+                || ExpectedIdentity::Observed(row.stamp.clone()),
+                |s| ExpectedIdentity::FromReceipt { step_id: s.id },
+            );
+        if directory {
+            identity = ExpectedIdentity::DirectoryAfterEffects {
+                original: row.stamp.clone(),
+                created_by: None,
+                effects: group.steps.iter().map(|s| s.id).collect(),
+            };
+        }
+        for (ordinal, change) in changes.into_iter().enumerate() {
+            let id: StepId = format!(
+                "{:x}",
+                md5::compute(format!(
+                    "metadata-undo:{}:{}:{ordinal}",
+                    result.version.plan_id, row.entry_id
+                ))
+            )
+            .parse()
+            .expect("digest ID");
+            group.steps.push(ExecutionStep {
+                id,
+                entry_id: row.entry_id,
+                group_id: group.id,
+                action: ExecutionAction::SetMetadata {
+                    entry: EntryPrestate {
+                        path: row.target_path.clone(),
+                        identity,
+                    },
+                    changes: vec![change],
+                },
+            });
+            identity = ExpectedIdentity::FromReceipt { step_id: id };
+        }
+    }
+    result.counts = PlanCounts::from_rows(&result.rows).map_err(|e| invalid(e.to_string()))?;
+    Ok(())
+}
+
+fn latest_metadata_post<'a>(
+    op: &'a OperationRecord,
+    path: &Path,
+    original: &'a FileStamp,
+) -> &'a FileStamp {
+    op.steps
+        .iter()
+        .rev()
+        .filter(|s| s.state == StepState::CompletionDurable)
+        .find_map(|s| match &s.step.action {
+            ExecutionAction::SetMetadata { entry, .. } if entry.path == path => s
+                .receipts
+                .last()
+                .and_then(|r| r.after.as_ref())
+                .filter(|after| after.physical_id == original.physical_id),
+            _ => None,
+        })
+        .unwrap_or(original)
 }

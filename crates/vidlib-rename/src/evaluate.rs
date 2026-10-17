@@ -44,12 +44,10 @@ pub fn evaluate(
             "resolve associations before freezing primary order",
         ));
     }
-    if matches!(recipe.destination, Destination::Granted { .. })
-        || !recipe.metadata_changes.is_empty()
-    {
+    if matches!(recipe.destination, Destination::Granted { .. }) {
         return Err(RenameError::new(
             RenameErrorCode::UnsupportedConfiguration,
-            "choose explicit Copy or Move; legacy destination mode is ambiguous, and metadata changes are not enabled",
+            "choose explicit Copy or Move; legacy destination mode is ambiguous",
         ));
     }
     for rule in recipe.rules.iter().filter(|r| r.enabled) {
@@ -321,6 +319,7 @@ pub fn evaluate(
             });
         }
     }
+    crate::metadata::evaluate_changes(&mut batch);
     Ok(batch)
 }
 

@@ -17,7 +17,14 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 pub(super) fn directory(path: &Path) -> Result<File, OpError> {
-    let mut file: File = fs::open("/", DIRECTORY, Mode::empty())
+    let mut file: File = fs::open("/", DIRECTORY | OFlags::NOATIME, Mode::empty())
+        .or_else(|e| {
+            if e == rustix::io::Errno::PERM {
+                fs::open("/", DIRECTORY, Mode::empty())
+            } else {
+                Err(e)
+            }
+        })
         .map_err(|e| io_error(e.into(), Phase::Inspect))?
         .into();
     for component in path.components() {
@@ -37,7 +44,16 @@ pub(super) fn open_child(
     } else {
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
     };
-    fs::openat(parent, name, flags, Mode::empty())
+    // Avoid changing an explicitly controlled atime while proving namespace or
+    // full content. Unowned files may deny NOATIME; retain ordinary read support.
+    fs::openat(parent, name, flags | OFlags::NOATIME, Mode::empty())
+        .or_else(|e| {
+            if e == rustix::io::Errno::PERM {
+                fs::openat(parent, name, flags, Mode::empty())
+            } else {
+                Err(e)
+            }
+        })
         .map(File::from)
         .map_err(|e| {
             if e == rustix::io::Errno::LOOP

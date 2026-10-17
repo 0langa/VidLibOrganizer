@@ -262,6 +262,18 @@ pub enum MetadataChange {
         #[serde(with = "vidlib_inventory::exact::i128_decimal")]
         value_ns: i128,
     },
+    TimestampOffset {
+        field: TimestampField,
+        #[serde(with = "vidlib_inventory::exact::i128_decimal")]
+        offset_ns: i128,
+    },
+    TimestampIncrement {
+        field: TimestampField,
+        #[serde(with = "vidlib_inventory::exact::i128_decimal")]
+        start_ns: i128,
+        #[serde(with = "vidlib_inventory::exact::i128_decimal")]
+        step_ns: i128,
+    },
     WindowsAttributes {
         set: u32,
         clear: u32,
@@ -461,12 +473,16 @@ impl RecipeV1 {
         for change in &self.metadata_changes {
             match change {
                 MetadataChange::WindowsAttributes { set, clear }
-                    if set & clear != 0 || attributes =>
+                    if set & clear != 0 || (set | clear) & !0x27 != 0 || attributes =>
                 {
                     return Err(invalid("conflicting attribute changes"))
                 }
                 MetadataChange::WindowsAttributes { .. } => attributes = true,
-                MetadataChange::Timestamp { field, .. } if !timestamps.insert(*field as u8) => {
+                MetadataChange::Timestamp { field, .. }
+                | MetadataChange::TimestampOffset { field, .. }
+                | MetadataChange::TimestampIncrement { field, .. }
+                    if !timestamps.insert(*field as u8) =>
+                {
                     return Err(invalid("duplicate timestamp change"))
                 }
                 _ => {}

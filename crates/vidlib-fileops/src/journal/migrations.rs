@@ -85,6 +85,11 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
         conn.prepare("SELECT group_id,canonical_effects FROM recovery_groups LIMIT 0")
             .map_err(|_| unsupported())?;
     }
+    if version >= 12 {
+        expected.push((12, format!("{:x}", md5::compute(schema::V12_SQL))));
+        conn.prepare("SELECT stamp FROM metadata_prestates LIMIT 0")
+            .map_err(|_| unsupported())?;
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -227,6 +232,15 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
         tx.execute(
             "INSERT INTO schema_migrations(version,checksum) VALUES(11,?1)",
             [format!("{:x}", md5::compute(schema::V11_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 12 {
+        tx.execute_batch(schema::V12_SQL)
+            .map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(12,?1)",
+            [format!("{:x}", md5::compute(schema::V12_SQL))],
         )
         .map_err(super::sql_error)?;
     }

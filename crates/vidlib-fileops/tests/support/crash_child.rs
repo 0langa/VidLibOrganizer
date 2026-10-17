@@ -400,7 +400,13 @@ pub fn persisted_phase_child(f: &mut Fixture, phase: &str, after: bool) {
     let mut native = PlatformFs::default();
     let op = journal.begin(&f.plan.execution).unwrap();
     for (index, step) in steps.iter().enumerate() {
-        journal.intent(op, step).unwrap();
+        if let ExecutionAction::SetMetadata { entry, .. } = &step.action {
+            journal
+                .intent_metadata(op, step, &native.inspect(&entry.path).unwrap().stamp)
+                .unwrap();
+        } else {
+            journal.intent(op, step).unwrap();
+        }
         let last = index + 1 == steps.len();
         if last && !after {
             std::process::exit(86);

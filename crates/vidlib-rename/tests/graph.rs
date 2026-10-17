@@ -703,7 +703,7 @@ fn directory_swap_and_child_rename_use_receipts_and_current_locations() {
 }
 // Unexpected metadata cannot silently disappear from an otherwise valid rename plan.
 #[test]
-fn unsupported_compiled_effects_fail_closed() {
+fn explicit_metadata_compiles_after_path_effect_with_receipt_identity() {
     let (inventory, mut batch, ns, version) = fixture(&[("a", EntryKind::File)]);
     target(&mut batch, 0, "b");
     batch
@@ -713,7 +713,15 @@ fn unsupported_compiled_effects_fail_closed() {
             field: TimestampField::Modified,
             value_ns: 123,
         });
-    assert!(plan(&inventory, &batch, &ns, version).is_err());
+    let compiled = plan(&inventory, &batch, &ns, version).unwrap();
+    let steps = &compiled.execution.groups[0].steps;
+    assert_eq!(steps.len(), 2);
+    assert!(
+        matches!(&steps[1].action, ExecutionAction::SetMetadata { entry, changes }
+        if entry.path == batch.rows[0].target_path
+            && entry.identity == ExpectedIdentity::FromReceipt { step_id: steps[0].id }
+            && changes == &batch.recipe.metadata_changes)
+    );
 }
 
 // Windows-only path semantics are compiled here and run only on actual Windows.

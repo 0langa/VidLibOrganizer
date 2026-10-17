@@ -97,47 +97,7 @@ pub(crate) fn effect(
             )?;
         }
         ExecutionAction::SetMetadata { entry, changes } => {
-            if !matches!(
-                entry.identity,
-                vidlib_rename::ExpectedIdentity::DirectoryAfterEffects { .. }
-            ) {
-                return Err(error(
-                    "directory preservation requires owned directory proof",
-                ));
-            }
-            let before = crate::recovery::evidence::material(op, entry, fs)?;
-            let mut update = MetadataUpdate::default();
-            for change in changes {
-                match change {
-                    vidlib_rename::MetadataChange::Timestamp { field, value_ns } => match field {
-                        vidlib_rename::TimestampField::Modified => {
-                            update.modified_ns = Some(*value_ns)
-                        }
-                        vidlib_rename::TimestampField::Accessed => {
-                            update.accessed_ns = Some(*value_ns)
-                        }
-                        vidlib_rename::TimestampField::Created => {
-                            update.created_ns = Some(*value_ns)
-                        }
-                    },
-                    vidlib_rename::MetadataChange::WindowsAttributes { set, clear } => {
-                        update.windows_attributes = Some(
-                            (before
-                                .windows_attributes
-                                .ok_or_else(|| error("unknown directory attributes"))?
-                                | set)
-                                & !clear,
-                        );
-                    }
-                }
-            }
-            let outcome = fs.set_metadata(&entry.path, &before, &update)?;
-            result.phase = CompletedPhase::MetadataSet;
-            result.before_path = Some(encode_path(&entry.path));
-            result.after_path = result.before_path.clone();
-            result.before = Some(before);
-            result.after = Some(outcome.observation.stamp);
-            result.durability = outcome.durability;
+            return crate::metadata::effect(op, step, entry, changes, fs);
         }
         ExecutionAction::WriteStaging { source, staging } => {
             let expected = stamp(op, source)?;
@@ -412,6 +372,9 @@ pub(crate) fn validate_plan(plan: &vidlib_rename::RenamePlan) -> Result<(), OpEr
     if plan.inverse_of.is_some() {
         return Ok(());
     } // Journal::begin re-derives every historical inverse step.
+    if !plan.execution.provenance.recipe.metadata_changes.is_empty() {
+        return crate::metadata::validate_plan(plan);
+    }
     if matches!(
         plan.execution.provenance.recipe.destination,
         vidlib_rename::Destination::CopyTo { .. } | vidlib_rename::Destination::MoveTo { .. }
@@ -539,12 +502,14 @@ pub(crate) fn consumed_inverse(
                 }
             }
             ExecutionAction::SetMetadata { entry, .. } => {
-                if fact.phase == CompletedPhase::OwnedEmptyDirectoryRemoved
-                    && fact.before.as_ref().and_then(|s| s.physical_id.as_ref())
-                        == original_fact
-                            .after
-                            .as_ref()
-                            .and_then(|s| s.physical_id.as_ref())
+                if matches!(
+                    fact.phase,
+                    CompletedPhase::OwnedEmptyDirectoryRemoved | CompletedPhase::OwnedCopyRemoved
+                ) && fact.before.as_ref().and_then(|s| s.physical_id.as_ref())
+                    == original_fact
+                        .after
+                        .as_ref()
+                        .and_then(|s| s.physical_id.as_ref())
                     && crate::recovery::evidence::absent(fs, &entry.path)
                 {
                     return Ok(Some(fact.step_id));
@@ -560,6 +525,7 @@ pub(crate) fn consumed_inverse(
                 if fact.phase==CompletedPhase::CopyPublished && fact.after_path.as_ref()==Some(&encode_path(&source.path)) && removed.is_some_and(|s| matches!(&s.step.action,ExecutionAction::RemoveSource{source:removed,..} if removed.path==*target) || matches!(&s.step.action, ExecutionAction::RemoveOwnedCopy { owned } if owned.entry.path == *target)) && crate::recovery::evidence::absent(fs,target) {
                     let stamp=fact.after.as_ref().ok_or_else(||error("restoration poststate missing"))?;
                     let digest=fact.digest.as_ref().ok_or_else(||error("restoration digest missing"))?;
+                    let stamp = crate::metadata::latest_post(op, &source.path, stamp);
                     if sha256(fs,&source.path,stamp,&JobControl::default())?!=*digest {return Err(error("restored source changed"));}
                     return Ok(Some(fact.step_id));
                 }
@@ -692,6 +658,26 @@ pub(crate) fn restore_chain(
         Ok(actions)
     };
     match &original.step.action {
+        ExecutionAction::SetMetadata { entry, changes } => {
+            let expected = fact
+                .after
+                .as_ref()
+                .ok_or_else(|| error("metadata poststate missing"))?;
+            let actual = fs.inspect(&entry.path)?.stamp;
+            crate::metadata::verify_fields(&actual, expected, changes)?;
+            let changes = crate::metadata::inverse_changes(fact, changes)?;
+            Ok(vec![mk(
+                StepId::new(),
+                ExecutionAction::SetMetadata {
+                    entry: EntryPrestate {
+                        path: entry.path.clone(),
+                        identity: ExpectedIdentity::Observed(expected.clone()),
+                    },
+                    changes,
+                },
+            )])
+        }
+
         ExecutionAction::CreateStaging { staging } => {
             cleanup(staging, original.step.id, observed(staging)?, false, false)
         }
@@ -726,6 +712,7 @@ pub(crate) fn restore_chain(
                 .digest
                 .as_ref()
                 .ok_or_else(|| error("publication digest missing"))?;
+            let expected = crate::metadata::latest_post(op, target, expected);
             if sha256(fs, target, expected, &JobControl::default())? != *digest {
                 return Err(error("publication digest changed"));
             }
@@ -755,6 +742,7 @@ pub(crate) fn restore_chain(
                 .digest
                 .as_ref()
                 .ok_or_else(|| error("publication digest missing"))?;
+            let expected = crate::metadata::latest_post(op, &published_path, expected);
             if sha256(fs, &published_path, expected, &JobControl::default())? != *digest {
                 return Err(error("copy-back digest changed"));
             }
@@ -773,7 +761,26 @@ pub(crate) fn restore_chain(
             else {
                 return Err(error("quarantine lineage missing"));
             };
-            copy_back(&published_path, expected, &original_source.path)
+            let mut chain = copy_back(&published_path, expected, &original_source.path)?;
+            let mut prior = chain
+                .last()
+                .ok_or_else(|| error("copy-back publication missing"))?
+                .id;
+            for change in crate::metadata::restore_fields(op, &published_path)? {
+                let id = StepId::new();
+                chain.push(mk(
+                    id,
+                    ExecutionAction::SetMetadata {
+                        entry: EntryPrestate {
+                            path: original_source.path.clone(),
+                            identity: ExpectedIdentity::FromReceipt { step_id: prior },
+                        },
+                        changes: vec![change],
+                    },
+                ));
+                prior = id;
+            }
+            Ok(chain)
         }
         ExecutionAction::RemoveOwnedCopy { owned } => {
             if op.inverse_of.is_none() {

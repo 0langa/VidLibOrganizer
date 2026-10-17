@@ -971,7 +971,7 @@ fn v7_history_revision_upgrade_preserves_evidence_and_rolls_back_failure() {
     // Materialize the historical shape, including later protocol teardown; a
     // user_version-only downgrade would not be an actual v7 database.
     let downgrade = |db: &Connection| {
-        db.execute_batch("DROP TABLE recovery_dependencies; DROP TABLE recovery_groups; DROP TABLE copy_protocol;
+        db.execute_batch("DROP TABLE metadata_prestates; DROP TABLE recovery_dependencies; DROP TABLE recovery_groups; DROP TABLE copy_protocol;
             ALTER TABLE recovery_effects RENAME TO recovery_effects_new;
             CREATE TABLE recovery_effects(operation_id TEXT NOT NULL, original_step TEXT NOT NULL, inverse_step TEXT NOT NULL, parents TEXT NOT NULL, PRIMARY KEY(operation_id,original_step), UNIQUE(operation_id,inverse_step), FOREIGN KEY(operation_id,original_step) REFERENCES steps(operation_id,id), FOREIGN KEY(operation_id,inverse_step) REFERENCES steps(operation_id,id));
             INSERT INTO recovery_effects SELECT operation_id,original_step,inverse_step,parents FROM recovery_effects_new;
@@ -991,7 +991,7 @@ fn v7_history_revision_upgrade_preserves_evidence_and_rolls_back_failure() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        11,
+        12,
         "v7 history schema did not upgrade"
     );
     drop(journal);

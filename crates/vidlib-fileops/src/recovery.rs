@@ -398,8 +398,14 @@ fn resume(
             if op.state == OperationState::RecoveryRequired {
                 journal.set_state(op_id, OperationState::Running)?;
             }
-            journal.intent(op_id, &pending.step)?;
-            let receipt = crate::copy::effect(&op, &pending.step, fs, control)?;
+            let before = crate::metadata::prepare(&op, &pending.step, fs)?;
+            if let Some(before) = before {
+                journal.intent_metadata(op_id, &pending.step, &before)?;
+            } else {
+                journal.intent(op_id, &pending.step)?;
+            }
+            let receipt =
+                crate::copy::effect(&journal.operation(op_id)?, &pending.step, fs, control)?;
             journal.complete(op_id, &receipt)?;
             if receipt.durability != Durability::Synced {
                 return Err(error("recovered copy durability unconfirmed"));
@@ -511,7 +517,8 @@ fn restore(
                         if effect.inverse.state != StepState::Planned {
                             resolve_gap(&op, &effect.inverse, journal, fs)?;
                         }
-                        journal.rearm_inverse(op_id, effect.inverse.step.id)?;
+                        let before = crate::metadata::prepare(&op, &effect.inverse.step, fs)?;
+                        journal.rearm_inverse(op_id, effect.inverse.step.id, before.as_ref())?;
                         let r = if matches!(
                             effect.inverse.step.action,
                             ExecutionAction::RenameEntry { .. }
@@ -521,7 +528,12 @@ fn restore(
                             let (sp, tp) = parents(&op, &effect.inverse.step, true, fs)?;
                             rename_effect(&op, &effect.inverse.step, &expected, (&sp, &tp), fs)?
                         } else {
-                            crate::copy::effect(&op, &effect.inverse.step, fs, control)?
+                            crate::copy::effect(
+                                &journal.operation(op_id)?,
+                                &effect.inverse.step,
+                                fs,
+                                control,
+                            )?
                         };
                         journal.complete(op_id, &r)?;
                         if r.durability != Durability::Synced {
@@ -590,14 +602,41 @@ fn restore(
             action: ExecutionAction::RenameEntry {
                 source: EntryPrestate {
                     path: target.clone(),
-                    identity: ExpectedIdentity::Observed(expected),
+                    identity: ExpectedIdentity::Observed(expected.clone()),
                 },
                 target: source.path.clone(),
                 temporary: reserved(&op, &source.path),
             },
         };
         let (sp, tp) = parents(&op, &inverse, true, fs)?;
-        journal.recovery_intent(op_id, original.step.id, &inverse, (&sp, &tp))?;
+        let mut chain = vec![(inverse.clone(), sp.clone(), tp.clone())];
+        if fs.inspect(target)?.kind == vidlib_inventory::EntryKind::Directory {
+            let changes = crate::metadata::directory_restore_changes(&op, original.step.entry_id)?;
+            let mut identity = ExpectedIdentity::FromReceipt {
+                step_id: inverse.id,
+            };
+            for change in changes {
+                let id = StepId::new();
+                chain.push((
+                    ExecutionStep {
+                        id,
+                        entry_id: original.step.entry_id,
+                        group_id: group,
+                        action: ExecutionAction::SetMetadata {
+                            entry: EntryPrestate {
+                                path: source.path.clone(),
+                                identity,
+                            },
+                            changes: vec![change],
+                        },
+                    },
+                    tp.clone(),
+                    tp.clone(),
+                ));
+                identity = ExpectedIdentity::FromReceipt { step_id: id };
+            }
+        }
+        journal.recovery_chain(op_id, original.step.id, &chain)?;
     }
     Ok(())
 }

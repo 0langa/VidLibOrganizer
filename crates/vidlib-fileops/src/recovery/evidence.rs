@@ -11,9 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use vidlib_inventory::{decode_path, encode_path, ids::*, FileStamp, NativePathRecord, PhysicalId};
-use vidlib_rename::{
-    EntryPrestate, ExecutionAction, ExecutionStep, ExpectedIdentity, MetadataChange, TimestampField,
-};
+use vidlib_rename::{EntryPrestate, ExecutionAction, ExecutionStep, ExpectedIdentity};
 pub(crate) fn stamp(op: &PendingOperation, entry: &EntryPrestate) -> Result<FileStamp, OpError> {
     match &entry.identity {
         ExpectedIdentity::Observed(s) if s.physical_id.is_some() => Ok(s.clone()),
@@ -67,7 +65,7 @@ pub(crate) fn material(
         entry.identity,
         ExpectedIdentity::DirectoryAfterEffects { .. }
     ) {
-        verified_material_inner(op, &entry.path, &expected, fs, true, None)
+        verified_material_inner(op, &entry.path, &expected, fs, true, None, None)
     } else {
         Ok(expected)
     }
@@ -389,7 +387,18 @@ pub(crate) fn probe(
     let source_absent = source.is_some_and(|s| absent(fs, &s.path));
     let mut before = source
         .map(|s| {
-            if source_absent {
+            if let ExecutionAction::SetMetadata { changes, .. } = &step.action {
+                let before = crate::metadata::captured_prestate(op, step, s)?;
+                if fs.inspect(&s.path)?.kind == vidlib_inventory::EntryKind::Directory {
+                    let proof = crate::metadata::directory_proof(op, s, &before);
+                    prestate_with_effects(op, &proof)?;
+                    // Only this intent's exact requested fields may differ at its
+                    // receipt gap. Keep all child and unrelated attributes factual.
+                    let post = crate::metadata::poststate(&before, changes).ok();
+                    verified_material_inner(op, &s.path, &before, fs, true, None, post.as_ref())?;
+                }
+                Ok(before)
+            } else if source_absent {
                 prestate_with_effects(op, s)
             } else {
                 material(op, s, fs)
@@ -458,6 +467,7 @@ pub(crate) fn probe(
                         fs,
                         true,
                         Some(&source.path),
+                        None,
                     )?);
                 }
                 let observed = fs.verify(t, before.as_ref().expect("rename source"))?;
@@ -595,31 +605,24 @@ pub(crate) fn probe(
             }
         }
         ExecutionAction::SetMetadata { entry, changes } => {
-            let mut post = before.clone().expect("metadata source");
-            for change in changes {
-                match change {
-                    MetadataChange::Timestamp { field, value_ns } => match field {
-                        TimestampField::Created => post.created_ns = Some(*value_ns),
-                        TimestampField::Modified => post.modified_ns = Some(*value_ns),
-                        TimestampField::Accessed => post.accessed_ns = Some(*value_ns),
-                    },
-                    MetadataChange::WindowsAttributes { set, clear } => {
-                        post.windows_attributes = Some(
-                            (post
-                                .windows_attributes
-                                .ok_or_else(|| error("unknown original attributes"))?
-                                | set)
-                                & !clear,
-                        );
-                    }
-                }
-            }
             let observed = fs.inspect(&entry.path)?.stamp;
-            if observed == post {
+            if crate::metadata::verify_fields(
+                &observed,
+                before.as_ref().expect("metadata source"),
+                changes,
+            )
+            .is_ok()
+            {
+                RecoveryDisposition::NotApplied
+            } else if crate::metadata::verify_fields(
+                &observed,
+                &crate::metadata::poststate(before.as_ref().expect("metadata source"), changes)?,
+                changes,
+            )
+            .is_ok()
+            {
                 after = Some(observed);
                 RecoveryDisposition::Applied
-            } else if before.as_ref() == Some(&observed) {
-                RecoveryDisposition::NotApplied
             } else {
                 RecoveryDisposition::Unresolved
             }
@@ -648,7 +651,7 @@ pub(crate) fn verified_material(
     expected: &FileStamp,
     fs: &dyn Filesystem,
 ) -> Result<FileStamp, OpError> {
-    verified_material_inner(op, path, expected, fs, false, None)
+    verified_material_inner(op, path, expected, fs, false, None, None)
 }
 fn verified_material_inner(
     op: &PendingOperation,
@@ -657,6 +660,7 @@ fn verified_material_inner(
     fs: &dyn Filesystem,
     force: bool,
     relocated_from: Option<&Path>,
+    metadata_post: Option<&FileStamp>,
 ) -> Result<FileStamp, OpError> {
     if !force {
         if let Ok(observed) = fs.verify(path, expected) {
@@ -696,8 +700,12 @@ fn verified_material_inner(
         .map(|(stamp, _)| stamp)
         .unwrap_or(expected);
     let unchanged_attributes = |stamp: &FileStamp| {
-        stamp.created_ns == factual.created_ns
-            && stamp.windows_attributes == factual.windows_attributes
+        (stamp.created_ns == factual.created_ns
+            && stamp.windows_attributes == factual.windows_attributes)
+            || metadata_post.is_some_and(|post| {
+                stamp.created_ns == post.created_ns
+                    && stamp.windows_attributes == post.windows_attributes
+            })
     };
     if !unchanged_attributes(&observed.stamp) {
         return Err(error(
@@ -760,8 +768,12 @@ fn verified_material_inner(
             return Err(error("directory capture is incomplete or replaced"));
         }
         if entries.get(directory).is_some_and(|(stamp, _)| {
-            captured.stamp.created_ns != stamp.created_ns
-                || captured.stamp.windows_attributes != stamp.windows_attributes
+            if directory == path {
+                !unchanged_attributes(&captured.stamp)
+            } else {
+                captured.stamp.created_ns != stamp.created_ns
+                    || captured.stamp.windows_attributes != stamp.windows_attributes
+            }
         }) {
             return Err(error("captured descendant directory attributes changed"));
         }

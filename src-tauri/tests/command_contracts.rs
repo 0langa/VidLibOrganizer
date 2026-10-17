@@ -56,6 +56,7 @@ fn preview(state: &AppState) -> UiPlanRef {
         preview_owned(
             state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -382,6 +383,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -451,6 +453,7 @@ fn directory_capture_preserves_unselected_nested_children_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -594,6 +597,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -616,6 +620,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -696,6 +701,7 @@ fn empty_directory_rename_retains_complete_namespace_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -903,6 +909,7 @@ fn recovery_all_actions_are_reachable_through_one_review() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -1136,6 +1143,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
         preview_owned(
             &state,
             RenameRequestDto {
+                metadata_changes: None,
                 destination: None,
                 recipe_json: None,
                 rebind_selection: false,
@@ -1154,6 +1162,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
     assert!(preview_owned(
         &state,
         RenameRequestDto {
+            metadata_changes: None,
             destination: None,
             recipe_json: None,
             rebind_selection: false,
@@ -1666,6 +1675,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
             metadata_changes: vec![],
         };
         let request = RenameRequestDto {
+            metadata_changes: None,
             destination: None,
             revision,
             selected_ids: selected.clone(),
@@ -1697,6 +1707,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         );
     }
     let request = RenameRequestDto {
+        metadata_changes: None,
         destination: None,
         revision: 4,
         selected_ids: selected.clone(),
@@ -1772,6 +1783,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         metadata_changes: vec![],
     };
     let request = RenameRequestDto {
+        metadata_changes: None,
         destination: None,
         revision: 5,
         selected_ids: selected,
@@ -2224,4 +2236,54 @@ fn destination_stale_forged_and_imported_ids_never_create_native_authority() {
         std::fs::read(dir.path().join("media/original.mp4")).unwrap(),
         b"media"
     );
+}
+
+#[test]
+fn metadata_request_is_strict_exact_and_changes_backend_preview() {
+    let (_dir, state) = fixture();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let ids: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| item["itemId"].clone())
+        .collect();
+    let request = json!({"revision":"2", "selectedIds":ids, "metadataChanges":{"modified":{"type":"set", "valueNs":"1600000000123456700"}, "hidden":"keep"}});
+    let parsed = serde_json::from_value::<RenameRequestDto>(request.clone());
+    assert!(parsed.is_ok(), "explicit metadata request must deserialize");
+    let result = wait(&state, preview_owned(&state, parsed.unwrap()).unwrap());
+    let plan_ref: UiPlanRef = serde_json::from_value(result["planRef"].clone()).unwrap();
+    let rows = page_owned(
+        &state,
+        PageRequest {
+            plan_ref,
+            query: PageQuery::new(2),
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.items[0]["status"], "changed");
+    assert!(rows.items[0]["explanations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["ruleId"] == "filesystem-metadata"));
+    for changes in [
+        json!({"modified":{"type":"set","valueNs":1600000000123456700u64}}),
+        json!({"modified":{"type":"keep","surprise":true}}),
+        json!({"read_only":"set"}),
+        json!({"modified":{"type":"offset","offset_ns":"1"}}),
+    ] {
+        let mut bad = request.clone();
+        bad["metadataChanges"] = changes;
+        assert!(serde_json::from_value::<RenameRequestDto>(bad).is_err());
+    }
 }

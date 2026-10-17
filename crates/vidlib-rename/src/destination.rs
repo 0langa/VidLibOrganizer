@@ -682,7 +682,7 @@ pub(crate) fn can_rename(rows: &[PlanRow], ns: &NamespaceSnapshot, policy: &Dest
 /// Verify the complete native expansion against its immutable row/namespace
 /// inputs, including carried descendants and all compiled reservations.
 pub fn validate_compiled(plan: &RenamePlan) -> Result<(), RenameError> {
-    let groups = compile(
+    let mut groups = compile(
         &plan.execution.provenance.inventory,
         &plan.rows,
         &plan.execution.expected_namespace,
@@ -692,6 +692,12 @@ pub fn validate_compiled(plan: &RenamePlan) -> Result<(), RenameError> {
         ),
     )
     .map_err(|m| invalid(&m))?;
+    crate::metadata::compile_changes(
+        &plan.execution.provenance.inventory,
+        &mut plan.rows.clone(),
+        &plan.execution.provenance.recipe,
+        &mut groups,
+    )?;
     if groups.len() != plan.execution.groups.len()
         || groups
             .iter()

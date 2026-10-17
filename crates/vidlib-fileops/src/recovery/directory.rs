@@ -217,7 +217,7 @@ pub(crate) fn compile_group(
                 compiled.push((original.step.id, mk(original, ExecutionAction::RenameEntry { source: EntryPrestate { path: target.clone(), identity: ExpectedIdentity::Observed(expected) }, target: source.path.clone(), temporary: reserved(op, &source.path) })));
             }
             _ => {
-                let chain = crate::copy::restore_chain(op, original, fs)?;
+                let chain = crate::copy::restore_chain(op, original, fs).map_err(|mut error| { error.step_id = Some(original.step.id); error.item_id = Some(original.step.entry_id); error })?;
                 for mut step in chain {
                     if let ExecutionAction::RemoveOwnedEmptyDirectory { owned } = &mut step.action {
                         let expected = receipt(op, owned.created_by)?.after.clone().ok_or_else(|| error("directory ownership stamp missing"))?;

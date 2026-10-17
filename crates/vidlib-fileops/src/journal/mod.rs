@@ -47,6 +47,7 @@ pub struct StepReceipt {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingStep {
+    pub metadata_prestate: Option<FileStamp>,
     pub step: ExecutionStep,
     pub sequence: u64,
     pub state: StepState,
@@ -335,6 +336,22 @@ impl Journal {
         })
     }
     pub fn intent(&mut self, op: OperationId, step: &ExecutionStep) -> Result<(), OpError> {
+        self.intent_with_metadata(op, step, None)
+    }
+    pub fn intent_metadata(
+        &mut self,
+        op: OperationId,
+        step: &ExecutionStep,
+        before: &FileStamp,
+    ) -> Result<(), OpError> {
+        self.intent_with_metadata(op, step, Some(before))
+    }
+    fn intent_with_metadata(
+        &mut self,
+        op: OperationId,
+        step: &ExecutionStep,
+        before: Option<&FileStamp>,
+    ) -> Result<(), OpError> {
         self.write(Some(op), Some(step.id), |tx| {
             let (state, _) = operation_header(tx, op)?;
             if !matches!(state, OperationState::Prepared | OperationState::Running) {
@@ -346,6 +363,7 @@ impl Journal {
             }
             let prerequisites = load_prerequisites(tx, op, step)?;
             validate_resolved_inputs(step, &prerequisites)?;
+            persist_metadata_prestate(tx, op, step, before)?;
             tx.execute(
                 "UPDATE steps SET state='IntentDurable' WHERE operation_id=?1 AND id=?2",
                 params![op.to_string(), step.id.to_string()],
@@ -387,6 +405,11 @@ impl Journal {
             }
             let prerequisites = load_prerequisites(tx, op, &pending.step)?;
             validate_receipt(&pending.step, receipt, &prerequisites)?;
+            if matches!(pending.step.action, ExecutionAction::SetMetadata { .. }) {
+                if let Some(before) = load_metadata_prestate(tx, op, receipt.step_id)? {
+                    if receipt.before.as_ref() != Some(&before) { return Err(invalid("metadata receipt changed durable prestate")); }
+                }
+            }
             tx.execute(
                 "INSERT INTO receipts(operation_id,step_id,payload) VALUES(?1,?2,?3)",
                 params![
@@ -850,7 +873,13 @@ fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationR
             .iter()
             .map(|r| from_json::<schema::StoredReceipt>(r).map(|s| s.0))
             .collect::<Result<_, _>>()?;
+        let metadata_prestate = if matches!(step.action, ExecutionAction::SetMetadata { .. }) {
+            load_metadata_prestate(connection, op, step.id)?
+        } else {
+            None
+        };
         steps.push(PendingStep {
+            metadata_prestate,
             step,
             sequence: u64::try_from(sequence).map_err(|_| recovery("invalid step sequence"))?,
             state: from_json(&format!("\"{state}\""))?,
@@ -1134,6 +1163,53 @@ fn validate_receipt(
         if earlier_receipt(record, verified_by)?.digest != receipt.digest {
             return Err(invalid("published digest differs from verified staging"));
         }
+    }
+    Ok(())
+}
+
+fn load_metadata_prestate(
+    connection: &Connection,
+    op: OperationId,
+    step: StepId,
+) -> Result<Option<FileStamp>, OpError> {
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT stamp FROM metadata_prestates WHERE operation_id=?1 AND step_id=?2",
+            params![op.to_string(), step.to_string()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    value.map(|v| from_json(&v)).transpose()
+}
+fn persist_metadata_prestate(
+    connection: &Connection,
+    op: OperationId,
+    step: &ExecutionStep,
+    before: Option<&FileStamp>,
+) -> Result<(), OpError> {
+    if let ExecutionAction::SetMetadata { entry, .. } = &step.action {
+        let before =
+            before.ok_or_else(|| invalid("metadata intent requires resolved factual prestate"))?;
+        let prerequisites = load_prerequisites(connection, op, step)?;
+        let expected = resolved_stamp(entry, &prerequisites)?;
+        if before.physical_id.is_none() || before.physical_id != expected.physical_id {
+            return Err(invalid("metadata prestate native identity differs"));
+        }
+        if let Some(existing) = load_metadata_prestate(connection, op, step.id)? {
+            if existing != *before {
+                return Err(invalid("metadata prestate binding is immutable"));
+            }
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO metadata_prestates VALUES(?1,?2,?3)",
+                    params![op.to_string(), step.id.to_string(), json(before)?],
+                )
+                .map_err(sql_error)?;
+        }
+    } else if before.is_some() {
+        return Err(invalid("metadata prestate belongs only to SetMetadata"));
     }
     Ok(())
 }

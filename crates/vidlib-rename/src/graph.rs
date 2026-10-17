@@ -70,6 +70,12 @@ pub fn plan(
             }
         }
     }
+    if rows
+        .iter()
+        .all(|r| matches!(r.status, RowStatus::Changed | RowStatus::Unchanged))
+    {
+        crate::metadata::compile_changes(inventory, &mut rows, &evaluated.recipe, &mut groups)?;
+    }
     let counts = PlanCounts::from_rows(&rows)?;
     let issues = rows.iter().flat_map(|r| r.issues.clone()).collect();
     Ok(RenamePlan {

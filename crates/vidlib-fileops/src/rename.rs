@@ -132,7 +132,22 @@ pub fn execute(
                     )?;
                 }
                 if !matches!(step.action, ExecutionAction::RenameEntry { .. }) {
-                    journal.intent(op, step)?;
+                    let before = match crate::metadata::prepare(&journal.operation(op)?, step, fs) {
+                        Ok(before) => before,
+                        Err(mut error) => {
+                            error.operation_id = Some(op);
+                            error.step_id = Some(step.id);
+                            error.item_id = Some(step.entry_id);
+                            report.failure = Some(error);
+                            report.state = OperationState::RecoveryRequired;
+                            return Ok(());
+                        }
+                    };
+                    if let Some(before) = before {
+                        journal.intent_metadata(op, step, &before)?;
+                    } else {
+                        journal.intent(op, step)?;
+                    }
                     attempted = true;
                     let record = journal.operation(op)?;
                     match crate::copy::effect(&record, step, fs, control) {

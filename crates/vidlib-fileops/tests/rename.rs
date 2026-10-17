@@ -797,7 +797,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
 }
 #[test]

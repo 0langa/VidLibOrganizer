@@ -8,19 +8,23 @@ use vidlib_inventory::*;
 /// Native effects with process termination at externally observable phase seams.
 pub struct CopyFs {
     pub native: PlatformFs,
+    pub metadata_observation: Option<(PathBuf, FileStamp)>,
     pub boundary: String,
     pub creates: Cell<usize>,
     pub cancel: Option<JobControl>,
     fired: Cell<bool>,
+    metadata_calls: usize,
 }
 impl CopyFs {
     pub fn new(boundary: &str) -> Self {
         Self {
             native: PlatformFs::default(),
+            metadata_observation: None,
             boundary: boundary.into(),
             creates: Cell::new(0),
             cancel: None,
             fired: Cell::new(false),
+            metadata_calls: 0,
         }
     }
     fn replace_parent(&self, path: &Path, boundary: &str) {
@@ -60,6 +64,18 @@ impl CopyFs {
 impl Filesystem for CopyFs {
     fn capture_namespace(&self, g: &GrantSet, c: &[PathBuf]) -> Result<NamespaceSnapshot, OpError> {
         let mut snapshot = self.native.capture_namespace(g, c)?;
+        if let Some((path, stamp)) = &self.metadata_observation {
+            for parent in &mut snapshot.parents {
+                if parent.parent_path == *path {
+                    parent.stamp = stamp.clone();
+                }
+                for entry in &mut parent.entries {
+                    if entry.absolute_path == *path {
+                        entry.stamp = stamp.clone();
+                    }
+                }
+            }
+        }
         if self.boundary == "changed-descendant-attributes" && self.creates.get() > 0 {
             for parent in &mut snapshot.parents {
                 for entry in &mut parent.entries {
@@ -82,6 +98,11 @@ impl Filesystem for CopyFs {
     }
     fn inspect(&self, p: &Path) -> Result<FileObservation, OpError> {
         let mut observation = self.native.inspect(p)?;
+        if let Some((path, stamp)) = &self.metadata_observation {
+            if path == p {
+                observation.stamp = stamp.clone();
+            }
+        }
         if self.boundary == "changed-directory-attributes"
             && observation.kind == EntryKind::Directory
             && p.file_name().is_some_and(|n| n == "sub")
@@ -91,6 +112,21 @@ impl Filesystem for CopyFs {
         Ok(observation)
     }
     fn verify(&self, p: &Path, s: &FileStamp) -> Result<FileObservation, OpError> {
+        if self
+            .metadata_observation
+            .as_ref()
+            .is_some_and(|(path, _)| path == p)
+        {
+            let actual = self.inspect(p)?;
+            if actual.stamp != *s {
+                return Err(OpError::new(
+                    ErrorCode::StaleState,
+                    Phase::Verify,
+                    "injected metadata poststate differs",
+                ));
+            }
+            return Ok(actual);
+        }
         self.native.verify(p, s)
     }
     fn rename_reviewed(&mut self, r: &RenameRequest<'_>) -> Result<MutationOutcome, OpError> {
@@ -262,8 +298,20 @@ impl Filesystem for CopyFs {
         s: &FileStamp,
         u: &MetadataUpdate,
     ) -> Result<MutationOutcome, OpError> {
+        self.metadata_calls += 1;
+        if self.boundary == "metadata-second-fail" && self.metadata_calls == 2 {
+            return Err(OpError::new(
+                ErrorCode::Io,
+                Phase::Metadata,
+                "injected second-field failure",
+            ));
+        }
+        if self.metadata_calls == 2 {
+            self.at("before-second-metadata");
+        }
         self.at("before-metadata");
         let result = self.native.set_metadata(p, s, u)?;
+        self.at(&format!("after-metadata-{}", self.metadata_calls));
         self.at("after-metadata");
         Ok(result)
     }

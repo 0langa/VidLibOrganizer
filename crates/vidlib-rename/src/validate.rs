@@ -25,12 +25,6 @@ pub(crate) fn validate_batch(
 ) -> Result<(), RenameError> {
     let invalid = |message| RenameError::new(RenameErrorCode::InvalidInventory, message);
     batch.recipe.validate()?;
-    if !batch.recipe.metadata_changes.is_empty() {
-        return Err(RenameError::new(
-            RenameErrorCode::UnsupportedConfiguration,
-            "metadata effects require their owning compiler",
-        ));
-    }
     if inventory.id != batch.inventory_id
         || inventory.generation != batch.generation
         || batch.recipe.revision != batch.recipe_revision
