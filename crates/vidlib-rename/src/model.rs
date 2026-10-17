@@ -23,6 +23,11 @@ pub enum RenameErrorCode {
     InvalidPlanRef,
     InvalidConfirmation,
     ArithmeticOverflow,
+    InvalidNamespace,
+    Collision,
+    ProtectedEntry,
+    InvalidPath,
+    IncompleteCoverage,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenameError {
@@ -142,6 +147,7 @@ pub struct PlanIssue {
 /// Backend-only. Serialize `to_dto()` for UI; native paths never cross that boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanRow {
+    pub carried_descendants: u64,
     pub entry_id: EntryId,
     pub group_id: GroupId,
     pub primary_id: EntryId,
@@ -158,6 +164,8 @@ pub struct PlanRow {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRowDto {
+    #[serde(with = "vidlib_inventory::exact::u64_decimal")]
+    pub carried_descendants: u64,
     pub entry_id: EntryId,
     pub group_id: GroupId,
     pub primary_id: EntryId,
@@ -175,6 +183,7 @@ pub struct PlanRowDto {
 }
 #[derive(Clone, Debug)]
 pub struct EvaluatedBatch {
+    pub recipe: RecipeV1,
     pub inventory_id: InventoryId,
     pub generation: u64,
     pub recipe_revision: u64,
@@ -206,6 +215,9 @@ impl EvaluatedBatch {
 /// serializable to UI, and never imports a filesystem executor.
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
+    /// Recheck under the executor write lease before the first effect. Each
+    /// moving/creating step additionally requires an absent target at mutation.
+    pub expected_namespace: vidlib_inventory::NamespaceSnapshot,
     pub groups: Vec<ExecutionGroup>,
     pub provenance: InspectionProvenance,
 }
@@ -392,6 +404,7 @@ impl PlanStore {
             || provenance.inventory.id != plan.inventory_id
             || provenance.inventory.generation != plan.generation
             || provenance.recipe.revision != plan.recipe_revision
+            || provenance.grants != plan.grants
             || provenance.frozen_inputs != plan.frozen_inputs
             || plan.frozen_inputs.inventory_id != plan.inventory_id
             || plan.frozen_inputs.generation != plan.generation
@@ -419,7 +432,13 @@ impl PlanStore {
             })
     }
     pub fn confirm(&mut self, version: PlanRef, nonce: String) -> Result<(), RenameError> {
-        self.current(version)?;
+        let plan = self.current(version)?;
+        if plan.counts.blocked != 0 || plan.counts.needs_review != 0 || !plan.issues.is_empty() {
+            return Err(RenameError::new(
+                RenameErrorCode::InvalidConfirmation,
+                "complete plan contains unresolved issues",
+            ));
+        }
         if nonce.is_empty() || !self.used_nonces.insert(nonce.clone()) {
             return Err(RenameError::new(
                 RenameErrorCode::InvalidConfirmation,
@@ -457,6 +476,7 @@ impl PlanStore {
 impl PlanRow {
     pub fn to_dto(&self) -> PlanRowDto {
         PlanRowDto {
+            carried_descendants: self.carried_descendants,
             entry_id: self.entry_id,
             group_id: self.group_id,
             primary_id: self.primary_id,

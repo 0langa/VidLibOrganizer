@@ -22,7 +22,6 @@ pub fn evaluate(
     validate_inputs(inventory, recipe, inputs)?;
     if recipe.companions != CompanionPolicy::None
         || recipe.destination != Destination::SameDirectory
-        || recipe.collision_policy != CollisionPolicy::Block
         || !recipe.metadata_changes.is_empty()
     {
         return Err(RenameError::new(
@@ -48,6 +47,7 @@ pub fn evaluate(
         let native_name = entry.absolute_path.file_name().and_then(|n| n.to_str());
         // Unsupported native names remain visible and blocked without lossy reconstruction.
         let mut row = PlanRow {
+            carried_descendants: 0,
             entry_id: *id,
             group_id: GroupId::from_uuid(*id.as_uuid()),
             primary_id: *id,
@@ -62,7 +62,10 @@ pub fn evaluate(
             explanations: vec![],
             issues: vec![],
         };
-        if native_name.is_none() || entry.kind != EntryKind::File || !entry.issues.is_empty() {
+        if native_name.is_none()
+            || !matches!(entry.kind, EntryKind::File | EntryKind::Directory)
+            || !entry.issues.is_empty()
+        {
             row.status = RowStatus::Blocked;
             row.issues.push(PlanIssue {
                 code: RenameErrorCode::UnsupportedName,
@@ -74,11 +77,14 @@ pub fn evaluate(
             continue;
         }
         let name = std::path::Path::new(native_name.expect("checked above"));
-        let mut stem = name
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_owned();
+        let mut stem = (if entry.kind == EntryKind::Directory {
+            name.file_name()
+        } else {
+            name.file_stem()
+        })
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_owned();
         for rule in recipe.rules.iter().filter(|r| r.enabled) {
             let before = stem.clone();
             if let RuleParameters::FixedStem { value } = &rule.parameters {
@@ -90,7 +96,10 @@ pub fn evaluate(
                 after: stem.clone(),
             });
         }
-        let new_name = match name.extension().and_then(|e| e.to_str()) {
+        let extension = (entry.kind == EntryKind::File)
+            .then(|| name.extension())
+            .flatten();
+        let new_name = match extension.and_then(|e| e.to_str()) {
             Some(ext) => format!("{stem}.{ext}"),
             None => stem,
         };
@@ -103,6 +112,7 @@ pub fn evaluate(
         rows.push(row);
     }
     Ok(EvaluatedBatch {
+        recipe: recipe.clone(),
         inventory_id: inventory.id,
         generation: inventory.generation,
         recipe_revision: recipe.revision,

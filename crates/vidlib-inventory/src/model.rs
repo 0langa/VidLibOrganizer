@@ -65,7 +65,7 @@ pub struct EntrySnapshot {
     pub observed_ns: i128,
     pub issues: Vec<InventoryIssue>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SourceGrant {
     pub id: GrantId,
     /// Backend native selection or validated manual input, never reconstructed UI text.
@@ -73,12 +73,12 @@ pub struct SourceGrant {
     pub path: PathBuf,
     pub source: GrantSource,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrantSource {
     NativeSelection,
     ValidatedManual,
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct GrantSet {
     pub grants: Vec<SourceGrant>,
 }
@@ -105,7 +105,7 @@ pub enum Support {
     #[default]
     Unknown,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemCapabilities {
     pub read_only: Option<bool>,
     pub physical_identity: Support,
@@ -238,7 +238,7 @@ pub enum NameViolation {
 }
 
 /// Exact names/observations captured per parent by a read-only platform adapter.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NamespaceEntry {
     pub name: NativePathRecord,
     #[serde(skip)]
@@ -247,8 +247,10 @@ pub struct NamespaceEntry {
     pub stamp: FileStamp,
     pub protected: bool,
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DirectoryFacts {
+    /// Identity of the observed directory; never inferred from its children.
+    pub stamp: FileStamp,
     #[serde(skip)]
     pub parent_path: PathBuf,
     pub source_grants: Vec<GrantId>,
@@ -273,6 +275,10 @@ pub const STAGING_NAME_PREFIX: &str = ".vidlib-staging";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProtectedPolicy {
+    /// Guard these exact directory roots and moves of their ancestors, while
+    /// allowing ordinary descendants to be renamed. Distinct from exclusions.
+    #[serde(skip)]
+    pub guarded_roots: Vec<PathBuf>,
     #[serde(skip)]
     pub protected_roots: Vec<PathBuf>,
     pub marker_name: String,
@@ -282,6 +288,7 @@ impl Default for ProtectedPolicy {
     fn default() -> Self {
         Self {
             protected_roots: Vec::new(),
+            guarded_roots: Vec::new(),
             marker_name: BLUEPRINT_MARKER_NAME.into(),
             staging_prefixes: vec![STAGING_NAME_PREFIX.into()],
         }
@@ -300,6 +307,15 @@ pub struct NamespaceSnapshot {
 }
 
 impl ProtectedPolicy {
+    pub fn guards_move(&self, path: &Path) -> bool {
+        self.excludes(path)
+            || self
+                .guarded_roots
+                .iter()
+                .chain(&self.protected_roots)
+                .any(|root| crate::path::conservative_path_is_within(root, path))
+    }
+
     /// Canonical exclusion rule shared by inventory and later operation adapters.
     /// Matching uses native units; display strings never participate in lookup.
     /// Case behavior is unknown here, so reserved ASCII variants are protected on
@@ -403,6 +419,74 @@ impl DirectoryFacts {
             {
                 return Err(ForbiddenCharacter);
             }
+        }
+        Ok(())
+    }
+}
+
+impl DirectoryFacts {
+    /// Compare native names under this parent's observed policy. Unknown Unicode
+    /// folding/normalization is an uncertainty, never permission to overwrite.
+    pub fn names_equal(
+        &self,
+        left: &std::ffi::OsStr,
+        right: &std::ffi::OsStr,
+    ) -> Result<bool, NameViolation> {
+        if left == right {
+            return Ok(true);
+        }
+        if self.normalization != NameNormalization::Preserved
+            || self.case_sensitivity == CaseSensitivity::Unknown
+        {
+            return Err(NameViolation::UnknownPolicy);
+        }
+        if self.case_sensitivity == CaseSensitivity::Sensitive {
+            return Ok(false);
+        }
+        #[cfg(windows)]
+        {
+            Ok(crate::path::conservative_name_matches(left, right, false))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            if !left.as_bytes().is_ascii() || !right.as_bytes().is_ascii() {
+                return Err(NameViolation::UnknownPolicy);
+            }
+            Ok(left.as_bytes().eq_ignore_ascii_case(right.as_bytes()))
+        }
+    }
+
+    /// Path length is measured in the same native units as component limits.
+    pub fn validate_path(&self, path: &Path) -> Result<(), NameViolation> {
+        let name = path.file_name().ok_or(NameViolation::InvalidComponent)?;
+        self.validate_name(&crate::encode_path(Path::new(name)))?;
+        if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(NameViolation::InvalidComponent);
+        }
+        #[cfg(windows)]
+        if path.components().any(|c| matches!(c, Component::Prefix(p) if !matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::UNC(_, _) | std::path::Prefix::VerbatimDisk(_) | std::path::Prefix::VerbatimUNC(_, _)))) {
+            return Err(NameViolation::InvalidComponent);
+        }
+        if self.name_policy == NamePolicy::Windows {
+            for component in path.components() {
+                if let Component::Normal(name) = component {
+                    self.validate_name(&crate::encode_path(Path::new(name)))?;
+                }
+            }
+        }
+        let record = crate::encode_path(path);
+        let units = record.bytes.len()
+            / if record.platform == crate::PathPlatform::WindowsUtf16Le {
+                2
+            } else {
+                1
+            };
+        if self
+            .max_path_units
+            .is_some_and(|limit| units as u64 > limit)
+        {
+            return Err(NameViolation::TooLong);
         }
         Ok(())
     }

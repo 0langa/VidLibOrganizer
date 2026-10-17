@@ -310,6 +310,7 @@ fn plan_fixture() -> (tempfile::TempDir, RenamePlan) {
         revision: 1,
     };
     let execution = ExecutionPlan {
+        expected_namespace: Default::default(),
         groups: vec![],
         provenance: InspectionProvenance {
             approved_plan: version,

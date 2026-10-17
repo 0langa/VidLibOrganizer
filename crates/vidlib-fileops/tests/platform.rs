@@ -88,6 +88,7 @@ fn directory_case_policy_is_per_parent() {
     assert_eq!(snapshot.parents.len(), 2);
     for (facts, expected) in snapshot.parents.iter().zip([&first, &second]) {
         assert_eq!(&facts.parent_path, expected);
+        assert_eq!(facts.stamp.physical_id, stamp(expected).physical_id);
         assert_eq!(facts.case_sensitivity, CaseSensitivity::Sensitive);
         assert_eq!(facts.entries.len(), 1);
         assert!(facts.children_complete);

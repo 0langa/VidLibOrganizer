@@ -5,3 +5,8 @@ pub mod recipe;
 pub use evaluate::evaluate;
 pub use model::*;
 pub use recipe::*;
+
+pub mod graph;
+pub use graph::plan;
+
+pub mod validate;

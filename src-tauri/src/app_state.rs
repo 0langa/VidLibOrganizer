@@ -196,6 +196,7 @@ mod tests {
             frozen_inputs: inputs.clone(),
             grants: GrantSet::default(),
             execution: ExecutionPlan {
+                expected_namespace: Default::default(),
                 groups: vec![],
                 provenance: InspectionProvenance {
                     approved_plan: version,

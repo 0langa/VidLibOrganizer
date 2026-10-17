@@ -367,6 +367,7 @@ impl Filesystem for PlatformFs {
             let directory = native::directory(path)?;
             let before = native::observation(&directory)?;
             let mut facts = native::facts(&directory)?;
+            facts.stamp = before.stamp.clone();
             facts.parent_path = path.to_owned();
             facts.source_grants = source_grants;
             let listing = native::listing(&directory)?;
