@@ -197,7 +197,11 @@ fn validate_path(path: &Path) -> Result<(), OpError> {
     }
     Ok(())
 }
-fn check_stamp(actual: &FileStamp, expected: &FileStamp, phase: Phase) -> Result<(), OpError> {
+pub(crate) fn check_stamp(
+    actual: &FileStamp,
+    expected: &FileStamp,
+    phase: Phase,
+) -> Result<(), OpError> {
     // Access time can change as a consequence of our own verified content read.
     // Creation time, when supplied, must remain available and equal.
     if expected.physical_id.is_none()

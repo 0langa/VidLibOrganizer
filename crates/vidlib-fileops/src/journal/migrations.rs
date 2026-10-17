@@ -49,6 +49,11 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
         conn.prepare("SELECT operation_id,group_id FROM recovery_restore LIMIT 0")
             .map_err(|_| unsupported())?;
     }
+    if version >= 7 {
+        expected.push((7, format!("{:x}", md5::compute(schema::V7_SQL))));
+        conn.prepare("SELECT operation_id,original_operation FROM operation_inverses LIMIT 0")
+            .map_err(|_| unsupported())?;
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -149,6 +154,14 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
         tx.execute(
             "INSERT INTO schema_migrations(version,checksum) VALUES(6,?1)",
             [format!("{:x}", md5::compute(schema::V6_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 7 {
+        tx.execute_batch(schema::V7_SQL).map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(7,?1)",
+            [format!("{:x}", md5::compute(schema::V7_SQL))],
         )
         .map_err(super::sql_error)?;
     }

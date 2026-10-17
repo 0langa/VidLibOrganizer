@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 6;
+pub(super) const VERSION: i64 = 7;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -181,6 +181,7 @@ pub(super) fn inspection(plan: &ExecutionPlan) -> Result<serde_json::Value, OpEr
     // The inventory's public Serialize intentionally omits absolute paths. Keep
     // exact native supplements here for inspection; never reconstruct from UI text.
     Ok(json!({
+        "inverse_of": plan.inverse_of,
         "expected_namespace": namespace_inspection(&plan.expected_namespace)?,
         "approved_plan": p.approved_plan, "inventory": p.inventory, "recipe": p.recipe,
         "frozen_inputs": p.frozen_inputs, "namespace_epoch": p.namespace_epoch.to_string(), "policy_epoch": p.policy_epoch.to_string(),
@@ -420,4 +421,11 @@ CREATE TABLE recovery_effects(operation_id TEXT NOT NULL, original_step TEXT NOT
 // reader must reject this protocol version rather than ignore the selection.
 pub(super) const V6_SQL: &str = r#"
 CREATE TABLE recovery_restore(operation_id TEXT PRIMARY KEY REFERENCES operations(id), group_id TEXT);
+"#;
+
+// New readers validate historical inverse lineage at begin; older readers must
+// reject these journals rather than treating inverse effects as new originals.
+pub(super) const V7_SQL: &str = r#"
+CREATE TABLE operation_inverses(operation_id TEXT PRIMARY KEY REFERENCES operations(id), original_operation TEXT NOT NULL REFERENCES operations(id));
+CREATE INDEX inverses_by_original ON operation_inverses(original_operation);
 "#;

@@ -186,6 +186,7 @@ mod tests {
             revision: 1,
         };
         RenamePlan {
+            inverse_of: None,
             version,
             inventory_id: inventory.id,
             generation: 1,
@@ -196,6 +197,7 @@ mod tests {
             frozen_inputs: inputs.clone(),
             grants: GrantSet::default(),
             execution: ExecutionPlan {
+                inverse_of: None,
                 expected_namespace: Default::default(),
                 groups: vec![],
                 provenance: InspectionProvenance {

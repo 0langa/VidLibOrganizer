@@ -310,6 +310,7 @@ fn plan_fixture() -> (tempfile::TempDir, RenamePlan) {
         revision: 1,
     };
     let execution = ExecutionPlan {
+        inverse_of: None,
         expected_namespace: Default::default(),
         groups: vec![],
         provenance: InspectionProvenance {
@@ -323,6 +324,7 @@ fn plan_fixture() -> (tempfile::TempDir, RenamePlan) {
         },
     };
     let plan = RenamePlan {
+        inverse_of: None,
         version,
         inventory_id: batch.inventory_id,
         generation: batch.generation,

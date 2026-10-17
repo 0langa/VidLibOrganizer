@@ -48,6 +48,7 @@ pub fn plan(
     let counts = PlanCounts::from_rows(&rows)?;
     let issues = rows.iter().flat_map(|r| r.issues.clone()).collect();
     Ok(RenamePlan {
+        inverse_of: None,
         version,
         inventory_id: evaluated.inventory_id,
         generation: evaluated.generation,
@@ -56,6 +57,7 @@ pub fn plan(
         counts,
         issues,
         execution: ExecutionPlan {
+            inverse_of: None,
             groups,
             expected_namespace: namespace.clone(),
             provenance: InspectionProvenance {

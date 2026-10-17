@@ -52,7 +52,8 @@ pub fn execute(
         namespace: provenance.namespace_epoch,
         policy: provenance.policy_epoch,
     })?;
-    if plan.version != provenance.approved_plan
+    if plan.inverse_of != plan.execution.inverse_of
+        || plan.version != provenance.approved_plan
         || plan.inventory_id != provenance.inventory.id
         || plan.generation != provenance.inventory.generation
         || plan.recipe_revision != provenance.recipe.revision

@@ -31,6 +31,7 @@ fn fixture() -> (tempfile::TempDir, ExecutionPlan) {
         },
     };
     let plan = ExecutionPlan {
+        inverse_of: None,
         expected_namespace: Default::default(),
         groups: vec![ExecutionGroup {
             id: group,

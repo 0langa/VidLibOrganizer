@@ -66,7 +66,7 @@ pub(super) fn phase(action: &ExecutionAction) -> CompletedPhase {
         }
     }
 }
-pub(super) fn rebase(path: &mut PathBuf, source: &Path, target: &Path) {
+pub(crate) fn rebase(path: &mut PathBuf, source: &Path, target: &Path) {
     if let Ok(suffix) = path.strip_prefix(source) {
         *path = if suffix.as_os_str().is_empty() {
             target.to_path_buf()
@@ -75,7 +75,7 @@ pub(super) fn rebase(path: &mut PathBuf, source: &Path, target: &Path) {
         };
     }
 }
-pub(super) fn parent_map(
+pub(crate) fn parent_map(
     op: &PendingOperation,
     before: Option<StepId>,
 ) -> Result<Vec<(PathBuf, PhysicalId)>, OpError> {
@@ -375,59 +375,7 @@ pub(super) fn verified_material(
     {
         return Err(error("compensation material or identity changed"));
     }
-    let values = op.inspection["expected_namespace"]["parents"]
-        .as_array()
-        .ok_or_else(|| error("directory namespace evidence unavailable"))?;
-    let native_path = |value: &serde_json::Value| -> Result<PathBuf, OpError> {
-        let record: NativePathRecord = serde_json::from_value(value.clone())
-            .map_err(|_| error("invalid native namespace path"))?;
-        decode_path(&record).map_err(|_| error("native namespace path unavailable"))
-    };
-    let mut directories = parent_map(op, op.steps.first().map(|s| s.step.id))?;
-    let mut entries = std::collections::BTreeMap::new();
-    for parent in values {
-        if parent["children_complete"] != true {
-            return Err(error("directory namespace was incomplete"));
-        }
-        for entry in parent["entries"]
-            .as_array()
-            .ok_or_else(|| error("missing directory entries"))?
-        {
-            let stamp: FileStamp = serde_json::from_value(entry["stamp"].clone())
-                .map_err(|_| error("invalid namespace stamp"))?;
-            let kind: vidlib_inventory::EntryKind = serde_json::from_value(entry["kind"].clone())
-                .map_err(|_| error("invalid namespace kind"))?;
-            entries.insert(native_path(&entry["absolute_path"])?, (stamp, kind));
-        }
-    }
-    let mut changed = Vec::new();
-    for pending in op
-        .steps
-        .iter()
-        .chain(op.recovery_effects.iter().map(|e| &e.inverse))
-        .filter(|s| !s.receipts.is_empty())
-    {
-        let ExecutionAction::RenameEntry { source, target, .. } = &pending.step.action else {
-            return Err(error("directory refresh lacks phase namespace evidence"));
-        };
-        for (directory, id) in &directories {
-            if Some(directory.as_path()) == source.path.parent()
-                || Some(directory.as_path()) == target.parent()
-            {
-                changed.push(id.clone());
-            }
-        }
-        entries = entries
-            .into_iter()
-            .map(|(mut path, value)| {
-                rebase(&mut path, &source.path, target);
-                (path, value)
-            })
-            .collect();
-        for (directory, _) in &mut directories {
-            rebase(directory, &source.path, target);
-        }
-    }
+    let (directories, entries, changed) = transformed_namespace(op)?;
     let identity = expected
         .physical_id
         .as_ref()
@@ -448,7 +396,11 @@ pub(super) fn verified_material(
     {
         grants.grants.push(vidlib_inventory::SourceGrant {
             id: serde_json::from_value(value["id"].clone()).map_err(|_| error("invalid grant"))?,
-            path: native_path(&value["path"])?,
+            path: decode_path(
+                &serde_json::from_value::<NativePathRecord>(value["path"].clone())
+                    .map_err(|_| error("invalid grant path"))?,
+            )
+            .map_err(|_| error("unavailable grant path"))?,
             source: serde_json::from_value(value["source"].clone())
                 .map_err(|_| error("invalid grant source"))?,
         });
@@ -510,4 +462,68 @@ pub(super) fn verified_material(
 
 pub(super) fn reserved(op: &PendingOperation, path: &Path) -> bool {
     op.steps.iter().any(|s| matches!(&s.step.action,ExecutionAction::RenameEntry{target,temporary:true,..} if target==path))
+}
+
+/// Replay factual original and compensation effects, never just effective step
+/// labels: a compensated original has both a forward and an inverse receipt.
+pub(crate) type NamespaceEvidence = (
+    Vec<(PathBuf, PhysicalId)>,
+    std::collections::BTreeMap<PathBuf, (FileStamp, vidlib_inventory::EntryKind)>,
+    Vec<PhysicalId>,
+);
+pub(crate) fn transformed_namespace(op: &PendingOperation) -> Result<NamespaceEvidence, OpError> {
+    let values = op.inspection["expected_namespace"]["parents"]
+        .as_array()
+        .ok_or_else(|| error("directory namespace evidence unavailable"))?;
+    let native_path = |value: &serde_json::Value| -> Result<PathBuf, OpError> {
+        let record: NativePathRecord = serde_json::from_value(value.clone())
+            .map_err(|_| error("invalid native namespace path"))?;
+        decode_path(&record).map_err(|_| error("native namespace path unavailable"))
+    };
+    let mut directories = parent_map(op, op.steps.first().map(|s| s.step.id))?;
+    let mut entries = std::collections::BTreeMap::new();
+    for parent in values {
+        if parent["children_complete"] != true {
+            return Err(error("directory namespace was incomplete"));
+        }
+        for entry in parent["entries"]
+            .as_array()
+            .ok_or_else(|| error("missing directory entries"))?
+        {
+            let stamp: FileStamp = serde_json::from_value(entry["stamp"].clone())
+                .map_err(|_| error("invalid namespace stamp"))?;
+            let kind: vidlib_inventory::EntryKind = serde_json::from_value(entry["kind"].clone())
+                .map_err(|_| error("invalid namespace kind"))?;
+            entries.insert(native_path(&entry["absolute_path"])?, (stamp, kind));
+        }
+    }
+    let mut changed = Vec::new();
+    for pending in op
+        .steps
+        .iter()
+        .chain(op.recovery_effects.iter().map(|e| &e.inverse))
+        .filter(|s| !s.receipts.is_empty())
+    {
+        let ExecutionAction::RenameEntry { source, target, .. } = &pending.step.action else {
+            return Err(error("directory refresh lacks phase namespace evidence"));
+        };
+        for (directory, id) in &directories {
+            if Some(directory.as_path()) == source.path.parent()
+                || Some(directory.as_path()) == target.parent()
+            {
+                changed.push(id.clone());
+            }
+        }
+        entries = entries
+            .into_iter()
+            .map(|(mut path, value)| {
+                rebase(&mut path, &source.path, target);
+                (path, value)
+            })
+            .collect();
+        for (directory, _) in &mut directories {
+            rebase(directory, &source.path, target);
+        }
+    }
+    Ok((directories, entries, changed))
 }

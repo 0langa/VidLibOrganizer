@@ -3,7 +3,9 @@ use crate::{events::*, platform::Durability, ErrorCode, OpError, Phase};
 mod migrations;
 mod recovery;
 mod schema;
-use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use vidlib_inventory::{ids::*, FileStamp, NativePathRecord};
@@ -51,6 +53,10 @@ pub struct PendingStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingOperation {
     pub operation_id: OperationId,
+    pub inverse_of: Option<OperationId>,
+    pub history_visible: bool,
+    /// Pending inverses or inverses retaining completed effects revoke replay.
+    pub active_inverses: Vec<OperationId>,
     pub state: OperationState,
     pub steps: Vec<PendingStep>,
     /// Inspection-only snapshot. Recovery authority resides in compiled steps.
@@ -73,6 +79,29 @@ pub struct RecoveryEffect {
     pub target_parent: vidlib_inventory::PhysicalId,
 }
 pub type OperationRecord = PendingOperation;
+/// Stable keyset cursor with a high-water mark; insertion/removal does not
+/// shift subsequent pages. Exact decimal strings are used at JSON boundaries.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryCursor {
+    #[serde(with = "vidlib_inventory::exact::u64_decimal")]
+    after: u64,
+    #[serde(with = "vidlib_inventory::exact::u64_decimal")]
+    through: u64,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct HistoryItem {
+    pub operation_id: OperationId,
+    pub state: OperationState,
+    pub inverse_of: Option<OperationId>,
+    #[serde(with = "vidlib_inventory::exact::u64_decimal")]
+    pub completed_steps: u64,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct HistoryPage {
+    pub items: Vec<HistoryItem>,
+    pub next_cursor: Option<HistoryCursor>,
+}
 pub use schema::StoredGroup as OperationGroup;
 /// Construct and use on its owning blocking thread. SQLite readers are separate
 /// connections; this handle is intentionally !Send and !Sync.
@@ -83,6 +112,90 @@ pub struct Journal {
     thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 impl Journal {
+    /// Read-only, bounded 200-row pages; inspection/receipt payloads load only
+    /// when a caller explicitly opens an operation record.
+    pub fn history(&self, cursor: Option<HistoryCursor>) -> Result<HistoryPage, OpError> {
+        let mut reader = self.reader()?;
+        let tx = reader.transaction().map_err(sql_error)?;
+        let cursor = match cursor {
+            Some(c) => c,
+            None => HistoryCursor {
+                after: 0,
+                through: tx
+                    .query_row("SELECT COALESCE(MAX(rowid),0) FROM operations", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .map_err(sql_error)? as u64,
+            },
+        };
+        let after =
+            i64::try_from(cursor.after).map_err(|_| invalid("history cursor out of range"))?;
+        let through =
+            i64::try_from(cursor.through).map_err(|_| invalid("history cursor out of range"))?;
+        if after > through {
+            return Err(invalid("invalid history cursor bounds"));
+        }
+        let values = {
+            let mut stmt=tx.prepare("SELECT o.rowid,o.id,o.state,i.original_operation,(SELECT COUNT(*) FROM steps s WHERE s.operation_id=o.id AND s.state='CompletionDurable' AND NOT EXISTS(SELECT 1 FROM recovery_effects e WHERE e.operation_id=o.id AND e.inverse_step=s.id)) FROM operations o JOIN history_visibility h ON h.operation_id=o.id AND h.visible=1 LEFT JOIN operation_inverses i ON i.operation_id=o.id WHERE o.rowid>?1 AND o.rowid<=?2 ORDER BY o.rowid LIMIT 201").map_err(sql_error)?;
+            let rows = stmt
+                .query_map(params![after, through], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? as u64,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, i64>(4)? as u64,
+                    ))
+                })
+                .map_err(sql_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
+        };
+        let next_cursor = (values.len() > 200).then(|| HistoryCursor {
+            after: values[199].0,
+            through: cursor.through,
+        });
+        let items = values
+            .into_iter()
+            .take(200)
+            .map(|(_, id, state, inverse, completed_steps)| {
+                Ok(HistoryItem {
+                    operation_id: parse_id(&id)?,
+                    state: from_json(&format!("\"{state}\""))?,
+                    inverse_of: inverse.map(|id| parse_id(&id)).transpose()?,
+                    completed_steps,
+                })
+            })
+            .collect::<Result<_, OpError>>()?;
+        tx.commit().map_err(sql_error)?;
+        Ok(HistoryPage { items, next_cursor })
+    }
+    /// Explicitly remove completed history visibility and revoke new Undo.
+    /// Durable receipts, recovery audits and original/inverse outbox delivery
+    /// remain independent. This is not a purge of execution evidence.
+    pub fn remove_history(&mut self, op: OperationId) -> Result<(), OpError> {
+        self.write(Some(op), None, |tx| {
+            let record = load_operation(tx, op)?;
+            if matches!(
+                record.state,
+                OperationState::Prepared
+                    | OperationState::Running
+                    | OperationState::RecoveryRequired
+            ) || record
+                .steps
+                .iter()
+                .chain(record.recovery_effects.iter().map(|e| &e.inverse))
+                .any(|s| matches!(s.state, StepState::IntentDurable | StepState::Unresolved))
+            {
+                return Err(recovery("unfinished history cannot be removed"));
+            }
+            tx.execute(
+                "UPDATE history_visibility SET visible=0 WHERE operation_id=?1",
+                [op.to_string()],
+            )
+            .map_err(sql_error)?;
+            Ok(())
+        })
+    }
     pub(crate) fn database_path(&self) -> &Path {
         &self.path
     }
@@ -150,7 +263,19 @@ impl Journal {
             .collect();
         let op = OperationId::new();
         self.write(Some(op), None, |tx| {
+            if let Some(original) = plan.inverse_of {
+                let original=load_operation(tx,original)?;
+                let canonical=crate::undo::plan_undo(&original,&plan.expected_namespace,plan.provenance.approved_plan)?;
+                if canonical.counts.blocked!=0 || canonical.counts.needs_review!=0
+                    || canonical.execution.groups.len()!=plan.groups.len()
+                    || canonical.execution.groups.iter().zip(&plan.groups).any(|(a,b)| a.id!=b.id || a.depends_on!=b.depends_on || a.steps!=b.steps) {
+                    return Err(invalid("inverse differs from retained historical receipts and reviewed namespace"));
+                }
+            }
             tx.execute("INSERT INTO operations(id,state,inspection,groups_json,approved_plan,inspection_version) VALUES(?1,'Prepared',?2,?3,?4,2)", params![op.to_string(), json(&inspection)?, json(&groups)?, json(&plan.provenance.approved_plan)?]).map_err(sql_error)?;
+            if let Some(original)=plan.inverse_of {
+                tx.execute("INSERT INTO operation_inverses(operation_id,original_operation) VALUES(?1,?2)",params![op.to_string(),original.to_string()]).map_err(sql_error)?;
+            }
             tx.execute("INSERT INTO history_visibility(operation_id) VALUES(?1)", [op.to_string()]).map_err(sql_error)?;
             for (sequence, step) in plan.groups.iter().flat_map(|g| &g.steps).enumerate() {
                 let sequence = i64::try_from(sequence).map_err(|_| invalid("too many steps"))?;
@@ -653,7 +778,38 @@ fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationR
         });
     }
     let recovery_effects = recovery::load_effects(connection, op, &mut steps)?;
+    let inverse_of: Option<String> = connection
+        .query_row(
+            "SELECT original_operation FROM operation_inverses WHERE operation_id=?1",
+            [op.to_string()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let history_visible = connection
+        .query_row(
+            "SELECT visible FROM history_visibility WHERE operation_id=?1",
+            [op.to_string()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .unwrap_or(false);
+    let active_inverses = {
+        let mut stmt=connection.prepare("SELECT o.id FROM operation_inverses i JOIN operations o ON o.id=i.operation_id WHERE i.original_operation=?1 AND (o.state IN ('Prepared','Running','RecoveryRequired') OR EXISTS(SELECT 1 FROM steps s WHERE s.operation_id=o.id AND s.state='CompletionDurable' AND NOT EXISTS(SELECT 1 FROM recovery_effects e WHERE e.operation_id=o.id AND e.inverse_step=s.id))) ORDER BY o.rowid").map_err(sql_error)?;
+        let rows = stmt
+            .query_map([op.to_string()], |r| r.get::<_, String>(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        rows.iter()
+            .map(|s| parse_id(s))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     Ok(PendingOperation {
+        inverse_of: inverse_of.map(|s| parse_id(&s)).transpose()?,
+        history_visible,
+        active_inverses,
         restore_context: recovery::load_restore_context(connection, op)?,
         recovery_effects,
         operation_id: op,

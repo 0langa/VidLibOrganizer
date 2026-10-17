@@ -14,7 +14,7 @@ use vidlib_inventory::{
 };
 use vidlib_rename::{EntryPrestate, ExecutionAction, ExecutionStep, ExpectedIdentity};
 
-mod evidence;
+pub(crate) mod evidence;
 use evidence::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

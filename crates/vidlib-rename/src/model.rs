@@ -215,6 +215,8 @@ impl EvaluatedBatch {
 /// serializable to UI, and never imports a filesystem executor.
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
+    /// Historical operation whose retained rename effects this plan reverses.
+    pub inverse_of: Option<OperationId>,
     /// Recheck under the executor write lease before the first effect. Each
     /// moving/creating step additionally requires an absent target at mutation.
     pub expected_namespace: vidlib_inventory::NamespaceSnapshot,
@@ -317,6 +319,7 @@ pub struct PlanCounts {
 }
 #[derive(Clone, Debug)]
 pub struct RenamePlan {
+    pub inverse_of: Option<OperationId>,
     pub version: PlanRef,
     pub inventory_id: InventoryId,
     pub generation: u64,
@@ -330,6 +333,7 @@ pub struct RenamePlan {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenamePlanDto {
+    pub inverse_of: Option<OperationId>,
     pub version: PlanRef,
     pub inventory_id: InventoryId,
     #[serde(with = "vidlib_inventory::exact::u64_decimal")]
@@ -361,6 +365,7 @@ impl PlanCounts {
 impl RenamePlan {
     pub fn to_dto(&self) -> RenamePlanDto {
         RenamePlanDto {
+            inverse_of: self.inverse_of,
             version: self.version,
             inventory_id: self.inventory_id,
             generation: self.generation,
@@ -396,7 +401,8 @@ impl PlanStore {
     }
     pub fn publish(&mut self, plan: RenamePlan) -> Result<(), RenameError> {
         let provenance = &plan.execution.provenance;
-        if plan.version.session_id != self.session_id
+        if plan.inverse_of != plan.execution.inverse_of
+            || plan.version.session_id != self.session_id
             || self
                 .last_revision
                 .is_some_and(|revision| plan.version.revision <= revision)
