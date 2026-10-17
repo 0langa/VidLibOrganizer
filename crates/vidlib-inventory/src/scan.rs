@@ -2,7 +2,7 @@ use crate::{ids::*, model::*, platform, *};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt, fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -19,18 +19,41 @@ pub struct DirectoryListing {
 /// errors and every observed name remain available to coverage consumers.
 pub trait InventoryFs {
     fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata>;
-    fn read_directory(&self, path: &Path) -> io::Result<DirectoryListing>;
+    fn read_directory(&self, path: &Path) -> io::Result<DirectoryListing> {
+        self.open_directory(path)?.read_directory()
+    }
+    fn open_directory(&self, path: &Path) -> io::Result<Box<dyn InventoryDirectory + '_>> {
+        platform::open_directory(path)
+    }
+    fn directory_is_current(&self, path: &Path, identity: &PhysicalId) -> bool {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return false;
+        };
+        kind(&metadata) == EntryKind::Directory
+            && platform::physical_id(path, &metadata).as_ref() == Some(identity)
+    }
     fn physical_id(&self, path: &Path, metadata: &fs::Metadata) -> Option<PhysicalId> {
         platform::physical_id(path, metadata)
     }
 }
+/// Child operations are relative to this live directory handle, never its
+/// display/absolute path. Implementations reject links/reparse points on open.
+pub trait InventoryDirectory {
+    fn observation(&self) -> io::Result<FileObservation>;
+    fn read_directory(&self) -> io::Result<DirectoryListing>;
+    fn observe_child(&self, name: &OsStr) -> io::Result<FileObservation>;
+    fn open_child_directory(&self, name: &OsStr) -> io::Result<Box<dyn InventoryDirectory + '_>>;
+}
+#[derive(Clone, Debug)]
+pub struct FileObservation {
+    pub kind: EntryKind,
+    pub stamp: FileStamp,
+}
+
 pub struct OsInventoryFs;
 impl InventoryFs for OsInventoryFs {
     fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
         fs::symlink_metadata(path)
-    }
-    fn read_directory(&self, path: &Path) -> io::Result<DirectoryListing> {
-        platform::read_directory(path)
     }
 }
 #[derive(Debug)]
@@ -101,11 +124,13 @@ pub fn scan_with_fs(
             .then(left.path.cmp(&right.path))
     });
     for root in &mut roots {
-        if scanner.seen_directories.contains_key(&root.path)
-            || scanner.seen_entries.contains(&root.path)
-        {
-            continue;
-        }
+        // A binding's previous result is not an observation from this scan.
+        root.evidence.observed_identity = None;
+        root.evidence.state = if root.evidence.expected_identity.is_some() {
+            RootEvidenceState::Unavailable
+        } else {
+            RootEvidenceState::Absent
+        };
         if scanner.protected(&root.path) {
             scanner.empty_scope(root, &root.path, CoverageOutcome::Excluded, None);
             continue;
@@ -146,11 +171,36 @@ pub fn scan_with_fs(
                     scanner.empty_scope(root, &root.path, CoverageOutcome::Failed, Some(mismatch));
                     continue;
                 }
+                if let Some(index) = scanner.seen_directories.get(&root.path) {
+                    let mut coverage = scanner.coverage[*index].clone();
+                    coverage.root_id = root.id;
+                    coverage.relative_directory = None;
+                    scanner.coverage.push(coverage);
+                    continue;
+                }
+                if scanner.seen_entries.contains(&root.path) {
+                    continue;
+                }
                 if kind(&metadata) == EntryKind::Directory {
-                    scanner.directory(root, &root.path, &root.path);
+                    let expected = FileObservation {
+                        kind: EntryKind::Directory,
+                        stamp: platform::stamp(&metadata, identity),
+                    };
+                    scanner.directory(
+                        root,
+                        &root.path,
+                        &root.path,
+                        fs.open_directory(&root.path),
+                        &expected,
+                        &[],
+                    );
                 } else {
                     let base = root.path.parent().unwrap_or(&root.path);
-                    scanner.entry(root, base, &root.path, Ok(metadata));
+                    let observation = FileObservation {
+                        kind: kind(&metadata),
+                        stamp: platform::stamp(&metadata, identity),
+                    };
+                    scanner.entry(root, base, &root.path, Ok(observation));
                 }
             }
             Err(error) => {
@@ -224,14 +274,22 @@ impl Scanner<'_> {
             },
             issues,
         });
-        self.seen_directories.insert(directory.to_path_buf(), index);
         index
     }
-    fn directory(&mut self, root: &RootBinding, base: &Path, directory: &Path) -> bool {
+    fn directory(
+        &mut self,
+        root: &RootBinding,
+        base: &Path,
+        directory: &Path,
+        opened: io::Result<Box<dyn InventoryDirectory + '_>>,
+        expected: &FileObservation,
+        ancestors: &[(PathBuf, PhysicalId)],
+    ) -> bool {
         if let Some(index) = self.seen_directories.get(directory) {
             return self.coverage[*index].subtree_complete;
         }
         let index = self.empty_scope(root, directory, CoverageOutcome::Failed, None);
+        self.seen_directories.insert(directory.to_path_buf(), index);
         if self.control.is_cancelled() {
             self.finish_scope(
                 index,
@@ -245,7 +303,57 @@ impl Scanner<'_> {
             );
             return false;
         }
-        let mut listing = match self.fs.read_directory(directory) {
+        let handle = match opened {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.finish_scope(
+                    index,
+                    false,
+                    CoverageOutcome::Failed,
+                    vec![issue(
+                        IssueCode::ListingFailed,
+                        relative(directory, base),
+                        error.to_string(),
+                    )],
+                );
+                return false;
+            }
+        };
+        let identity = handle
+            .observation()
+            .ok()
+            .filter(|observed| observed.kind == EntryKind::Directory)
+            .and_then(|observed| observed.stamp.physical_id)
+            .filter(|identity| Some(identity) == expected.stamp.physical_id.as_ref());
+        let Some(identity) = identity else {
+            self.finish_scope(
+                index,
+                false,
+                CoverageOutcome::Failed,
+                vec![issue(
+                    IssueCode::DirectoryChanged,
+                    relative(directory, base),
+                    "cannot keep directory identity consistent between stat and open",
+                )],
+            );
+            return false;
+        };
+        let mut anchors = ancestors.to_vec();
+        anchors.push((directory.to_path_buf(), identity));
+        if !self.anchors_current(&anchors) {
+            self.finish_scope(
+                index,
+                false,
+                CoverageOutcome::Failed,
+                vec![issue(
+                    IssueCode::DirectoryChanged,
+                    relative(directory, base),
+                    "observed directory or ancestor no longer matches the live namespace",
+                )],
+            );
+            return false;
+        }
+        let mut listing = match handle.read_directory() {
             Ok(listing) => listing,
             Err(error) => {
                 self.finish_scope(
@@ -280,7 +388,10 @@ impl Scanner<'_> {
                 complete = false;
                 break;
             }
-            // The adapter seam also has to obey the immediate-child contract.
+            if !self.anchors_current(&anchors) {
+                complete = false;
+                break;
+            }
             let name_path = Path::new(&name);
             if name_path.components().count() != 1
                 || !matches!(name_path.components().next(), Some(Component::Normal(_)))
@@ -294,20 +405,39 @@ impl Scanner<'_> {
                 ));
                 continue;
             }
-            let path = directory.join(name);
+            let path = directory.join(&name);
             if self.protected(&path) {
                 continue;
             }
-            let metadata = self.fs.symlink_metadata(&path);
-            let is_directory = metadata
+            let observation = handle.observe_child(&name);
+            let child_directory = observation
                 .as_ref()
-                .is_ok_and(|m| kind(m) == EntryKind::Directory);
-            if !self.entry(root, base, &path, metadata) {
+                .ok()
+                .filter(|observed| observed.kind == EntryKind::Directory)
+                .cloned();
+            if !self.entry(root, base, &path, observation) {
                 complete = false;
             }
-            if is_directory && !self.directory(root, base, &path) {
-                complete = false;
+            if let Some(expected) = child_directory {
+                if !self.directory(
+                    root,
+                    base,
+                    &path,
+                    handle.open_child_directory(&name),
+                    &expected,
+                    &anchors,
+                ) {
+                    complete = false;
+                }
             }
+        }
+        if !self.anchors_current(&anchors) {
+            complete = false;
+            issues.push(issue(
+                IssueCode::DirectoryChanged,
+                relative(directory, base),
+                "directory or ancestor changed during observation",
+            ));
         }
         let outcome = if self.control.is_cancelled() {
             complete = false;
@@ -324,6 +454,11 @@ impl Scanner<'_> {
         };
         self.finish_scope(index, complete, outcome, issues);
         complete
+    }
+    fn anchors_current(&self, anchors: &[(PathBuf, PhysicalId)]) -> bool {
+        anchors
+            .iter()
+            .all(|(path, identity)| self.fs.directory_is_current(path, identity))
     }
     fn finish_scope(
         &mut self,
@@ -344,7 +479,7 @@ impl Scanner<'_> {
         root: &RootBinding,
         base: &Path,
         path: &Path,
-        metadata: io::Result<fs::Metadata>,
+        metadata: io::Result<FileObservation>,
     ) -> bool {
         if !self.seen_entries.insert(path.to_path_buf()) {
             return metadata.is_ok();
@@ -360,13 +495,7 @@ impl Scanner<'_> {
         let mut issues = Vec::new();
         let complete = metadata.is_ok();
         let (kind, stamp) = match metadata {
-            Ok(metadata) => {
-                let kind = kind(&metadata);
-                (
-                    kind,
-                    platform::stamp(&metadata, self.fs.physical_id(path, &metadata)),
-                )
-            }
+            Ok(observed) => (observed.kind, observed.stamp),
             Err(error) => {
                 issues.push(issue(
                     IssueCode::StatFailed,
@@ -426,7 +555,7 @@ fn issue(
         message: message.into(),
     }
 }
-fn kind(metadata: &fs::Metadata) -> EntryKind {
+pub(crate) fn kind(metadata: &fs::Metadata) -> EntryKind {
     if metadata.file_type().is_symlink() {
         EntryKind::Symlink
     } else if platform::attributes(metadata).is_some_and(|attributes| attributes & 0x400 != 0) {
@@ -442,7 +571,7 @@ fn kind(metadata: &fs::Metadata) -> EntryKind {
 fn fingerprint(policy: &ProtectedPolicy) -> String {
     // A versioned, length-delimited exact policy encoding avoids hash collisions.
     let mut result = format!(
-        "inventory-filter-v1|marker:{}:{}",
+        "inventory-filter-v2|marker:{}:{}",
         policy.marker_name.len(),
         policy.marker_name
     );
@@ -464,4 +593,18 @@ fn fingerprint(policy: &ProtectedPolicy) -> String {
         }
     }
     result
+}
+
+pub(crate) fn validate_child_name(name: &OsStr) -> io::Result<()> {
+    let path = Path::new(name);
+    if path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+        || encode_path(path).validate_relative().is_err()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a single native child name",
+        ));
+    }
+    Ok(())
 }

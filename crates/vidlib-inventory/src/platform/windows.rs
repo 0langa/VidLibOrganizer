@@ -1,28 +1,53 @@
-use crate::PhysicalId;
-use std::{fs::Metadata, path::Path};
+use crate::{EntryKind, FileObservation, InventoryDirectory, PhysicalId};
+use std::{
+    ffi::{OsStr, OsString},
+    fs::{File, Metadata, OpenOptions},
+    io,
+    mem::{offset_of, size_of},
+    os::windows::{
+        ffi::OsStrExt,
+        ffi::OsStringExt,
+        fs::OpenOptionsExt,
+        io::{AsRawHandle, FromRawHandle},
+    },
+    path::Path,
+};
+use windows_sys::Wdk::{
+    Foundation::OBJECT_ATTRIBUTES,
+    Storage::FileSystem::{
+        NtCreateFile, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+    },
+};
+use windows_sys::Win32::{
+    Foundation::{RtlNtStatusToDosError, ERROR_NO_MORE_FILES, UNICODE_STRING},
+    Storage::FileSystem::{
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    },
+    System::IO::IO_STATUS_BLOCK,
+};
 
-pub(crate) fn physical_id(path: &Path, _metadata: &Metadata) -> Option<PhysicalId> {
-    use std::{
-        fs::OpenOptions,
-        os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-    let file = OpenOptions::new()
-        .access_mode(0)
+fn open_path(path: &Path, access: u32) -> io::Result<File> {
+    OpenOptions::new()
+        .access_mode(access)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .ok()?;
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // A live read-only handle is passed; the OS writes exactly this initialized structure.
+}
+pub(crate) fn physical_id(path: &Path, _metadata: &Metadata) -> Option<PhysicalId> {
+    identity(&open_path(path, 0).ok()?).ok()
+}
+fn identity(file: &File) -> io::Result<PhysicalId> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // The initialized output structure and read-only handle remain live through the call.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-        return None;
+        return Err(io::Error::last_os_error());
     }
     let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-    Some(PhysicalId {
+    Ok(PhysicalId {
         platform: crate::PathPlatform::WindowsUtf16Le,
         volume_identity: info.dwVolumeSerialNumber.to_be_bytes().to_vec(),
         file_identity: index.to_be_bytes().to_vec(),
@@ -32,44 +57,91 @@ pub(crate) fn attributes(metadata: &Metadata) -> Option<u32> {
     use std::os::windows::fs::MetadataExt;
     Some(metadata.file_attributes())
 }
-
-/// Enumerate the opened directory itself. Path-based FindFirstFile/read_dir
-/// would follow a directory reparse point swapped in after the earlier stat.
-pub(crate) fn read_directory(path: &Path) -> std::io::Result<crate::DirectoryListing> {
-    use std::{
-        ffi::OsString,
-        fs::OpenOptions,
-        io,
-        mem::{offset_of, size_of},
-        os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
-    };
-    use windows_sys::Win32::{
-        Foundation::ERROR_NO_MORE_FILES,
-        Storage::FileSystem::{
-            FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle,
-            GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
-        },
-    };
-    let file = OpenOptions::new()
-        .access_mode(FILE_LIST_DIRECTORY)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // The handle remains live throughout both metadata validation and enumeration.
-    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-        return Err(io::Error::last_os_error());
+fn observation(file: &File) -> io::Result<FileObservation> {
+    let metadata = file.metadata()?;
+    let kind = crate::scan::kind(&metadata);
+    let mut stamp = super::stamp(&metadata, Some(identity(file)?));
+    if kind != EntryKind::File {
+        stamp.size = None;
     }
-    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
-    {
+    Ok(FileObservation { kind, stamp })
+}
+pub(crate) fn open_directory(path: &Path) -> io::Result<Box<dyn InventoryDirectory>> {
+    directory(open_path(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?)
+}
+fn directory(file: File) -> io::Result<Box<dyn InventoryDirectory>> {
+    if observation(&file)?.kind != EntryKind::Directory {
         return Err(io::Error::other(
             "directory listing requires a non-reparse directory",
         ));
     }
+    Ok(Box::new(WindowsDirectory { file }))
+}
+struct WindowsDirectory {
+    file: File,
+}
+impl InventoryDirectory for WindowsDirectory {
+    fn observation(&self) -> io::Result<FileObservation> {
+        observation(&self.file)
+    }
+    fn read_directory(&self) -> io::Result<crate::DirectoryListing> {
+        read_directory(&self.file)
+    }
+    fn observe_child(&self, name: &OsStr) -> io::Result<FileObservation> {
+        observation(&open_relative(&self.file, name, FILE_READ_ATTRIBUTES)?)
+    }
+    fn open_child_directory(&self, name: &OsStr) -> io::Result<Box<dyn InventoryDirectory + '_>> {
+        directory(open_relative(
+            &self.file,
+            name,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        )?)
+    }
+}
+fn open_relative(parent: &File, name: &OsStr, access: u32) -> io::Result<File> {
+    crate::scan::validate_child_name(name)?;
+    let mut units: Vec<_> = name.encode_wide().collect();
+    let length = u16::try_from(units.len() * 2)
+        .map_err(|_| io::Error::other("native child name too long"))?;
+    let native_name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: units.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &native_name,
+        ..OBJECT_ATTRIBUTES::default()
+    };
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let mut handle = std::ptr::null_mut();
+    // RootDirectory anchors this single exact child name to the still-live parent
+    // handle. OPEN_REPARSE_POINT inspects the child itself; no absolute lookup occurs.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ));
+    }
+    // A successful synchronous NtCreateFile transfers one owned handle to File.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+fn read_directory(file: &File) -> io::Result<crate::DirectoryListing> {
     // u64 storage provides the alignment required by FILE_ID_BOTH_DIR_INFO.
     let mut buffer = vec![0u64; 8192];
     let buffer_bytes = buffer.len() * size_of::<u64>();

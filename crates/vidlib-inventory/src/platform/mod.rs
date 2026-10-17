@@ -30,6 +30,6 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 #[cfg(unix)]
-pub(crate) use unix::{attributes, physical_id, read_directory};
+pub(crate) use unix::{attributes, open_directory, physical_id};
 #[cfg(windows)]
-pub(crate) use windows::{attributes, physical_id, read_directory};
+pub(crate) use windows::{attributes, open_directory, physical_id};

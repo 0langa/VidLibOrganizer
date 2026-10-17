@@ -1,7 +1,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tempfile::{tempdir, TempDir};
 use vidlib_inventory::{
@@ -37,6 +37,8 @@ pub struct FaultFs {
     pub cancel_after_stat: Option<usize>,
     pub control: JobControl,
     pub stat_count: AtomicUsize,
+    pub swap_after_listing: Option<(PathBuf, PathBuf, PathBuf)>,
+    swapped: AtomicBool,
 }
 impl FaultFs {
     pub fn new(control: JobControl) -> Self {
@@ -47,11 +49,13 @@ impl FaultFs {
             cancel_after_stat: None,
             control,
             stat_count: AtomicUsize::new(0),
+            swap_after_listing: None,
+            swapped: AtomicBool::new(false),
         }
     }
 }
-impl InventoryFs for FaultFs {
-    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+impl FaultFs {
+    fn before_stat(&self, path: &Path) -> io::Result<()> {
         let count = self.stat_count.fetch_add(1, Ordering::SeqCst) + 1;
         if self.cancel_after_stat == Some(count) {
             self.control.cancel();
@@ -59,19 +63,75 @@ impl InventoryFs for FaultFs {
         if self.fail_stat.as_deref() == Some(path) {
             return Err(io::Error::other("injected stat failure"));
         }
-        fs::symlink_metadata(path)
+        Ok(())
     }
-    fn read_directory(&self, path: &Path) -> io::Result<DirectoryListing> {
-        if self.fail_listing.as_deref() == Some(path) {
-            return Err(io::Error::other("injected listing failure"));
-        }
-        let mut listing = vidlib_inventory::OsInventoryFs.read_directory(path)?;
+    fn after_listing(&self, path: &Path, listing: &mut DirectoryListing) -> io::Result<()> {
         if self.partial_listing.as_deref() == Some(path) {
             listing
                 .errors
                 .push("injected partial listing failure".into());
         }
+        if let Some((target, moved, external)) = &self.swap_after_listing {
+            if target == path && !self.swapped.swap(true, Ordering::SeqCst) {
+                fs::rename(target, moved)?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(external, target)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_dir(external, target)?;
+            }
+        }
+        Ok(())
+    }
+}
+impl InventoryFs for FaultFs {
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        self.before_stat(path)?;
+        fs::symlink_metadata(path)
+    }
+    fn open_directory(
+        &self,
+        path: &Path,
+    ) -> io::Result<Box<dyn vidlib_inventory::InventoryDirectory + '_>> {
+        Ok(Box::new(FaultDirectory {
+            adapter: self,
+            path: path.to_path_buf(),
+            inner: vidlib_inventory::OsInventoryFs.open_directory(path)?,
+        }))
+    }
+}
+struct FaultDirectory<'a> {
+    adapter: &'a FaultFs,
+    path: PathBuf,
+    inner: Box<dyn vidlib_inventory::InventoryDirectory + 'a>,
+}
+impl vidlib_inventory::InventoryDirectory for FaultDirectory<'_> {
+    fn observation(&self) -> io::Result<vidlib_inventory::FileObservation> {
+        self.inner.observation()
+    }
+    fn read_directory(&self) -> io::Result<DirectoryListing> {
+        if self.adapter.fail_listing.as_deref() == Some(&self.path) {
+            return Err(io::Error::other("injected listing failure"));
+        }
+        let mut listing = self.inner.read_directory()?;
+        self.adapter.after_listing(&self.path, &mut listing)?;
         Ok(listing)
+    }
+    fn observe_child(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> io::Result<vidlib_inventory::FileObservation> {
+        self.adapter.before_stat(&self.path.join(name))?;
+        self.inner.observe_child(name)
+    }
+    fn open_child_directory(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> io::Result<Box<dyn vidlib_inventory::InventoryDirectory + '_>> {
+        Ok(Box::new(FaultDirectory {
+            adapter: self.adapter,
+            path: self.path.join(name),
+            inner: self.inner.open_child_directory(name)?,
+        }))
     }
 }
 

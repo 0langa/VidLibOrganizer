@@ -333,3 +333,199 @@ fn os_directory_listing_refuses_directory_reparse_points() {
         .read_directory(&link)
         .is_err());
 }
+
+#[test]
+fn overlapping_bindings_validate_evidence_before_deduplicating_traversal() {
+    use vidlib_inventory::{IssueCode, PathPlatform, PhysicalId, RootEvidenceState};
+    let fixture = Fixture::new();
+    let mut nested = RootBinding::new(fixture.root().join("nested")).unwrap();
+    nested.evidence.expected_identity = Some(PhysicalId {
+        platform: PathPlatform::UnixBytes,
+        volume_identity: vec![0],
+        file_identity: vec![0],
+    });
+    nested.evidence.state = RootEvidenceState::Matches;
+    let nested_id = nested.id;
+    let mut request = fixture.request();
+    request.roots.push(nested);
+    let inventory = scan(&request, &JobControl::default()).unwrap();
+    let binding = inventory
+        .roots
+        .iter()
+        .find(|root| root.id == nested_id)
+        .unwrap();
+    assert_eq!(binding.evidence.state, RootEvidenceState::Mismatch);
+    assert!(binding.evidence.observed_identity.is_some());
+    assert!(inventory
+        .issues
+        .iter()
+        .any(|issue| issue.code == IssueCode::EvidenceMismatch));
+    assert!(inventory
+        .coverage
+        .iter()
+        .any(|scope| scope.root_id == nested_id && scope.outcome == CoverageOutcome::Failed));
+    assert_eq!(inventory.entries.len(), 6);
+}
+
+#[test]
+fn overlapping_bindings_retain_their_own_observation_and_coverage_association() {
+    let fixture = Fixture::new();
+    let nested = RootBinding::new(fixture.root().join("nested")).unwrap();
+    let nested_id = nested.id;
+    let mut request = fixture.request();
+    request.roots.push(nested);
+    let inventory = scan(&request, &JobControl::default()).unwrap();
+    let binding = inventory
+        .roots
+        .iter()
+        .find(|root| root.id == nested_id)
+        .unwrap();
+    assert!(binding.evidence.observed_identity.is_some());
+    let scope = inventory
+        .coverage
+        .iter()
+        .find(|scope| scope.root_id == nested_id)
+        .unwrap();
+    assert!(scope.children_complete && scope.subtree_complete);
+    assert_eq!(scope.relative_directory, None);
+    assert_eq!(inventory.entries.len(), 6);
+}
+
+#[test]
+fn reserved_ascii_case_variants_are_conservatively_excluded_for_unknown_filesystems() {
+    let fixture = Fixture::new();
+    let marker = fixture.root().join(".VIDLIB-BLUEPRINT.JSON");
+    let staging = fixture.root().join(".VIDLIB-STAGING-ATTEMPT");
+    fs::write(&marker, b"{}").unwrap();
+    fs::create_dir(&staging).unwrap();
+    let hidden = staging.join("hidden.mkv");
+    fs::write(&hidden, b"hidden").unwrap();
+    let inventory = scan(&fixture.request(), &JobControl::default()).unwrap();
+    assert!(!inventory
+        .entries
+        .iter()
+        .any(|entry| entry.absolute_path == marker
+            || entry.absolute_path == staging
+            || entry.absolute_path == hidden));
+    for selected in [marker, staging, hidden] {
+        let request = InventoryRequest::new(vec![RootBinding::new(selected).unwrap()]);
+        let inventory = scan(&request, &JobControl::default()).unwrap();
+        assert!(inventory.entries.is_empty());
+        assert_eq!(inventory.coverage[0].outcome, CoverageOutcome::Excluded);
+    }
+}
+
+#[test]
+fn protected_roots_conservatively_match_case_aliases_at_component_boundaries() {
+    let fixture = Fixture::new();
+    let protected = fixture.root().join("protected");
+    fs::create_dir(&protected).unwrap();
+    fs::write(protected.join("hidden.mkv"), b"hidden").unwrap();
+    let sibling = fixture.root().join("protected-other");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("visible.mkv"), b"visible").unwrap();
+    let mut request = fixture.request();
+    request
+        .policy
+        .protected_roots
+        .push(fixture.root().join("PrOtEcTeD"));
+    let inventory = scan(&request, &JobControl::default()).unwrap();
+    assert!(!inventory
+        .entries
+        .iter()
+        .any(|entry| entry.absolute_path.starts_with(&protected)));
+    assert!(inventory
+        .entries
+        .iter()
+        .any(|entry| entry.display_name == "visible.mkv"));
+    request.roots = vec![RootBinding::new(protected.join("hidden.mkv")).unwrap()];
+    let direct = scan(&request, &JobControl::default()).unwrap();
+    assert!(direct.entries.is_empty());
+    assert_eq!(direct.coverage[0].outcome, CoverageOutcome::Excluded);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_protected_roots_match_native_unicode_case_aliases() {
+    let fixture = Fixture::new();
+    let protected = fixture.root().join("Média");
+    fs::create_dir(&protected).unwrap();
+    fs::write(protected.join("hidden.mkv"), b"hidden").unwrap();
+    let mut request = fixture.request();
+    request
+        .policy
+        .protected_roots
+        .push(fixture.root().join("MÉDIA"));
+    let inventory = scan(&request, &JobControl::default()).unwrap();
+    assert!(!inventory
+        .entries
+        .iter()
+        .any(|entry| entry.absolute_path.starts_with(&protected)));
+}
+
+#[test]
+fn replacing_a_listed_directory_with_an_external_link_never_observes_external_children() {
+    let fixture = Fixture::new();
+    let nested = fixture.root().join("nested");
+    fs::create_dir(nested.join("sub")).unwrap();
+    fs::write(nested.join("sub/inside.mkv"), b"inside").unwrap();
+    let external = tempfile::tempdir().unwrap();
+    fs::create_dir(external.path().join("sub")).unwrap();
+    fs::write(external.path().join("sub/outside.mkv"), b"outside").unwrap();
+    fs::write(external.path().join("c.mov"), b"outside-c").unwrap();
+    let mut adapter = FaultFs::new(JobControl::default());
+    adapter.swap_after_listing = Some((
+        nested.clone(),
+        fixture.root().join("moved-nested"),
+        external.path().to_path_buf(),
+    ));
+    let inventory = fault_scan(&fixture, &adapter);
+    assert!(!inventory
+        .entries
+        .iter()
+        .any(|entry| entry.display_name == "outside.mkv"));
+    let scope = inventory
+        .coverage
+        .iter()
+        .find(|scope| scope.directory == nested)
+        .unwrap();
+    assert!(!scope.subtree_complete);
+    assert_eq!(scope.outcome, CoverageOutcome::Failed);
+    assert!(scope
+        .listed_names
+        .contains(&encode_path(&PathBuf::from("sub"))));
+    assert!(
+        !inventory
+            .coverage
+            .iter()
+            .find(|scope| scope.directory == fixture.root())
+            .unwrap()
+            .subtree_complete
+    );
+}
+
+#[test]
+fn failed_binding_observation_drops_previously_matched_evidence() {
+    use vidlib_inventory::{PathPlatform, PhysicalId, RootEvidenceState};
+    let fixture = Fixture::new();
+    let mut missing = RootBinding::new(fixture.root().join("missing")).unwrap();
+    let old = PhysicalId {
+        platform: PathPlatform::UnixBytes,
+        volume_identity: vec![1],
+        file_identity: vec![2],
+    };
+    missing.evidence.expected_identity = Some(old.clone());
+    missing.evidence.observed_identity = Some(old);
+    missing.evidence.state = RootEvidenceState::Matches;
+    let missing_id = missing.id;
+    let mut request = fixture.request();
+    request.roots.push(missing);
+    let inventory = scan(&request, &JobControl::default()).unwrap();
+    let binding = inventory
+        .roots
+        .iter()
+        .find(|root| root.id == missing_id)
+        .unwrap();
+    assert_eq!(binding.evidence.state, RootEvidenceState::Unavailable);
+    assert!(binding.evidence.observed_identity.is_none());
+}

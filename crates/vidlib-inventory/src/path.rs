@@ -115,3 +115,57 @@ impl NativePathRecord {
         Ok(())
     }
 }
+
+pub(crate) fn conservative_path_is_within(path: &Path, root: &Path) -> bool {
+    use std::path::Component;
+    let mut path = path.components();
+    root.components().all(|expected| {
+        let Some(actual) = path.next() else {
+            return false;
+        };
+        match (actual, expected) {
+            (Component::RootDir, Component::RootDir) => true,
+            _ => conservative_name_matches(actual.as_os_str(), expected.as_os_str(), false),
+        }
+    })
+}
+
+/// Policy comparison only: the original native name remains unchanged.
+#[cfg(unix)]
+pub(crate) fn conservative_name_matches(
+    name: &std::ffi::OsStr,
+    pattern: &std::ffi::OsStr,
+    prefix: bool,
+) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let name = name.as_bytes();
+    let pattern = pattern.as_bytes();
+    (prefix || name.len() == pattern.len())
+        && name.len() >= pattern.len()
+        && name[..pattern.len()].eq_ignore_ascii_case(pattern)
+}
+#[cfg(windows)]
+pub(crate) fn conservative_name_matches(
+    name: &std::ffi::OsStr,
+    pattern: &std::ffi::OsStr,
+    prefix: bool,
+) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+    let name: Vec<_> = name.encode_wide().collect();
+    let pattern: Vec<_> = pattern.encode_wide().collect();
+    if (!prefix && name.len() != pattern.len()) || name.len() < pattern.len() {
+        return false;
+    }
+    let Ok(length) = i32::try_from(pattern.len()) else {
+        return true;
+    };
+    if length == 0 {
+        return true;
+    }
+    // Both buffers are live and contain at least `length` native UTF16 units.
+    // Comparison does not transcode unpaired surrogates or reconstruct a path.
+    let comparison =
+        unsafe { CompareStringOrdinal(name.as_ptr(), length, pattern.as_ptr(), length, 1) };
+    comparison == CSTR_EQUAL || comparison == 0 // API uncertainty protects conservatively.
+}

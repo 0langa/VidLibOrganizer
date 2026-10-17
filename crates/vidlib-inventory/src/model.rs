@@ -40,6 +40,7 @@ pub enum IssueCode {
     InvalidSource,
     ProtectedEntry,
     EvidenceMismatch,
+    DirectoryChanged,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryIssue {
@@ -280,11 +281,13 @@ pub struct NamespaceSnapshot {
 impl ProtectedPolicy {
     /// Canonical exclusion rule shared by inventory and later operation adapters.
     /// Matching uses native units; display strings never participate in lookup.
+    /// Case behavior is unknown here, so reserved ASCII variants are protected on
+    /// Unix too; Windows uses native ordinal Unicode comparison for root aliases.
     pub fn excludes(&self, path: &Path) -> bool {
         if self
             .protected_roots
             .iter()
-            .any(|root| path.starts_with(root))
+            .any(|root| crate::path::conservative_path_is_within(path, root))
         {
             return true;
         }
@@ -292,15 +295,12 @@ impl ProtectedPolicy {
             let Component::Normal(name) = component else {
                 return false;
             };
-            if name == self.marker_name.as_str() {
+            if crate::path::conservative_name_matches(name, self.marker_name.as_ref(), false) {
                 return true;
             }
-            let encoded = crate::encode_path(Path::new(name));
-            self.staging_prefixes.iter().any(|prefix| {
-                encoded
-                    .bytes
-                    .starts_with(&crate::encode_path(Path::new(prefix)).bytes)
-            })
+            self.staging_prefixes
+                .iter()
+                .any(|prefix| crate::path::conservative_name_matches(name, prefix.as_ref(), true))
         })
     }
 }

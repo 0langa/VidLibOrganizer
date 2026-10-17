@@ -15,4 +15,7 @@ pub mod scan;
 pub use control::{JobControl, Progress, ProgressPhase};
 pub use model::*;
 pub use path::{decode_path, encode_path, NativePathRecord, PathCodecError, PathPlatform};
-pub use scan::{scan, scan_with_fs, DirectoryListing, InventoryError, InventoryFs, OsInventoryFs};
+pub use scan::{
+    scan, scan_with_fs, DirectoryListing, FileObservation, InventoryDirectory, InventoryError,
+    InventoryFs, OsInventoryFs,
+};
