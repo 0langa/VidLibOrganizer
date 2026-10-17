@@ -3,7 +3,9 @@
 This document describes the implemented duplicate-finder baseline. The proposed
 Rename feature and separate Blueprint foundation are specified in the
 [2026-10-17 library-tools design](superpowers/specs/2026-10-17-library-tools-design.md).
-Those specifications are under review and do not describe shipped functionality.
+Those specifications are approved designs. Their implementation is tracked in the
+[canonical plan](superpowers/plans/2026-10-17-rename-and-blueprint.md); they do not
+describe shipped functionality.
 
 ## Purpose
 Replace the deprecated prototype with a Windows desktop organizer for roughly 1–3 TB of videos on local and external drives. The first useful workflow is finding duplicate video files across folders and their subfolders. Library management and duplicate review are separate navigation surfaces so future organization tools can be added without rebuilding the shell.

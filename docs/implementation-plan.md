@@ -1,5 +1,9 @@
 # VidLibOrganizer implementation plan
 
+This is the historical implementation plan for the duplicate-finder baseline.
+The canonical plan for the approved Rename and Blueprint work is
+[Rename and Blueprint Foundation](superpowers/plans/2026-10-17-rename-and-blueprint.md).
+
 **Goal:** Deliver an offline Windows app for fast size-based and full-file MD5 duplicate review.
 **Architecture:** Pure Rust engine behind Tauri commands; plain ES modules for the interface.
 **Spec:** [spec.md](spec.md)

@@ -2,7 +2,7 @@
 
 Date: 2026-10-17
 
-Status: specification for review; foundation and proof of concept, not a mature flagship feature.
+Status: specification approved by the user on 2026-10-17; foundation and proof of concept, not a mature flagship feature.
 
 Companion: [design overview](2026-10-17-library-tools-design.md), [Rename](2026-10-17-renaming-design.md).
 

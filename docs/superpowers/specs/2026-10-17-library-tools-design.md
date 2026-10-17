@@ -2,7 +2,7 @@
 
 Date: 2026-10-17
 
-Status: written specifications for user review; implementation has not started.
+Status: written specifications approved by the user on 2026-10-17; implementation has not started.
 
 ## Agreed direction
 
@@ -52,6 +52,6 @@ Blueprint work may proceed alongside Rename after the shared contracts stabilize
 
 ## Review decisions
 
-The product split and permission to write these specs are confirmed. Review the two written specs next, including the app-local/optional-marker assumption and the precise definition of Blueprint's first usable delivery. After written-spec approval, create separate implementation plans for Rename and Blueprint; keep shared work owned by the Rename foundation so it is implemented once.
+The user approved both written specs, including the app-local/optional-marker assumption and Blueprint's initial scope, on 2026-10-17. At the user's request, the [canonical implementation plan](../plans/2026-10-17-rename-and-blueprint.md) covers both tracks in one file. Shared work is owned by the Rename foundation so it is implemented once. The implementation method is selected for execution in a fresh session.
 
 The existing [first-release spec](../../spec.md) and [verification record](../../verification.md) describe the shipped duplicate-finder baseline, not completion of these proposals.

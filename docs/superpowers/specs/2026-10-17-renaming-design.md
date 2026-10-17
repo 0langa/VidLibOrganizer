@@ -2,7 +2,7 @@
 
 Date: 2026-10-17
 
-Status: specification for review; no implementation approved by this document alone.
+Status: specification approved by the user on 2026-10-17; implementation follows the canonical plan after its review.
 
 Companion: [design overview](2026-10-17-library-tools-design.md), [Blueprint foundation](2026-10-17-blueprint-foundation-design.md).
 
