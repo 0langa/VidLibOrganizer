@@ -238,16 +238,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Consumes Inventory; produces every 4.2 model, `evaluate`, backend-only RenamePlan/PlanRef, serializable DTO projections, and stable RenameError codes. Rule evaluation initially supports Keep/FixedStem; later tasks supply each rule implementation through the same pipeline.
 
-- [ ] **Step 1 — Red:** Add `unknown_recipe_version_or_rule_rejected`, `preview_freezes_clock_and_random`, `unselected_or_outside_grant_id_rejected`, `json_preserves_large_sizes`, and `explanations_follow_rule_order`.
+- [x] **Step 1 — Red:** Add `unknown_recipe_version_or_rule_rejected`, `preview_freezes_clock_and_random`, `unselected_or_outside_grant_id_rejected`, `json_preserves_large_sizes`, and `explanations_follow_rule_order`.
   ```rust
   assert_eq!(first.rows, repeated.rows);
   assert_eq!(json_row.size_bytes.as_deref(), Some("9007199254740993"));
   assert_eq!(err.code, RenameErrorCode::UnknownRecipeVersion);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test contracts`.
-- [ ] **Step 3 — Implement:** Implement 4.2's tagged RecipeV1, typed template AST, FrozenInputs, EvaluatedBatch and owned plan models with backend-only native fields. Pin field/format enums and reject invalid combinations before rows are generated. Implement schema round-trip tests; use checked arithmetic and exact serialization. Do not expose unimplemented rule controls yet.
-- [ ] **Step 4 — Verify green:** Contracts test plus `cargo clippy -p vidlib-rename --all-targets -- -D warnings`; repeated identical frozen inputs yield byte-identical DTO plans except explicitly supplied PlanRef.
-- [ ] **Step 5 — Commit:** `feat: define deterministic rename recipes and plans`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test contracts`.
+- [x] **Step 3 — Implement:** Implement 4.2's tagged RecipeV1, typed template AST, FrozenInputs, EvaluatedBatch and owned plan models with backend-only native fields. Pin field/format enums and reject invalid combinations before rows are generated. Implement schema round-trip tests; use checked arithmetic and exact serialization. Do not expose unimplemented rule controls yet.
+- [x] **Step 4 — Verify green:** Contracts test plus `cargo clippy -p vidlib-rename --all-targets -- -D warnings`; repeated identical frozen inputs yield byte-identical DTO plans except explicitly supplied PlanRef.
+- [x] **Step 5 — Commit:** `feat: define deterministic rename recipes and plans`.
 
 ### Task 04: Durable operation journal and event outbox
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–02 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks remain incomplete. Task 03 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–03 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks remain incomplete. Task 04 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -796,6 +796,7 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Execution setup; base `711b422` | Cloned `0langa/VidLibOrganizer`; isolated worktree `.worktrees/rename-blueprint`, branch `feat/rename-blueprint`; all three specs read; 36 portable baseline tests and UI syntax passed. Rust 1.99.1 installed. Task 01 is first incomplete. Windows checks pending; continue portable work. |
 | 2026-10-17 | Task 01: `d734f55`, fixes `dfc7e4e`, `aff67d5` | Test-first native inventory, exact codecs, no-follow relative-handle traversal, per-binding evidence and coverage. 27 inventory +36 existing portable tests pass; Linux and Windows-target Clippy and fmt pass. Independent review and two scoped fix re-reviews completed. Windows runtime pending. Deferred Minor: overlap diagnostic paths need rebasing; final branch review must triage. Next eligible: Task 02. |
 | 2026-10-17 | Task 02: `7328356`, `8fe6590`, fix `f051627` | Test-first no-replace adapters, native per-parent facts and shared name validation. 88 portable tests pass; 18 platform tests passed on tmpfs and overlayfs; Linux/Windows-target Clippy and fmt pass. Independent review plus scoped fix re-review clean. Windows production mutations fail closed; native NTFS/exFAT/SMB, locking/case/reparse/metadata/flush qualification pending. Deferred Minor: Windows staging writer-sharing lifecycle (Task 19/final review). Next eligible: Task 03. |
+| 2026-10-17 | Task 03: `07f9a50` | Test-first strict recipes, typed template/frozen inputs, backend-owned execution models and session-scoped PlanStore with revoked references/nonces. 18 contracts and 106 total portable tests pass; Clippy, fmt and Windows-target compile pass. Independent review approved. Deferred Minor: duplicated plan/provenance grants consistency at publication, for final review. Future rule evaluation, Task 06 graph and Task 10 invalidation wiring remain open. Next eligible: Task 04. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
