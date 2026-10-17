@@ -149,6 +149,12 @@ pub struct RenameRequestDto {
     pub selected_ids: Vec<EntryId>,
     pub rule: NamingRule,
     pub fixed_stem: String,
+    #[serde(default)]
+    pub selection_filter: Option<SelectionFilter>,
+    #[serde(default)]
+    pub numbering_scope: NumberingScope,
+    #[serde(default)]
+    pub row_overrides: Vec<RowOverride>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -463,7 +469,14 @@ pub fn inventory_page_owned(state: &AppState, request: InventoryPageRequest) -> 
     )
 }
 pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobId> {
-    if request.selected_ids.len() > 1_000_000 || request.fixed_stem.len() > 16_384 {
+    if request.selected_ids.len() > 1_000_000
+        || request.fixed_stem.len() > 16_384
+        || request.row_overrides.len() > MAPPING_ROW_LIMIT
+        || request
+            .row_overrides
+            .iter()
+            .any(|r| r.new_name.len() > 16_384)
+    {
         return Err(stale("Preview inputs exceed limits"));
     }
     let lease = state.coordinator.try_acquire(LeaseKind::Read)?;
@@ -484,11 +497,13 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
     drop(r);
     spawn(state, id, move || {
         let fs = fs_for(&lease, &policy)?;
-        let recipe = RecipeV1 {
+        let mut recipe = RecipeV1 {
             schema_version: 1,
             revision: request.revision,
             selection: request.selected_ids.clone(),
+            selection_filter: None,
             numbering_order: request.selected_ids.clone(),
+            numbering_scope: request.numbering_scope,
             rules: vec![Rule {
                 id: "name".into(),
                 enabled: true,
@@ -506,12 +521,43 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             collision_policy: CollisionPolicy::Block,
             metadata_changes: vec![],
         };
+        let known = inventory
+            .entries
+            .iter()
+            .map(|e| e.id)
+            .collect::<BTreeSet<_>>();
+        if recipe.selection.iter().any(|id| !known.contains(id)) {
+            return Err(RenameError::new(
+                RenameErrorCode::UnknownEntry,
+                "selected ID is absent from inventory",
+            )
+            .into());
+        }
+        if let Some(filter) = request.selection_filter {
+            let allowed = select(&inventory, &filter)?
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            recipe.selection.retain(|id| allowed.contains(id));
+            recipe.numbering_order.retain(|id| allowed.contains(id));
+            recipe.selection_filter = Some(filter);
+        }
         let requirements = InputRequirements::from_recipe(&recipe, FrozenTimezone::Utc)?;
         let inputs = frozen_inputs
             .lock()
             .map_err(|_| stale("Frozen input state unavailable"))?
             .prepare(&requirements, &inventory, &control)?;
-        let evaluated = evaluate(&inventory, &recipe, &inputs)?;
+        let mappings = MappingSet {
+            inventory_id: inventory.id,
+            generation: inventory.generation,
+            rows: vec![],
+        };
+        let evaluated = evaluate_with_mappings(
+            &inventory,
+            &recipe,
+            &inputs,
+            &mappings,
+            &request.row_overrides,
+        )?;
         // Capture originals, including unselected carried descendants. A selected
         // file itself authorizes parent occupancy without granting sibling sources.
         let selected: BTreeSet<_> = evaluated.rows.iter().map(|r| r.entry_id).collect();
@@ -1020,6 +1066,65 @@ mod tests {
         panic!("job timeout")
     }
     #[test]
+    fn desktop_filter_override_and_scope_changes_revoke_previous_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir(&media).unwrap();
+        std::fs::write(media.join("a.mkv"), b"a").unwrap();
+        std::fs::write(media.join("b.txt"), b"b").unwrap();
+        let state =
+            AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+        crate::selection::install_selection(&state, vec![media]).unwrap();
+        await_job(
+            &state,
+            inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+        );
+        let ids = lock(&state)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .map(|e| e.id)
+            .collect::<Vec<_>>();
+        let movie = lock(&state)
+            .unwrap()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.display_name == "a.mkv")
+            .unwrap()
+            .id;
+        let parsed = serde_json::from_value::<RenameRequestDto>(
+            json!({"revision":"2","selectedIds":ids,"rule":"keep","fixedStem":"","selectionFilter":{"extensions":["mkv"]},"numberingScope":"files","rowOverrides":[{"entry_id":movie,"new_name":"edited.mkv"}]}),
+        );
+        assert!(
+            parsed.is_ok(),
+            "selection and row override DTO must be supported: {:?}",
+            parsed.err()
+        );
+        let preview = await_job(&state, preview_owned(&state, parsed.unwrap()).unwrap());
+        let reference: UiPlanRef = serde_json::from_value(preview["planRef"].clone()).unwrap();
+        let lease = state.coordinator.try_acquire(LeaseKind::Read).unwrap();
+        let first = plans(&state)
+            .unwrap()
+            .snapshot(reference.into(), &lease)
+            .unwrap();
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.rows[0].new_display_name, "edited.mkv");
+        drop(lease);
+        update_inputs_owned(&state, InputRevision { revision: 3 }).unwrap();
+        let lease = state.coordinator.try_acquire(LeaseKind::Read).unwrap();
+        assert!(plans(&state)
+            .unwrap()
+            .snapshot(reference.into(), &lease)
+            .is_err());
+    }
+    #[test]
     fn repeated_desktop_preview_retains_frozen_clock_until_inventory_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("media");
@@ -1052,6 +1157,9 @@ mod tests {
                         selected_ids,
                         rule: NamingRule::Keep,
                         fixed_stem: String::new(),
+                        selection_filter: None,
+                        numbering_scope: Default::default(),
+                        row_overrides: vec![],
                     },
                 )
                 .unwrap(),
@@ -1230,6 +1338,9 @@ mod tests {
                         selected_ids: vec![item],
                         rule: NamingRule::FixedStem,
                         fixed_stem: "renamed".into(),
+                        selection_filter: None,
+                        numbering_scope: Default::default(),
+                        row_overrides: vec![],
                     },
                 )
                 .unwrap(),

@@ -6,6 +6,11 @@ use vidlib_inventory::{ids::*, FileStamp, GrantSet, Inventory};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenameErrorCode {
+    InvalidMapping,
+    AmbiguousMapping,
+    MappingCardinality,
+    ImportLimit,
+    InvalidSelection,
     UnknownRecipeVersion,
     InvalidRecipe,
     InvalidRuleInput,
@@ -70,6 +75,8 @@ pub struct FrozenInputs {
     pub now_ns: i128,
     pub timezone: FrozenTimezone,
     pub primary_order: Vec<EntryId>,
+    #[serde(default)]
+    pub numbering_scope: crate::NumberingScope,
     pub values: Vec<FrozenValue>,
 }
 /// IANA zones must be confirmed by the input preparation adapter. No local zone

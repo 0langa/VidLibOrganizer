@@ -65,7 +65,9 @@ fn fixture(names: &[(&str, EntryKind)]) -> (Inventory, EvaluatedBatch, Namespace
         schema_version: 1,
         revision: 1,
         selection: selection.clone(),
+        selection_filter: None,
         numbering_order: selection.clone(),
+        numbering_scope: Default::default(),
         rules: vec![],
         companions: CompanionPolicy::None,
         destination: Destination::SameDirectory,
@@ -78,6 +80,7 @@ fn fixture(names: &[(&str, EntryKind)]) -> (Inventory, EvaluatedBatch, Namespace
         now_ns: 123,
         timezone: FrozenTimezone::Utc,
         primary_order: selection,
+        numbering_scope: Default::default(),
         values: vec![],
     };
     let batch = evaluate(&inventory, &recipe, &frozen).unwrap();

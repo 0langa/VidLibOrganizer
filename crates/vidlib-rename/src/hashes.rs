@@ -15,6 +15,7 @@ pub struct RequestedInput {
 #[derive(Clone, Debug)]
 pub struct InputRequirements {
     pub primary_order: Vec<EntryId>,
+    pub numbering_scope: NumberingScope,
     pub fields: Vec<RequestedInput>,
     pub timezone: FrozenTimezone,
 }
@@ -60,6 +61,7 @@ impl InputRequirements {
         }
         Ok(Self {
             primary_order: recipe.numbering_order.clone(),
+            numbering_scope: recipe.numbering_scope,
             fields,
             timezone,
         })
@@ -131,10 +133,22 @@ impl FrozenInputCache {
                 now_ns: now_ns(),
                 timezone: request.timezone.clone(),
                 primary_order: vec![],
+                numbering_scope: Default::default(),
                 values: vec![],
             });
         retained.timezone = request.timezone.clone();
         retained.primary_order = request.primary_order.clone();
+        retained.numbering_scope = request.numbering_scope;
+        let counter_order = crate::selection::scoped_order(
+            inventory,
+            &request.primary_order,
+            request.numbering_scope,
+        )?;
+        let counter_ordinals = counter_order
+            .iter()
+            .enumerate()
+            .map(|(ordinal, id)| (*id, ordinal as i128 + 1))
+            .collect::<BTreeMap<_, _>>();
         // Hashes are shared per entry, independent of how many rules request them.
         let mut requested_hashes = BTreeMap::<EntryId, BTreeSet<HashAlgorithm>>::new();
         for field in &request.fields {
@@ -190,7 +204,20 @@ impl FrozenInputCache {
             if !needs_frozen(&field.key) {
                 continue;
             }
-            let previous = lookup(&retained, field).cloned();
+            let previous = if field.key == FieldKey::Counter
+                && !counter_ordinals.contains_key(&field.entry_id)
+            {
+                Some(FrozenValue {
+                    entry_id: field.entry_id,
+                    rule_id: field.rule_id.clone(),
+                    key: field.key.clone(),
+                    value: FrozenFieldValue::Missing {
+                        decision: MissingDecision::Block,
+                    },
+                })
+            } else {
+                lookup(&retained, field).cloned()
+            };
             let value = previous.unwrap_or_else(|| FrozenValue {
                 entry_id: field.entry_id,
                 rule_id: field.rule_id.clone(),
@@ -200,14 +227,12 @@ impl FrozenInputCache {
                     FieldKey::Random => {
                         FrozenFieldValue::Integer(i128::from(rand::random::<u64>()))
                     }
-                    FieldKey::Counter => FrozenFieldValue::Integer(
-                        request
-                            .primary_order
-                            .iter()
-                            .position(|id| *id == field.entry_id)
-                            .expect("validated primary") as i128
-                            + 1,
-                    ),
+                    FieldKey::Counter => counter_ordinals
+                        .get(&field.entry_id)
+                        .map(|ordinal| FrozenFieldValue::Integer(*ordinal))
+                        .unwrap_or(FrozenFieldValue::Missing {
+                            decision: MissingDecision::Block,
+                        }),
                     _ => FrozenFieldValue::Missing {
                         decision: MissingDecision::Block,
                     },

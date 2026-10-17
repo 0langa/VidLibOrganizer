@@ -31,7 +31,9 @@ fn fixture(
         schema_version: 1,
         revision: 1,
         selection: ids.clone(),
+        selection_filter: None,
         numbering_order: ids.clone(),
+        numbering_scope: Default::default(),
         rules: vec![Rule {
             id: "r".into(),
             enabled: true,
@@ -49,6 +51,7 @@ fn fixture(
         now_ns: 0,
         timezone: FrozenTimezone::Utc,
         primary_order: ids,
+        numbering_scope: Default::default(),
         values: vec![],
     };
     (dir, inventory, recipe, inputs)

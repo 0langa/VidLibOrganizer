@@ -197,13 +197,16 @@ mod tests {
             now_ns: 0,
             timezone: FrozenTimezone::Utc,
             primary_order: vec![],
+            numbering_scope: Default::default(),
             values: vec![],
         };
         let recipe = RecipeV1 {
             schema_version: 1,
             revision: 1,
             selection: vec![],
+            selection_filter: None,
             numbering_order: vec![],
+            numbering_scope: Default::default(),
             rules: vec![],
             companions: CompanionPolicy::None,
             destination: Destination::SameDirectory,

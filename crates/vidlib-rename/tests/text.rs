@@ -622,7 +622,9 @@ fn evaluate_rules(rules: Vec<Rule>) -> EvaluatedBatch {
         schema_version: 1,
         revision: 1,
         selection: vec![id],
+        selection_filter: None,
         numbering_order: vec![id],
+        numbering_scope: Default::default(),
         rules,
         companions: CompanionPolicy::None,
         destination: Destination::SameDirectory,
@@ -635,6 +637,7 @@ fn evaluate_rules(rules: Vec<Rule>) -> EvaluatedBatch {
         now_ns: 0,
         timezone: FrozenTimezone::Utc,
         primary_order: vec![id],
+        numbering_scope: Default::default(),
         values: vec![],
     };
     let decoded = RecipeV1::from_json(&serde_json::to_vec(&recipe).unwrap()).unwrap();

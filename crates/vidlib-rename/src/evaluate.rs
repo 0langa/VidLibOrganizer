@@ -17,9 +17,20 @@ pub fn evaluate(
         .iter()
         .map(|entry| (entry.id, entry))
         .collect::<BTreeMap<_, _>>();
-    validate_inventory(inventory, recipe, &entries)?;
+    validate_inventory(inventory, &recipe.selection, &entries)?;
     let compiled_regex = recipe.validate_and_compile_regex()?;
     validate_inputs(inventory, recipe, inputs)?;
+    if let Some(filter) = &recipe.selection_filter {
+        let allowed = select(inventory, filter)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if recipe.selection.iter().any(|id| !allowed.contains(id)) {
+            return Err(RenameError::new(
+                RenameErrorCode::InvalidSelection,
+                "frozen selection does not satisfy the recipe filter",
+            ));
+        }
+    }
     if recipe.companions != CompanionPolicy::None
         || recipe.destination != Destination::SameDirectory
         || !recipe.metadata_changes.is_empty()
@@ -47,6 +58,16 @@ pub fn evaluate(
             ));
         }
     }
+    let counter_order = scoped_numbering_order(inventory, recipe)?;
+    let counter_set = counter_order.iter().copied().collect::<BTreeSet<_>>();
+    let mut effective_inputs = inputs.clone();
+    for value in &mut effective_inputs.values {
+        if value.key == FieldKey::Counter && !counter_set.contains(&value.entry_id) {
+            value.value = FrozenFieldValue::Missing {
+                decision: MissingDecision::Block,
+            };
+        }
+    }
     let numbered = recipe
         .rules
         .iter()
@@ -54,7 +75,7 @@ pub fn evaluate(
         .filter_map(|rule| {
             if let RuleParameters::Number { rule: parameters } = &rule.parameters {
                 Some(
-                    assign_numbers(&inventory.entries, &inputs.primary_order, parameters)
+                    assign_numbers(&inventory.entries, &counter_order, parameters)
                         .map(|values| (rule.id.as_str(), values)),
                 )
             } else {
@@ -104,6 +125,10 @@ pub fn evaluate(
         };
         let mut current = original.clone();
         for rule in recipe.rules.iter().filter(|r| r.enabled) {
+            if matches!(rule.parameters, RuleParameters::Number { .. }) && !counter_set.contains(id)
+            {
+                continue;
+            }
             let before = current.segment(rule.segment.target());
             let result = match &rule.parameters {
                 RuleParameters::Regex { .. } => {
@@ -144,7 +169,7 @@ pub fn evaluate(
                                 original: &original,
                                 current: &current,
                                 rule_id: &rule.id,
-                                inputs,
+                                inputs: &effective_inputs,
                             },
                         )
                     })
@@ -231,9 +256,9 @@ pub fn evaluate(
     })
 }
 
-fn validate_inventory(
+pub(crate) fn validate_inventory(
     inventory: &Inventory,
-    recipe: &RecipeV1,
+    selection: &[EntryId],
     entries: &BTreeMap<EntryId, &vidlib_inventory::EntrySnapshot>,
 ) -> Result<(), RenameError> {
     let mut roots = BTreeSet::new();
@@ -257,7 +282,7 @@ fn validate_inventory(
             "duplicate inventory entry ID",
         ));
     }
-    for id in &recipe.selection {
+    for id in selection {
         let entry = entries.get(id).ok_or_else(|| {
             RenameError::new(RenameErrorCode::UnknownEntry, "selected entry is absent")
         })?;
@@ -301,7 +326,10 @@ fn validate_inputs(
     recipe: &RecipeV1,
     inputs: &FrozenInputs,
 ) -> Result<(), RenameError> {
-    if inputs.inventory_id != inventory.id || inputs.generation != inventory.generation {
+    if inputs.inventory_id != inventory.id
+        || inputs.generation != inventory.generation
+        || inputs.numbering_scope != recipe.numbering_scope
+    {
         return Err(RenameError::new(
             RenameErrorCode::StaleInputs,
             "frozen inputs belong to another inventory generation",

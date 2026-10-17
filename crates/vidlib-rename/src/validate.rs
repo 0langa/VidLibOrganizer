@@ -37,6 +37,7 @@ pub(crate) fn validate_batch(
         || batch.frozen_inputs.inventory_id != inventory.id
         || batch.frozen_inputs.generation != inventory.generation
         || batch.frozen_inputs.primary_order != batch.recipe.numbering_order
+        || batch.frozen_inputs.numbering_scope != batch.recipe.numbering_scope
     {
         return Err(invalid(
             "evaluated provenance differs from inventory/recipe",

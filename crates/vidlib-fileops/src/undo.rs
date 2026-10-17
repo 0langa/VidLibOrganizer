@@ -353,7 +353,9 @@ pub fn plan_undo(
         schema_version: 1,
         revision: 1,
         selection: ids.clone(),
+        selection_filter: None,
         numbering_order: ids.clone(),
+        numbering_scope: Default::default(),
         rules: vec![],
         companions: CompanionPolicy::None,
         destination: Destination::SameDirectory,
@@ -366,6 +368,7 @@ pub fn plan_undo(
         now_ns: namespace.window.finished_ns,
         timezone: FrozenTimezone::Utc,
         primary_order: ids,
+        numbering_scope: Default::default(),
         values: vec![],
     };
     let rows = selected

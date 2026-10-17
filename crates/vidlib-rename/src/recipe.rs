@@ -11,8 +11,12 @@ pub struct RecipeV1 {
     #[serde(with = "vidlib_inventory::exact::u64_decimal")]
     pub revision: u64,
     pub selection: Vec<EntryId>,
+    #[serde(default)]
+    pub selection_filter: Option<crate::SelectionFilter>,
     /// Explicit primary vector; independent of display sorting.
     pub numbering_order: Vec<EntryId>,
+    #[serde(default)]
+    pub numbering_scope: crate::NumberingScope,
     pub rules: Vec<Rule>,
     pub companions: CompanionPolicy,
     pub destination: Destination,
@@ -294,6 +298,9 @@ impl RecipeV1 {
                 RenameErrorCode::TooManyRules,
                 "recipe exceeds 100 rules",
             ));
+        }
+        if let Some(filter) = &self.selection_filter {
+            filter.validate()?;
         }
         let selected: BTreeSet<_> = self.selection.iter().copied().collect();
         if selected.len() != self.selection.len() {

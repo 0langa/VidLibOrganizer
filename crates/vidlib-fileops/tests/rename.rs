@@ -56,7 +56,9 @@ impl Fixture {
             schema_version: 1,
             revision: 1,
             selection: selection.clone(),
+            selection_filter: None,
             numbering_order: selection.clone(),
+            numbering_scope: Default::default(),
             rules: vec![],
             companions: CompanionPolicy::None,
             destination: Destination::SameDirectory,
@@ -69,6 +71,7 @@ impl Fixture {
             now_ns: 0,
             timezone: FrozenTimezone::Utc,
             primary_order: selection,
+            numbering_scope: Default::default(),
             values: vec![],
         };
         let mut batch = evaluate(&inventory, &recipe, &frozen).unwrap();
@@ -505,7 +508,9 @@ fn replan(f: &mut Fixture, root: PathBuf, mapping: &[(&str, &str)]) {
         schema_version: 1,
         revision: 1,
         selection: selection.clone(),
+        selection_filter: None,
         numbering_order: selection.clone(),
+        numbering_scope: Default::default(),
         rules: vec![],
         companions: CompanionPolicy::None,
         destination: Destination::SameDirectory,
@@ -518,6 +523,7 @@ fn replan(f: &mut Fixture, root: PathBuf, mapping: &[(&str, &str)]) {
         now_ns: 0,
         timezone: FrozenTimezone::Utc,
         primary_order: selection,
+        numbering_scope: Default::default(),
         values: vec![],
     };
     let mut batch = evaluate(&inventory, &recipe, &frozen).unwrap();

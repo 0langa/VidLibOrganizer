@@ -60,6 +60,9 @@ fn preview(state: &AppState) -> UiPlanRef {
                 selected_ids: selected,
                 rule: NamingRule::FixedStem,
                 fixed_stem: "renamed".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -379,6 +382,9 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
                 selected_ids: selected,
                 rule: NamingRule::FixedStem,
                 fixed_stem: "collision".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -441,6 +447,9 @@ fn directory_capture_preserves_unselected_nested_children_for_undo() {
                 selected_ids: vec![id],
                 rule: NamingRule::FixedStem,
                 fixed_stem: "renamed".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -577,6 +586,9 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
                 selected_ids: vec![choose("private")],
                 rule: NamingRule::FixedStem,
                 fixed_stem: "moved".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -592,6 +604,9 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
                 selected_ids: vec![choose("clip.mp4")],
                 rule: NamingRule::FixedStem,
                 fixed_stem: "renamed".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -665,6 +680,9 @@ fn empty_directory_rename_retains_complete_namespace_for_undo() {
                 selected_ids: vec![id],
                 rule: NamingRule::FixedStem,
                 fixed_stem: "renamed".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -865,6 +883,9 @@ fn recovery_all_actions_are_reachable_through_one_review() {
                 selected_ids: selected,
                 rule: NamingRule::FixedStem,
                 fixed_stem: "renamed".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -1091,6 +1112,9 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
                 selected_ids: vec![item],
                 rule: NamingRule::FixedStem,
                 fixed_stem: "latest".into(),
+                selection_filter: None,
+                numbering_scope: Default::default(),
+                row_overrides: vec![],
             },
         )
         .unwrap(),
@@ -1101,7 +1125,10 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
             revision: 3,
             selected_ids: vec![item],
             rule: NamingRule::FixedStem,
-            fixed_stem: "late old".into()
+            fixed_stem: "late old".into(),
+            selection_filter: None,
+            numbering_scope: Default::default(),
+            row_overrides: vec![],
         }
     )
     .is_err());

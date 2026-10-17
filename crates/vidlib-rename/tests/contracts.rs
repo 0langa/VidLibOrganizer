@@ -16,7 +16,9 @@ fn fixture() -> (tempfile::TempDir, Inventory, RecipeV1, FrozenInputs) {
         schema_version: 1,
         revision: 9,
         selection: vec![id],
+        selection_filter: None,
         numbering_order: vec![id],
+        numbering_scope: Default::default(),
         rules: vec![Rule {
             id: "rename".into(),
             enabled: true,
@@ -36,6 +38,7 @@ fn fixture() -> (tempfile::TempDir, Inventory, RecipeV1, FrozenInputs) {
         now_ns: 1_701_234_567_123_456_789,
         timezone: FrozenTimezone::Utc,
         primary_order: vec![id],
+        numbering_scope: Default::default(),
         values: vec![FrozenValue {
             entry_id: id,
             rule_id: Some("rename".into()),

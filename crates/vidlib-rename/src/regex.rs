@@ -158,6 +158,50 @@ impl CompiledRegexRule {
         })
     }
 
+    /// Bounded interpreted match for selection; replacement text is never consulted.
+    pub fn is_match(&self, input: &str) -> Result<bool, RuleIssue> {
+        // SAFETY: default allocator; all contexts/data are owned throughout this call.
+        let context = MatchContext(allocation(unsafe {
+            pcre2_match_context_create_8(ptr::null_mut())
+        })?);
+        unsafe {
+            checked(pcre2_set_match_limit_8(
+                context.0.as_ptr(),
+                REGEX_LIMITS.match_limit,
+            ))?;
+            checked(pcre2_set_depth_limit_8(
+                context.0.as_ptr(),
+                REGEX_LIMITS.depth_limit,
+            ))?;
+            checked(pcre2_set_heap_limit_8(
+                context.0.as_ptr(),
+                REGEX_LIMITS.heap_limit_kib,
+            ))?;
+        }
+        // SAFETY: compiled code is live and the checked allocation is uniquely owned.
+        let data = MatchData(allocation(unsafe {
+            pcre2_match_data_create_from_pattern_8(self.code.0.as_ptr(), ptr::null_mut())
+        })?);
+        // SAFETY: UTF-8 input has exactly the explicit readable length. PCRE2
+        // retains no input pointers; code, context and data outlive the match.
+        let result = unsafe {
+            pcre2_match_8(
+                self.code.0.as_ptr(),
+                input.as_ptr(),
+                input.len(),
+                0,
+                PCRE2_NO_JIT,
+                data.0.as_ptr(),
+                context.0.as_ptr(),
+            )
+        };
+        match result {
+            PCRE2_ERROR_NOMATCH => Ok(false),
+            n if n >= 0 => Ok(true),
+            code => Err(native_issue(code)),
+        }
+    }
+
     pub fn apply(&self, input: &str) -> Result<String, RuleIssue> {
         // SAFETY: default allocator; code lives throughout data creation and use.
         let context = MatchContext(allocation(unsafe {
@@ -351,7 +395,9 @@ mod tests {
             schema_version: 1,
             revision: 1,
             selection: ids.clone(),
+            selection_filter: None,
             numbering_order: ids.clone(),
+            numbering_scope: Default::default(),
             rules: vec![
                 make_rule("one", true, "a", "b"),
                 make_rule("disabled", false, "(", "$99"),
@@ -368,6 +414,7 @@ mod tests {
             now_ns: 0,
             timezone: FrozenTimezone::Utc,
             primary_order: ids,
+            numbering_scope: Default::default(),
             values: vec![],
         };
         COMPILE_COUNT.with(|count| count.set(0));
