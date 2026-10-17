@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 7;
+pub(super) const VERSION: i64 = 8;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -428,4 +428,12 @@ CREATE TABLE recovery_restore(operation_id TEXT PRIMARY KEY REFERENCES operation
 pub(super) const V7_SQL: &str = r#"
 CREATE TABLE operation_inverses(operation_id TEXT PRIMARY KEY REFERENCES operations(id), original_operation TEXT NOT NULL REFERENCES operations(id));
 CREATE INDEX inverses_by_original ON operation_inverses(original_operation);
+"#;
+
+// A checked decimal counter changes in the same durable transaction as facts.
+// Older readers reject v8 rather than ignoring this query freshness protocol.
+pub(super) const V8_SQL: &str = r#"
+CREATE TABLE history_revision(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision TEXT NOT NULL);
+INSERT INTO history_revision VALUES(1,'0');
+CREATE INDEX history_by_state ON operations(state);
 "#;

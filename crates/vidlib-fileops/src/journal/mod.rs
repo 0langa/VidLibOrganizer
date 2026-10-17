@@ -12,6 +12,8 @@ use vidlib_inventory::{ids::*, FileStamp, NativePathRecord};
 use vidlib_rename::{EntryPrestate, ExecutionAction, ExpectedIdentity, PlanRef};
 use vidlib_rename::{ExecutionPlan, ExecutionStep};
 
+mod history;
+pub use history::{HistoryQuery, HistoryQueryCursor, HistoryQueryPage, HistorySort};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationState {
     Prepared,
@@ -569,6 +571,10 @@ impl Journal {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
             let result = work(&tx)?;
+            // Conservative freshness: every successful journal write, including
+            // coordination/outbox metadata, advances one exact checked revision.
+            // It rolls back with the affected durable facts on any failure.
+            history::advance_revision(&tx)?;
             commit(tx)?;
             Ok(result)
         })();

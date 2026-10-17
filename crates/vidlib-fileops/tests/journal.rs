@@ -849,3 +849,172 @@ fn many_steps_keep_exact_provenance_and_order_after_reopen() {
     }
     assert_eq!(journal.pending().unwrap().len(), 1);
 }
+#[test]
+fn history_revision_tracks_durable_facts_and_visibility() {
+    let (dir, plan) = fixture();
+    let path = dir.path().join("operations.sqlite3");
+    let mut journal = Journal::open(&path).unwrap();
+    let before = journal.history_revision().unwrap();
+    let op = journal.begin(&plan).unwrap();
+    let prepared = journal.history_revision().unwrap();
+    assert!(
+        prepared > before,
+        "operation insertion did not advance persisted data revision"
+    );
+    journal.set_state(op, OperationState::Cancelled).unwrap();
+    let terminal = journal.history_revision().unwrap();
+    assert!(
+        terminal > prepared,
+        "state change did not advance persisted data revision"
+    );
+    let request = HistoryQuery {
+        cursor: None,
+        limit: 1,
+        sort: HistorySort::Oldest,
+        filter: String::new(),
+        expected_revision: prepared,
+    };
+    assert_eq!(
+        journal.history_query(request).unwrap_err().code,
+        ErrorCode::StaleState
+    );
+    journal.remove_history(op).unwrap();
+    assert!(
+        journal.history_revision().unwrap() > terminal,
+        "visibility change did not advance persisted data revision"
+    );
+    drop(journal);
+    assert!(Journal::open(&path).unwrap().history_revision().unwrap() > terminal);
+}
+#[test]
+fn history_page_limit_filter_sort_and_range_are_stable() {
+    let (dir, plan) = fixture();
+    let mut journal = Journal::open(&dir.path().join("operations.sqlite3")).unwrap();
+    let first = journal.begin(&plan).unwrap();
+    journal.set_state(first, OperationState::Cancelled).unwrap();
+    let _middle = journal.begin(&plan).unwrap();
+    let last = journal.begin(&plan).unwrap();
+    journal.set_state(last, OperationState::Cancelled).unwrap();
+    let revision = journal.history_revision().unwrap();
+    let page = journal
+        .history_query(HistoryQuery {
+            cursor: None,
+            limit: 1,
+            sort: HistorySort::Newest,
+            filter: "cancelled".into(),
+            expected_revision: revision,
+        })
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "history limit/filter ignored");
+    assert_eq!(
+        page.items[0].operation_id, last,
+        "history display order ignored"
+    );
+    let cursor = page.next_cursor;
+    assert!(cursor.is_some());
+    let inserted = journal.begin(&plan).unwrap();
+    journal
+        .set_state(inserted, OperationState::Cancelled)
+        .unwrap();
+    let current = journal.history_revision().unwrap();
+    assert!(journal
+        .history_query(HistoryQuery {
+            cursor: cursor.clone(),
+            limit: 1,
+            sort: HistorySort::Newest,
+            filter: "cancelled".into(),
+            expected_revision: revision
+        })
+        .is_err());
+    let continuation = journal
+        .history_query(HistoryQuery {
+            cursor,
+            limit: 1,
+            sort: HistorySort::Newest,
+            filter: "cancelled".into(),
+            expected_revision: current,
+        })
+        .unwrap();
+    assert_eq!(continuation.items.len(), 1);
+    assert_eq!(
+        continuation.items[0].operation_id, first,
+        "new insertion changed the existing keyset range"
+    );
+    assert!(continuation.next_cursor.is_none());
+    let page = journal
+        .history_query(HistoryQuery {
+            cursor: None,
+            limit: usize::MAX,
+            sort: HistorySort::State,
+            filter: String::new(),
+            expected_revision: current,
+        })
+        .unwrap();
+    assert_eq!(page.items.len(), 4);
+    assert_eq!(page.items[0].state, OperationState::Cancelled);
+}
+#[test]
+fn v7_history_revision_upgrade_preserves_evidence_and_rolls_back_failure() {
+    let (dir, plan) = fixture();
+    let path = dir.path().join("operations.sqlite3");
+    let mut journal = Journal::open(&path).unwrap();
+    let op = journal.begin(&plan).unwrap();
+    drop(journal);
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DELETE FROM schema_migrations WHERE version>=8; PRAGMA user_version=7;").unwrap();
+    drop(db);
+    let journal = Journal::open(&path).unwrap();
+    assert_eq!(
+        journal.operation(op).unwrap().state,
+        OperationState::Prepared
+    );
+    assert_eq!(
+        Connection::open(&path)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        8,
+        "v7 history schema did not upgrade"
+    );
+    drop(journal);
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE history_revision; DELETE FROM schema_migrations WHERE version>=8; PRAGMA user_version=7; CREATE TABLE history_revision(evidence TEXT); INSERT INTO history_revision VALUES('retain me');").unwrap();
+    assert!(Journal::open(&path).is_err());
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    assert_eq!(
+        db.query_row("SELECT evidence FROM history_revision", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "retain me"
+    );
+}
+#[test]
+fn history_revision_write_failure_rolls_back_facts_and_exact_overflow() {
+    let (dir, plan) = fixture();
+    let path = dir.path().join("operations.sqlite3");
+    let mut journal = Journal::open(&path).unwrap();
+    let op = journal.begin(&plan).unwrap();
+    let before = journal.history_revision().unwrap();
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_revision BEFORE UPDATE ON history_revision BEGIN SELECT RAISE(ABORT,'revision commit rejected'); END;").unwrap();
+    assert!(journal.set_state(op, OperationState::Cancelled).is_err());
+    assert_eq!(journal.history_revision().unwrap(), before);
+    assert_eq!(
+        journal.operation(op).unwrap().state,
+        OperationState::Prepared
+    );
+    db.execute_batch("DROP TRIGGER reject_revision; UPDATE history_revision SET revision='18446744073709551615';").unwrap();
+    drop(journal);
+    let mut journal = Journal::open(&path).unwrap();
+    assert_eq!(journal.history_revision().unwrap(), u64::MAX);
+    assert!(journal.set_state(op, OperationState::Cancelled).is_err());
+    assert_eq!(journal.history_revision().unwrap(), u64::MAX);
+    assert_eq!(
+        journal.operation(op).unwrap().state,
+        OperationState::Prepared
+    );
+}

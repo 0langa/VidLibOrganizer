@@ -8,8 +8,8 @@ use std::{
 };
 use vidlib_fileops::{
     coordinator::{Lease, LeaseKind},
-    journal::{HistoryCursor, Journal},
-    recovery::{self, RecoveryPreview},
+    journal::{HistoryQuery, HistoryQueryCursor, HistoryQueryPage, HistorySort, Journal},
+    recovery::{self, RecoveryAction, RecoveryPreview},
     ErrorCode, Filesystem, OpError, Phase, PlatformFs,
 };
 use vidlib_inventory::{ids::*, *};
@@ -178,10 +178,32 @@ pub struct ApplyRequest {
 pub struct JobRequest {
     pub job_id: JobId,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HistoryRequest {
-    pub cursor: Option<HistoryCursor>,
+    pub query: PageQuery,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationDto {
+    pub operation_id: OperationId,
+    pub state: String,
+    pub inverse_of: Option<OperationId>,
+    #[serde(with = "exact::u64_decimal")]
+    pub completed_steps: u64,
+    pub undo_available: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryResponse {
+    pub items: Vec<OperationDto>,
+    pub next_cursor: Option<String>,
+    #[serde(with = "exact::u64_decimal")]
+    pub revision: u64,
+    pub pending_operations: Vec<OperationId>,
+    #[serde(with = "exact::u64_decimal")]
+    pub pending_count: u64,
+    pub legacy_unresolved: bool,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -215,6 +237,25 @@ pub struct JobStatusDto {
     pub error: Option<CommandError>,
     pub progress: Option<Value>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InputBinding {
+    revision: u64,
+    selection_generation: u64,
+}
+impl InputBinding {
+    fn capture(state: &RenameState) -> Self {
+        Self {
+            revision: state.revision,
+            selection_generation: state.selection_generation,
+        }
+    }
+}
+struct RecoveryReview {
+    preview: RecoveryPreview,
+    choices: Vec<Choice>,
+    binding: InputBinding,
+    actions: Arc<Vec<RecoveryAction>>,
+}
 #[derive(Default)]
 pub struct RenameState {
     pub(crate) roots: Vec<RootBinding>,
@@ -223,7 +264,7 @@ pub struct RenameState {
     pub(crate) inventory: Option<Arc<Inventory>>,
     jobs: BTreeMap<JobId, crate::jobs::RenameJob>,
     plan_revision: u64,
-    reviews: BTreeMap<StepId, (RecoveryPreview, Vec<Choice>)>,
+    reviews: BTreeMap<StepId, RecoveryReview>,
     policy: ProtectedPolicy,
 }
 fn lock(state: &AppState) -> Result<MutexGuard<'_, RenameState>> {
@@ -369,7 +410,7 @@ fn page_items<T>(
     mut rows: Vec<&T>,
     q: &PageQuery,
     revision: u64,
-    key: impl Fn(&T, bool) -> (String, EntryId),
+    key: impl Fn(&T, bool) -> (String, String),
     project: impl Fn(&T) -> Value,
 ) -> Result<Page> {
     if q.expected_revision != revision {
@@ -414,7 +455,7 @@ pub fn inventory_page_owned(state: &AppState, request: InventoryPageRequest) -> 
         rows,
         &request.query,
         revision,
-        |e, _| (e.display_name.clone(), e.id),
+        |e, _| (e.display_name.clone(), e.id.to_string()),
         |e| json!({"itemId":e.id,"displayName":e.display_name,"displayPath":e.display_path,"kind":format!("{:?}",e.kind),"sizeBytes":e.stamp.size.map(|n|n.to_string())}),
     )
 }
@@ -541,7 +582,7 @@ pub fn page_owned(state: &AppState, request: PageRequest) -> Result<Page> {
                 } else {
                     row.old_display_name.clone()
                 },
-                row.entry_id,
+                row.entry_id.to_string(),
             )
         },
         row_dto,
@@ -585,17 +626,91 @@ pub fn apply_owned(state: &AppState, request: ApplyRequest) -> Result<JobId> {
         )?))
     })
 }
+fn history_response(
+    page: HistoryQueryPage,
+    pending: Vec<OperationId>,
+    pending_count: u64,
+    legacy_unresolved: bool,
+) -> Result<HistoryResponse> {
+    Ok(HistoryResponse {
+        items: page
+            .items
+            .into_iter()
+            .map(|i| OperationDto {
+                operation_id: i.operation_id,
+                state: camel_tag(&format!("{:?}", i.state)),
+                inverse_of: i.inverse_of,
+                completed_steps: i.completed_steps,
+                undo_available: i.undo_available,
+            })
+            .collect(),
+        next_cursor: page
+            .next_cursor
+            .map(|c| serde_json::to_string(&c))
+            .transpose()
+            .map_err(|e| stale(e.to_string()))?,
+        revision: page.revision,
+        pending_operations: pending,
+        pending_count,
+        legacy_unresolved,
+    })
+}
 pub fn history_owned(state: &AppState, request: HistoryRequest) -> Result<Value> {
     let lease = state.coordinator.try_acquire(LeaseKind::Recovery)?;
     let status = lease.status()?;
+    let query = request.query;
+    let sort = match query.sort.as_str() {
+        "name" | "operationId" => HistorySort::OperationId,
+        "state" => HistorySort::State,
+        "oldest" => HistorySort::Oldest,
+        "newest" => HistorySort::Newest,
+        _ => return Err(stale("Unsupported history sort")),
+    };
+    if query.cursor.as_ref().is_some_and(|s| s.len() > 32768) {
+        return Err(stale("History cursor exceeds limit"));
+    }
+    let cursor: Option<HistoryQueryCursor> = query
+        .cursor
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(|_| stale("Invalid history cursor"))?;
     let journal = Journal::open(&state.operations)?;
-    let page = journal.history(request.cursor)?;
+    let page = journal.history_query(HistoryQuery {
+        cursor,
+        limit: query.limit,
+        sort,
+        filter: query.filter,
+        expected_revision: query.expected_revision,
+    })?;
     let pending = journal.pending()?;
-    Ok(
-        json!({"items":page.items.iter().map(|i|json!({"operationId":i.operation_id,"state":camel_tag(&format!("{:?}",i.state)),"inverseOf":i.inverse_of,"completedSteps":i.completed_steps.to_string(),"undoAvailable":i.undo_available})).collect::<Vec<_>>(),"nextCursor":page.next_cursor,"pendingOperations":pending.iter().take(200).map(|p|p.operation_id).collect::<Vec<_>>(),"pendingCount":pending.len().to_string(),"legacyUnresolved":status.interrupted_legacy_write}),
-    )
+    let pending_count = pending.len() as u64;
+    let response = history_response(
+        page,
+        pending
+            .into_iter()
+            .take(200)
+            .map(|p| p.operation_id)
+            .collect(),
+        pending_count,
+        status.interrupted_legacy_write,
+    )?;
+    serde_json::to_value(response).map_err(|e| stale(e.to_string()))
 }
-pub fn recovery_preview_owned(state: &AppState, request: OperationRequest) -> Result<Value> {
+pub fn history_revision_owned(state: &AppState, _request: EmptyRequest) -> Result<Value> {
+    Ok(json!({"revision":Journal::open(&state.operations)?.history_revision()?.to_string()}))
+}
+/// Owned, nonserializable capture phase. The matching exclusive lease stays
+/// with this value through native reconciliation and publication.
+pub struct RecoveryInspection {
+    lease: Lease,
+    record: vidlib_fileops::journal::OperationRecord,
+    policy: ProtectedPolicy,
+    binding: InputBinding,
+}
+pub fn prepare_recovery_owned(
+    state: &AppState,
+    request: OperationRequest,
+) -> Result<RecoveryInspection> {
     let lease = state.coordinator.try_acquire(LeaseKind::Recovery)?;
     if lease.status()?.interrupted_legacy_write {
         return Err(OpError::new(
@@ -605,6 +720,10 @@ pub fn recovery_preview_owned(state: &AppState, request: OperationRequest) -> Re
         )
         .into());
     }
+    let r = lock(state)?;
+    let binding = InputBinding::capture(&r);
+    let policy = r.policy.clone();
+    drop(r);
     let journal = Journal::open(&state.operations)?;
     let record = journal.operation(request.operation_id)?;
     if !journal
@@ -614,7 +733,44 @@ pub fn recovery_preview_owned(state: &AppState, request: OperationRequest) -> Re
     {
         return Err(stale("Operation does not require recovery"));
     }
-    let policy = lock(state)?.policy.clone();
+    Ok(RecoveryInspection {
+        lease,
+        record,
+        policy,
+        binding,
+    })
+}
+fn action_dto(action: &RecoveryAction) -> Value {
+    json!({"stepId":action.step_id,"disposition":camel_tag(&format!("{:?}",action.disposition)),"beforeDisplay":action.before_path.as_ref().and_then(|p|decode_path(p).ok()).map(|p|p.to_string_lossy().into_owned()),"afterDisplay":action.after_path.as_ref().and_then(|p|decode_path(p).ok()).map(|p|p.to_string_lossy().into_owned())})
+}
+fn action_page(actions: &[RecoveryAction], query: &PageQuery, revision: u64) -> Result<Page> {
+    page_items(
+        actions.iter().collect(),
+        query,
+        revision,
+        |action, status| {
+            let name = if status {
+                camel_tag(&format!("{:?}", action.disposition))
+            } else {
+                action
+                    .before_path
+                    .as_ref()
+                    .and_then(|p| decode_path(p).ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            (name, action.step_id.to_string())
+        },
+        action_dto,
+    )
+}
+pub fn publish_recovery_owned(state: &AppState, inspection: RecoveryInspection) -> Result<Value> {
+    let RecoveryInspection {
+        lease,
+        record,
+        policy,
+        binding,
+    } = inspection;
     let mut fs = fs_for(&lease, &policy)?;
     let preview = recovery::reconcile(&record, &mut fs)?;
     let nonce = preview.review_nonce();
@@ -626,20 +782,65 @@ pub fn recovery_preview_owned(state: &AppState, request: OperationRequest) -> Re
     } else {
         vec![Choice::Resume, Choice::Restore]
     };
-    let result = json!({"recoveryRef":reference,"nonce":nonce,"operationId":request.operation_id,"choices":choices,"continuingRestore":record.restore_context.is_some(),"unresolvedGroups":preview.unresolved_groups.len().to_string(),"actions":preview.actions.iter().take(200).map(|a|json!({"stepId":a.step_id,"disposition":camel_tag(&format!("{:?}",a.disposition)),"beforeDisplay":a.before_path.as_ref().and_then(|p|decode_path(p).ok()).map(|p|p.to_string_lossy().into_owned()),"afterDisplay":a.after_path.as_ref().and_then(|p|decode_path(p).ok()).map(|p|p.to_string_lossy().into_owned())})).collect::<Vec<_>>(),"actionCount":preview.actions.len().to_string()});
+    let actions = Arc::new(preview.actions.clone());
+    let page = action_page(
+        &actions,
+        &PageQuery::new(binding.revision),
+        binding.revision,
+    )?;
+    let result = json!({"recoveryRef":reference,"nonce":nonce,"operationId":record.operation_id,"revision":binding.revision.to_string(),"choices":choices,"continuingRestore":record.restore_context.is_some(),"unresolvedGroups":preview.unresolved_groups.len().to_string(),"page":page,"actionCount":actions.len().to_string()});
     let mut r = lock(state)?;
+    if InputBinding::capture(&r) != binding {
+        return Err(stale(
+            "Recovery review was superseded by newer inputs or native selection",
+        ));
+    }
     r.reviews.clear();
-    r.reviews.insert(reference, (preview, choices));
+    r.reviews.insert(
+        reference,
+        RecoveryReview {
+            preview,
+            choices,
+            binding,
+            actions,
+        },
+    );
     Ok(result)
+}
+pub fn recovery_preview_owned(state: &AppState, request: OperationRequest) -> Result<Value> {
+    publish_recovery_owned(state, prepare_recovery_owned(state, request)?)
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryPageRequest {
+    pub recovery_ref: StepId,
+    pub query: PageQuery,
+}
+pub fn recovery_page_owned(state: &AppState, request: RecoveryPageRequest) -> Result<Page> {
+    let r = lock(state)?;
+    let review = r
+        .reviews
+        .get(&request.recovery_ref)
+        .ok_or_else(|| stale("Recovery review expired"))?;
+    if review.binding != InputBinding::capture(&r) {
+        return Err(stale("Recovery review expired"));
+    }
+    let actions = review.actions.clone();
+    let revision = review.binding.revision;
+    drop(r);
+    action_page(&actions, &request.query, revision)
 }
 pub fn recovery_owned(state: &AppState, request: RecoveryRequest) -> Result<JobId> {
     let lease = state.coordinator.try_acquire(LeaseKind::Recovery)?;
     let mut r = lock(state)?;
-    let (preview, choices) = r
+    let review = r
         .reviews
         .remove(&request.recovery_ref)
         .ok_or_else(|| stale("Recovery review expired"))?;
-    if !choices.iter().any(|c| {
+    if review.binding != InputBinding::capture(&r) {
+        return Err(stale("Recovery review expired"));
+    }
+    if !review.choices.iter().any(|c| {
         matches!(
             (c, request.choice),
             (Choice::Resume, Choice::Resume) | (Choice::Restore, Choice::Restore)
@@ -648,7 +849,7 @@ pub fn recovery_owned(state: &AppState, request: RecoveryRequest) -> Result<JobI
         return Err(stale("Recovery choice unavailable"));
     }
     let policy = r.policy.clone();
-    let reviewed = preview.review(request.nonce)?;
+    let reviewed = review.preview.review(request.nonce)?;
     let (id, control) = reserve(&mut r)?;
     plans(state)?.invalidate();
     r.inventory = None;
@@ -753,10 +954,22 @@ command!(confirm_rename, PlanRequest, Confirmation, confirm_owned);
 command!(apply_rename, ApplyRequest, JobId, apply_owned);
 command!(operation_history, HistoryRequest, Value, history_owned);
 command!(
+    history_revision,
+    EmptyRequest,
+    Value,
+    history_revision_owned
+);
+command!(
     recovery_preview,
     OperationRequest,
     Value,
     recovery_preview_owned
+);
+command!(
+    recovery_page,
+    RecoveryPageRequest,
+    Page,
+    recovery_page_owned
 );
 command!(start_recovery, RecoveryRequest, JobId, recovery_owned);
 command!(start_undo, UndoRequest, JobId, undo_owned);
@@ -845,5 +1058,102 @@ mod tests {
             serde_json::to_value(stale("Preview expired. Preview again.")).unwrap(),
             golden["error"]
         );
+    }
+    // Emulate a late publisher restoring an entry after the normal clear. The
+    // consumer must independently validate both parts of the stored binding.
+    #[test]
+    fn recovery_consumption_rechecks_revision_and_native_generation() {
+        fn done(state: &AppState, id: JobId) -> Value {
+            for _ in 0..1000 {
+                let status = status_owned(state, JobRequest { job_id: id }).unwrap();
+                if status.state != "running" {
+                    assert_eq!(status.state, "completed", "{status:?}");
+                    return status.result.unwrap();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            panic!("job timeout")
+        }
+        for native in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let media = dir.path().join("media");
+            std::fs::create_dir(&media).unwrap();
+            std::fs::write(media.join("original.mp4"), b"media").unwrap();
+            let state =
+                AppState::open(&dir.path().join("app"), dir.path().join("libraries.json")).unwrap();
+            crate::selection::install_selection(&state, vec![media.clone()]).unwrap();
+            done(
+                &state,
+                inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+            );
+            let page = inventory_page_owned(
+                &state,
+                InventoryPageRequest {
+                    query: PageQuery::new(1),
+                },
+            )
+            .unwrap();
+            let item = serde_json::from_value(page.items[0]["itemId"].clone()).unwrap();
+            let preview = done(
+                &state,
+                preview_owned(
+                    &state,
+                    RenameRequestDto {
+                        revision: 2,
+                        selected_ids: vec![item],
+                        rule: NamingRule::FixedStem,
+                        fixed_stem: "renamed".into(),
+                    },
+                )
+                .unwrap(),
+            );
+            let reference: UiPlanRef = serde_json::from_value(preview["planRef"].clone()).unwrap();
+            let plan = {
+                let lease = state.coordinator.try_acquire(LeaseKind::Read).unwrap();
+                plans(&state)
+                    .unwrap()
+                    .snapshot(reference.into(), &lease)
+                    .unwrap()
+            };
+            let operation = {
+                let _lease = state.coordinator.try_acquire(LeaseKind::Write).unwrap();
+                Journal::open(&state.operations)
+                    .unwrap()
+                    .begin(&plan.execution)
+                    .unwrap()
+            };
+            let review = recovery_preview_owned(
+                &state,
+                OperationRequest {
+                    operation_id: operation,
+                },
+            )
+            .unwrap();
+            let reference = serde_json::from_value(review["recoveryRef"].clone()).unwrap();
+            let retained = lock(&state).unwrap().reviews.remove(&reference).unwrap();
+            if native {
+                let replacement = dir.path().join("replacement");
+                std::fs::create_dir(&replacement).unwrap();
+                crate::selection::install_selection(&state, vec![replacement]).unwrap();
+            } else {
+                update_inputs_owned(&state, InputRevision { revision: 3 }).unwrap();
+            }
+            lock(&state).unwrap().reviews.insert(reference, retained);
+            assert_eq!(
+                recovery_owned(
+                    &state,
+                    RecoveryRequest {
+                        recovery_ref: reference,
+                        choice: Choice::Resume,
+                        nonce: serde_json::from_value(review["nonce"].clone()).unwrap()
+                    }
+                )
+                .unwrap_err()
+                .code,
+                "staleState"
+            );
+            assert!(media.join("original.mp4").exists());
+            assert!(!media.join("renamed.mp4").exists());
+        }
     }
 }

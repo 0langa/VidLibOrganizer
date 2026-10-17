@@ -772,7 +772,7 @@ fn failed_v4_recovery_migration_rolls_back_without_losing_evidence() {
         .unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
-    db.execute_batch("DROP TABLE operation_inverses; DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=5; PRAGMA user_version=4; CREATE TABLE recovery_effects(conflicting_evidence TEXT); INSERT INTO recovery_effects VALUES('retain original evidence');").unwrap();
+    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=5; PRAGMA user_version=4; CREATE TABLE recovery_effects(conflicting_evidence TEXT); INSERT INTO recovery_effects VALUES('retain original evidence');").unwrap();
     assert!(Journal::open(&f.coordinator.database_path()).is_err());
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -1041,14 +1041,14 @@ fn v5_migration_preserves_receipts_without_inventing_restore_scope() {
     let events = journal.events_after(0, 200).unwrap().items;
     drop(journal);
     let db = rusqlite::Connection::open(coordinator.database_path()).unwrap();
-    db.execute_batch("DROP TABLE operation_inverses; DROP TABLE recovery_restore; DELETE FROM schema_migrations WHERE version>=6; PRAGMA user_version=5;").unwrap();
+    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DROP TABLE recovery_restore; DELETE FROM schema_migrations WHERE version>=6; PRAGMA user_version=5;").unwrap();
     journal = Journal::open(&coordinator.database_path()).unwrap();
     assert_eq!(journal.pending().unwrap(), vec![before]);
     assert_eq!(journal.events_after(0, 200).unwrap().items, events);
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     assert_restore_preserves_completed_group(&media, &coordinator, &mut journal);
 }
@@ -1067,7 +1067,7 @@ fn failed_v5_restore_migration_retains_original_evidence() {
             .unwrap()
     };
     let before = states(&db);
-    db.execute_batch("DROP TABLE operation_inverses; DROP TABLE recovery_restore; DELETE FROM schema_migrations WHERE version>=6; PRAGMA user_version=5; CREATE TABLE recovery_restore(evidence TEXT); INSERT INTO recovery_restore VALUES('retain original evidence');").unwrap();
+    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DROP TABLE recovery_restore; DELETE FROM schema_migrations WHERE version>=6; PRAGMA user_version=5; CREATE TABLE recovery_restore(evidence TEXT); INSERT INTO recovery_restore VALUES('retain original evidence');").unwrap();
     assert!(Journal::open(&coordinator.database_path()).is_err());
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))

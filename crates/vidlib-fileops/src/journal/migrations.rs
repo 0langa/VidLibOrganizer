@@ -54,6 +54,12 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
         conn.prepare("SELECT operation_id,original_operation FROM operation_inverses LIMIT 0")
             .map_err(|_| unsupported())?;
     }
+    if version >= 8 {
+        expected.push((8, format!("{:x}", md5::compute(schema::V8_SQL))));
+        super::history::read_revision(conn).map_err(|_| unsupported())?;
+        conn.prepare("SELECT state FROM operations INDEXED BY history_by_state LIMIT 0")
+            .map_err(|_| unsupported())?;
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -162,6 +168,14 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
         tx.execute(
             "INSERT INTO schema_migrations(version,checksum) VALUES(7,?1)",
             [format!("{:x}", md5::compute(schema::V7_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 8 {
+        tx.execute_batch(schema::V8_SQL).map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(8,?1)",
+            [format!("{:x}", md5::compute(schema::V8_SQL))],
         )
         .map_err(super::sql_error)?;
     }
