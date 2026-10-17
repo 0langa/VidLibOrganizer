@@ -129,6 +129,8 @@ Task 01 also defines read-only `DirectoryFacts` and `NamespaceSnapshot` in inven
 
 Task 03 owns `RecipeV1 { schema_version: 1, revision, selection, numbering_order, rules, companions, destination, collision_policy, metadata_changes }`. Every rule is tagged data with its own ID, enabled flag, segment selector, and parameters; reject unknown tags/versions. No eval or embedded JavaScript.
 
+Task 15 adds serde-default `selection_filter` and `numbering_scope` to RecipeV1. The filter retains explicit exclusion choices; evaluation validates the frozen selection rather than silently selecting new IDs. `Files` is the default counter scope and `Directories` is explicit; mixed-kind rows remain in the preview, with Number rules consuming ordinals only in the active kind. Full primary order and scoped counter order remain distinct. Desktop nested DTOs adapt to camelCase while the core recipe serialization remains stable.
+
 Pin these semantics before implementing rules:
 
 - Text positions are 1-based Unicode extended grapheme indices; negative positions count from the end (`-1` is last), endpoints are inclusive, zero/out-of-range is a row issue. Delimiter occurrence is 1-based, literal, left-to-right/non-overlapping; delimiters are excluded unless explicitly requested. Resolve each rule's segment against that rule's **current** input; do not alter outside text.
@@ -445,17 +447,17 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** `select(inventory: &Inventory, filter: &SelectionFilter) -> Result<Vec<EntryId>, RenameError>`; `import_mappings(reader, format, inventory, grants) -> Result<MappingSet, RenameError>`; `export_report(plan, SpreadsheetSafe | ExactMapping) -> Result<Vec<u8>, RenameError>`. Explicit mapping format v1 has `old_path,new_path` with quoted CSV or a user-selected delimiter; exact path lookup precedes unique-basename fallback. Pasted new-name lists map the frozen explicit order and require exact cardinality.
 
-- [ ] **Step 1 — Red:** Add `every_filter_dimension`, `exclude_rebuilds_numbers_and_collisions`, `ambiguous_basename_and_outside_root_rejected`, `quoted_csv_and_paste_cardinality`, `mapping_limits_before_allocation`, and `spreadsheet_safe_export_does_not_change_recorded_path`.
+- [x] **Step 1 — Red:** Add `every_filter_dimension`, `exclude_rebuilds_numbers_and_collisions`, `ambiguous_basename_and_outside_root_rejected`, `quoted_csv_and_paste_cardinality`, `mapping_limits_before_allocation`, and `spreadsheet_safe_export_does_not_change_recorded_path`.
   ```rust
   assert_eq!(err.code, RenameErrorCode::AmbiguousMapping);
   assert_eq!(limit_error.code, RenameErrorCode::ImportLimit);
   assert_eq!(stored_original_name, "=SUM(1,2).mkv");
   assert!(spreadsheet_cell.starts_with('\''));
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test selection_mappings`.
-- [ ] **Step 3 — Implement:** Wildcard/PCRE2 filters across every R11 field, depth/kind/extension/date/size/attribute selection, exact path mapping, explicit row override, 64 MiB/100,000-row streaming limits and safe reports. Reject traversal/duplicate mappings and unknown IDs. Distinguish spreadsheet-safe reports from lossless mapping exports so protection prefixes never accidentally become renamed filenames.
-- [ ] **Step 4 — Verify green:** Boundary tests at/above byte/row limits and quoted Unicode/multiline CSV; all-row preflight after selection changes. Formula-like input is literal data and never executed.
-- [ ] **Step 5 — Commit:** `feat: add bounded selection mappings and report workflows`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test selection_mappings`.
+- [x] **Step 3 — Implement:** Wildcard/PCRE2 filters across every R11 field, depth/kind/extension/date/size/attribute selection, exact path mapping, explicit row override, 64 MiB/100,000-row streaming limits and safe reports. Reject traversal/duplicate mappings and unknown IDs. Distinguish spreadsheet-safe reports from lossless mapping exports so protection prefixes never accidentally become renamed filenames.
+- [x] **Step 4 — Verify green:** Boundary tests at/above byte/row limits and quoted Unicode/multiline CSV; all-row preflight after selection changes. Formula-like input is literal data and never executed.
+- [x] **Step 5 — Commit:** `feat: add bounded selection mappings and report workflows`.
 
 ### Task 16: Presets and the single recipe editor
 
@@ -788,7 +790,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–14 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13's Windows local-zone/runtime checks remain pending. Task 14's verified-reader Windows runtime and desktop cross-check remain pending. Task 15 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–15 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13's Windows local-zone/runtime checks remain pending. Task 14's verified-reader Windows runtime and desktop cross-check remain pending. Task 15's native desktop/runtime checks remain pending. Task 16 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -814,6 +816,8 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 13: `a249c4a` | Checked frozen-order numbering/repeats/signed padding/alphabetic formats/original-folder resets and typed date parsing, explicit zones, frozen time, source separation and DST policies. 106 scoped and 365 distinct workspace tests pass; Clippy/fmt and all six Windows test-executable cross-links/import checks pass. Independent review approved; legacy offset inspection remains backward-readable. Minor excess RFC3339 fractional precision is deferred for final triage. Windows local-zone/native runtime and packaged release remain pending. Next eligible: Task 14. |
 
 | 2026-10-17 | Task 14: `7ed27a8`, review fix `8df016d` | Typed template AST rendering, exact formatters and missing/optional behavior; verified lazy full-file five-algorithm hashing with 1 MiB chunks and frozen per-inventory/rule tokens, clock and Counter scope. Initial 157 owning tests and 391 distinct workspace tests pass; final anchor-root regression fix passes 25 covering tests and owning static checks. Core Windows test executables link; desktop cross-check is blocked in resource preprocessing by a missing GCC executable. Independent review plus scoped re-review approved. Minor cache scaling concern deferred. Actual Windows/UNC/reparse/storage and installed runtime remain pending; mutation gates closed. Next eligible: Task 15. |
+
+| 2026-10-17 | Task 15: `54d8f6d`, review fix `d3fd552` | Full typed selection filters and explicit exclusions; scoped file/directory counters with frozen provenance; streaming 64 MiB/100,000-row CSV mappings, authorized native targets, literal row overrides and separate spreadsheet-safe/lossless exports. Initial 417 distinct workspace tests pass; final camelCase boundary fix passes 67 covering Rust plus 4 Node/16 Chromium tests and static checks. Shared literal wire goldens reject unknown fields and rounded quantities while preserving core recipe data. Core Windows executables link; desktop cross-check was blocked when run. SDK resource preflight is now repaired, but no full desktop cross-check or native runtime claim follows. Independent review and scoped re-review approved; color warning resolved during necessary UI verification. Next eligible: Task 16. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -844,3 +848,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 13 native date/number/runtime: explicit OS local-zone resolution and confirmation, UTC/fixed/IANA and DST fixtures, exact date fields in the installed app. All six GNU test executables link with OS DLLs only; actual Windows/MSVC execution and packaging remain pending.
 
 - [ ] Windows Task 14 content/input runtime: drive/share anchor identity, no-follow content reads, native material freshness, hashing/cancellation and frozen desktop preview. Core GNU test binaries link; the desktop GNU cross-check stopped in tauri-winres resource preprocessing because x86_64-w64-mingw32-gcc is unavailable (gcc-posix exists). Actual Windows/MSVC/package checks remain pending; no runtime gate opened.
+
+- [ ] Windows Task 15 native selection/mapping/desktop runtime: explicit scopes, filter/exclusion revocation, native authorized mappings, exact exports and installed controls. Core GNU test executables link. The desktop cross-check stopped at the then-missing GCC resource-preprocessor alias; later SDK preflight repair is not a completed desktop build or Windows runtime check.
