@@ -923,7 +923,9 @@ fn simulate_material_prestates(inventory: &Inventory, plan: &RenamePlan) -> Vec<
             ExpectedIdentity::DirectoryAfterEffects { .. } => {
                 panic!("ordinary rename graph cannot refresh copy-directory material")
             }
-            ExpectedIdentity::Observed(stamp) => stamp,
+            ExpectedIdentity::Observed(stamp) | ExpectedIdentity::MetadataChecked { stamp, .. } => {
+                stamp
+            }
             ExpectedIdentity::FromReceipt { step_id } => {
                 let (recorded_path, stamp) = &receipts[step_id];
                 assert_eq!(

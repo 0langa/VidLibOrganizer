@@ -215,6 +215,7 @@ fn interrupted_undo_is_recoverable() {
         .unwrap();
     native
         .rename_reviewed(&platform::RenameRequest {
+            controlled_timestamps: &[],
             source: &source.path,
             target,
             expected: stamp,
@@ -426,6 +427,7 @@ fn durable_steps(f: &Fixture, count: usize) -> OperationId {
             .unwrap();
         let outcome = native
             .rename_reviewed(&platform::RenameRequest {
+                controlled_timestamps: &[],
                 source: &source.path,
                 target,
                 expected: stamp,

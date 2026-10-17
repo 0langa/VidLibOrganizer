@@ -1409,7 +1409,14 @@ fn metadata_undo_crash_child() {
         serde_json::to_vec(&original).unwrap(),
     )
     .unwrap();
-    let report = f.run(&f.plan().unwrap());
+    let forward = if std::env::var("VIDLIB_METADATA_COPY_UNDO").is_ok() {
+        let dest = f._dir.path().join("destination");
+        fs::create_dir(&dest).unwrap();
+        f.destination(&dest, false)
+    } else {
+        f.plan().unwrap()
+    };
+    let report = f.run(&forward);
     assert_eq!(report.state, OperationState::Completed);
     let inverse = undo_plan(&f, report.operation_id.unwrap()).unwrap();
     let lease = f.coordinator.try_acquire(LeaseKind::Write).unwrap();
@@ -1707,5 +1714,334 @@ fn windows_metadata_execution_and_undo_restore_each_explicit_field() {
             ),
             vidlib_rename::metadata::timestamp(&original, field)
         );
+    }
+}
+
+#[test]
+fn directory_undo_refuses_external_controlled_timestamps() {
+    directory_controlled_timestamp_refusal(false);
+}
+#[test]
+fn directory_child_undo_refuses_external_modified_time() {
+    directory_controlled_timestamp_refusal(true);
+}
+fn directory_controlled_timestamp_refusal(with_child: bool) {
+    {
+        let mut f = Fixture::new();
+        f.folder();
+        if !with_child {
+            let id = f.recipe.selection[0];
+            f.recipe.selection = vec![id];
+            f.recipe.numbering_order = vec![id];
+            f.frozen.primary_order = vec![id];
+        }
+        if with_child {
+            f.renamed();
+        }
+        let field = if with_child {
+            TimestampField::Modified
+        } else {
+            TimestampField::Accessed
+        };
+        f.recipe.metadata_changes = vec![MetadataChange::Timestamp {
+            field,
+            value_ns: 1_600_000_000_000_000_000,
+        }];
+        let report = f.run(&f.plan().unwrap());
+        assert_eq!(report.state, OperationState::Completed);
+        let path = f.media.join(if with_child { "renamed" } else { "Tree" });
+        let current = PlatformFs::default().inspect(&path).unwrap().stamp;
+        let external = 1_650_000_000_000_000_000;
+        PlatformFs::default()
+            .set_metadata(
+                &path,
+                &current,
+                &vidlib_fileops::platform::MetadataUpdate {
+                    modified_ns: with_child.then_some(external),
+                    accessed_ns: (!with_child).then_some(external),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let inverse = undo_plan(&f, report.operation_id.unwrap());
+        assert!(
+            inverse.is_err() || inverse.as_ref().unwrap().counts.blocked > 0,
+            "controlled directory field adopted: child={with_child}"
+        );
+        assert_eq!(
+            vidlib_rename::metadata::timestamp(
+                &PlatformFs::default().inspect(&path).unwrap().stamp,
+                field
+            ),
+            Some(external)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_undo_rechecks_controlled_access_time_after_preview() {
+    let mut f = Fixture::new();
+    f.single();
+    f.modified_and_accessed();
+    let dest = tempfile::tempdir_in("/dev/shm").unwrap();
+    let plan = f.destination(dest.path(), false);
+    let report = f.run(&plan);
+    assert_eq!(report.state, OperationState::Completed);
+    let inverse = undo_plan(&f, report.operation_id.unwrap()).unwrap();
+    let path = dest.path().join("a");
+    let expected = PlatformFs::default().inspect(&path).unwrap().stamp;
+    let external = 1_650_000_000_000_000_000;
+    PlatformFs::default()
+        .set_metadata(
+            &path,
+            &expected,
+            &vidlib_fileops::platform::MetadataUpdate {
+                accessed_ns: Some(external),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let lease = f.coordinator.try_acquire(LeaseKind::Write).unwrap();
+    let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    let mut adapter = PlatformFs {
+        namespace_epoch: inverse.execution.provenance.namespace_epoch,
+        policy_epoch: inverse.execution.provenance.policy_epoch,
+        ..Default::default()
+    };
+    let outcome = execute(
+        &inverse,
+        &lease,
+        &mut journal,
+        &mut adapter,
+        &JobControl::default(),
+    );
+    assert!(
+        outcome.is_err() || outcome.as_ref().unwrap().state != OperationState::Completed,
+        "copy removed despite changed controlled poststate"
+    );
+    assert!(path.exists());
+    assert_eq!(
+        adapter.inspect(&path).unwrap().stamp.accessed_ns,
+        Some(external)
+    );
+}
+
+#[test]
+fn native_directory_move_into_missing_parent_undo_restores_metadata() {
+    let mut f = Fixture::new();
+    f.folder();
+    f.modified_and_accessed();
+    let id = f.recipe.selection[0];
+    f.recipe.selection = vec![id];
+    f.recipe.numbering_order = vec![id];
+    f.frozen.primary_order = vec![id];
+    let original = f
+        .inventory
+        .entries
+        .iter()
+        .find(|e| e.id == id)
+        .unwrap()
+        .stamp
+        .clone();
+    let dest = tempfile::tempdir().unwrap();
+    let grant = RootBinding::new(dest.path().to_owned())
+        .unwrap()
+        .source_grant;
+    f.recipe.destination = Destination::MoveTo {
+        grant_id: grant.id,
+        layout: DestinationLayout::FolderTemplate {
+            parts: vec![TemplatePart::Literal("new-parent".into())],
+        },
+    };
+    let batch = evaluate(&f.inventory, &f.recipe, &f.frozen).unwrap();
+    let mut grants = batch.grants.clone();
+    grants.grants.push(grant);
+    let batch = resolve_destinations(batch, &f.recipe.destination, &grants).unwrap();
+    let ns = PlatformFs::default()
+        .capture_namespace(&batch.grants, &destination::capture_candidates(&batch))
+        .unwrap();
+    let plan = plan(
+        &f.inventory,
+        &batch,
+        &ns,
+        PlanRef {
+            session_id: SessionId::new(),
+            plan_id: PlanId::new(),
+            revision: 1,
+        },
+    )
+    .unwrap();
+    assert!(plan
+        .execution
+        .groups
+        .iter()
+        .flat_map(|g| &g.steps)
+        .any(|s| matches!(s.action, ExecutionAction::CreateDirectory { .. })));
+    assert!(plan
+        .execution
+        .groups
+        .iter()
+        .flat_map(|g| &g.steps)
+        .any(|s| matches!(s.action, ExecutionAction::RenameEntry { .. })));
+    let report = f.run(&plan);
+    assert_eq!(report.state, OperationState::Completed, "{report:?}");
+    let inverse = undo_plan(&f, report.operation_id.unwrap()).unwrap();
+    let reversed = f.run(&inverse);
+    assert_eq!(reversed.state, OperationState::Completed, "{reversed:?}");
+    let restored = PlatformFs::default()
+        .inspect(&f.media.join("Tree"))
+        .unwrap()
+        .stamp;
+    assert_eq!(
+        (restored.modified_ns, restored.accessed_ns),
+        (original.modified_ns, original.accessed_ns)
+    );
+    assert!(
+        !dest.path().join("new-parent").exists(),
+        "owned empty parent must be cleaned"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_undo_field_authority_survives_native_boundaries_and_canonical_validation() {
+    for boundary in [
+        "change-atime-before-rename",
+        "change-atime-before-cleanup",
+        "change-atime-after-rename",
+        "strip-authority",
+    ] {
+        let mut f = Fixture::new();
+        f.single();
+        f.modified_and_accessed();
+        let dest = tempfile::tempdir().unwrap();
+        let forward = f.destination(dest.path(), false);
+        let report = f.run(&forward);
+        assert_eq!(report.state, OperationState::Completed);
+        let mut inverse = undo_plan(&f, report.operation_id.unwrap()).unwrap();
+        if boundary == "strip-authority" {
+            for step in inverse
+                .execution
+                .groups
+                .iter_mut()
+                .flat_map(|g| &mut g.steps)
+            {
+                if let ExecutionAction::RenameEntry { source, .. } = &mut step.action {
+                    if let ExpectedIdentity::MetadataChecked { stamp, .. } = &source.identity {
+                        source.identity = ExpectedIdentity::Observed(stamp.clone());
+                    }
+                }
+            }
+        }
+        let lease = f.coordinator.try_acquire(LeaseKind::Write).unwrap();
+        let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+        let mut adapter = copy_faults::CopyFs::new(boundary);
+        adapter.native.namespace_epoch = inverse.execution.provenance.namespace_epoch;
+        adapter.native.policy_epoch = inverse.execution.provenance.policy_epoch;
+        let result = execute(
+            &inverse,
+            &lease,
+            &mut journal,
+            &mut adapter,
+            &JobControl::default(),
+        );
+        assert!(
+            result.is_err() || result.as_ref().unwrap().state != OperationState::Completed,
+            "{boundary}: {result:?}"
+        );
+        let survivors: Vec<_> = fs::read_dir(dest.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(survivors.len(), 1, "copy must survive {boundary}");
+        if boundary != "strip-authority" {
+            assert_eq!(
+                adapter.inspect(&survivors[0]).unwrap().stamp.accessed_ns,
+                Some(1_650_000_000_000_000_000)
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_undo_field_authority_survives_crash_reopen_and_recovery() {
+    use vidlib_fileops::recovery::{
+        apply_recovery, reconcile, RecoveryChoice, RecoveryDisposition,
+    };
+    for boundary in ["before-rename", "after-rename"] {
+        for changed in [false, true] {
+            for restore in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "metadata_undo_crash_child", "--nocapture"])
+                    .env("VIDLIB_METADATA_ROOT", root.path())
+                    .env("VIDLIB_METADATA_UNDO", "1")
+                    .env("VIDLIB_METADATA_COPY_UNDO", "1")
+                    .env("VIDLIB_METADATA_BOUNDARY", boundary)
+                    .status()
+                    .unwrap();
+                assert_eq!(status.code(), Some(86));
+                let base = fs::read_dir(root.path())
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let coordinator = Coordinator::open(&base.join("app")).unwrap();
+                let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+                let mut journal = Journal::open(&coordinator.database_path()).unwrap();
+                let pending = journal.pending().unwrap().pop().unwrap();
+                assert!(pending.steps.iter().any(|s| matches!(&s.step.action, ExecutionAction::RenameEntry { source: EntryPrestate { identity: ExpectedIdentity::MetadataChecked { fields, .. }, .. }, .. } if fields.contains(&TimestampField::Accessed))));
+                let survivor = fs::read_dir(base.join("destination"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let mut native = PlatformFs::default();
+                if changed {
+                    fs::File::open(&survivor)
+                        .unwrap()
+                        .set_times(fs::FileTimes::new().set_accessed(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_650_000_000),
+                        ))
+                        .unwrap();
+                }
+                let preview = reconcile(&pending, &mut native).unwrap();
+                if changed {
+                    assert!(preview
+                        .actions
+                        .iter()
+                        .any(|a| a.disposition == RecoveryDisposition::Unresolved));
+                }
+                let nonce = preview.review_nonce();
+                let result = apply_recovery(
+                    preview.review(nonce).unwrap(),
+                    if restore {
+                        RecoveryChoice::Restore
+                    } else {
+                        RecoveryChoice::Resume
+                    },
+                    &lease,
+                    &mut journal,
+                    &mut native,
+                    &JobControl::default(),
+                );
+                if changed {
+                    assert!(result.is_err());
+                    assert!(survivor.exists());
+                    assert_eq!(
+                        native.inspect(&survivor).unwrap().stamp.accessed_ns,
+                        Some(1_650_000_000_000_000_000)
+                    );
+                } else {
+                    assert!(result.is_ok(), "{boundary},restore={restore}: {result:?}");
+                    assert!(journal.pending().unwrap().is_empty());
+                    assert_eq!(base.join("destination/a").exists(), restore);
+                }
+            }
+        }
     }
 }

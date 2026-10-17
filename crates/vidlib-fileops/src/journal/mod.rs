@@ -404,12 +404,13 @@ impl Journal {
                 return Err(invalid("completion requires a durable unresolved intent"));
             }
             let prerequisites = load_prerequisites(tx, op, &pending.step)?;
-            validate_receipt(&pending.step, receipt, &prerequisites)?;
-            if matches!(pending.step.action, ExecutionAction::SetMetadata { .. }) {
-                if let Some(before) = load_metadata_prestate(tx, op, receipt.step_id)? {
-                    if receipt.before.as_ref() != Some(&before) { return Err(invalid("metadata receipt changed durable prestate")); }
-                }
-            }
+            let metadata_before = if matches!(pending.step.action, ExecutionAction::SetMetadata { .. }) {
+                load_metadata_prestate(tx, op, receipt.step_id)?
+            } else {
+                None
+            };
+            validate_receipt(&pending.step, receipt, &prerequisites, metadata_before.as_ref())?;
+            validate_controlled_receipt(tx, op, &pending.step, receipt)?;
             tx.execute(
                 "INSERT INTO receipts(operation_id,step_id,payload) VALUES(?1,?2,?3)",
                 params![
@@ -1009,7 +1010,9 @@ fn resolved_stamp<'a>(
     record: &'a Prerequisites,
 ) -> Result<&'a FileStamp, OpError> {
     let stamp = match &entry.identity {
-        ExpectedIdentity::Observed(stamp) => stamp,
+        ExpectedIdentity::Observed(stamp) | ExpectedIdentity::MetadataChecked { stamp, .. } => {
+            stamp
+        }
         ExpectedIdentity::DirectoryAfterEffects {
             original,
             created_by,
@@ -1094,6 +1097,64 @@ fn validate_resolved_inputs(step: &ExecutionStep, record: &Prerequisites) -> Res
     }
     Ok(())
 }
+// Receipt lineage may advance object/path identity, but only a named metadata
+// action may change a controlled field. Read exact ancestors without filesystem I/O.
+fn validate_controlled_receipt(
+    connection: &Connection,
+    op: OperationId,
+    step: &ExecutionStep,
+    receipt: &StepReceipt,
+) -> Result<(), OpError> {
+    let Some(source) = schema::source(&step.action) else {
+        return Ok(());
+    };
+    let mut identity = source.identity.clone();
+    let mut fields = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        match identity {
+            ExpectedIdentity::MetadataChecked {
+                fields: checked, ..
+            } => {
+                for field in checked {
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                break;
+            }
+            ExpectedIdentity::FromReceipt { step_id } => {
+                if !seen.insert(step_id) {
+                    return Err(invalid("cyclic controlled receipt lineage"));
+                }
+                let prior = load_current_step(connection, op, step_id)?;
+                if let ExecutionAction::SetMetadata { changes, .. } = &prior.step.action {
+                    for change in changes {
+                        if let vidlib_rename::MetadataChange::Timestamp { field, .. } = change {
+                            if !fields.contains(field) {
+                                fields.push(*field);
+                            }
+                        }
+                    }
+                }
+                let Some(source) = schema::source(&prior.step.action) else {
+                    break;
+                };
+                identity = source.identity.clone();
+            }
+            _ => break,
+        }
+    }
+    if let (Some(before), Some(after)) = (&receipt.before, &receipt.after) {
+        let expected = if let ExecutionAction::SetMetadata { changes, .. } = &step.action {
+            crate::metadata::poststate(before, changes)?
+        } else {
+            before.clone()
+        };
+        crate::platform::check_timestamps(after, &expected, &fields, Phase::Verify)?;
+    }
+    Ok(())
+}
 fn valid_digest(digest: Option<&ContentDigest>) -> bool {
     digest.is_some_and(|d| !d.algorithm.is_empty() && !d.bytes.is_empty())
 }
@@ -1101,8 +1162,14 @@ fn validate_receipt(
     step: &ExecutionStep,
     receipt: &StepReceipt,
     record: &Prerequisites,
+    metadata_before: Option<&FileStamp>,
 ) -> Result<(), OpError> {
     validate_resolved_inputs(step, record)?;
+    if let Some(before) = metadata_before {
+        if receipt.before.as_ref() != Some(before) {
+            return Err(invalid("metadata receipt changed durable prestate"));
+        }
+    }
     if schema::phase(&step.action) != receipt.phase {
         return Err(invalid("receipt phase differs from compiled effect"));
     }
@@ -1118,7 +1185,9 @@ fn validate_receipt(
         ));
     }
     if let (Some(entry), Some(observed)) = (before, &receipt.before) {
-        let expected = resolved_stamp(entry, record)?;
+        // The immutable factual pre-set state includes authorized child effects.
+        // Legacy receipts without this binding retain their original validation.
+        let expected = metadata_before.unwrap_or(resolved_stamp(entry, record)?);
         if observed.physical_id != expected.physical_id
             || (!matches!(
                 step.action,

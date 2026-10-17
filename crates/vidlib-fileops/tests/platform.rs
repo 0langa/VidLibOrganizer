@@ -540,6 +540,7 @@ fn owned_staging_cannot_borrow_cycle_or_explicit_policy_authority() {
         // reservation into copy publication or cleanup authority.
         fs::write(&stage, b"unowned").unwrap();
         let owned = vidlib_fileops::platform::OwnedEntry {
+            controlled_timestamps: vec![],
             path: stage.clone(),
             stamp: stamp(&stage),
         };

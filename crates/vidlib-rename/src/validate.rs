@@ -520,6 +520,52 @@ pub fn preflight(execution: &ExecutionPlan, fresh: &NamespaceSnapshot) -> Result
         facts.sort_by(|a, b| a.parent_path.cmp(&b.parent_path));
         facts
     }
+    for step in execution.groups.iter().flat_map(|g| &g.steps) {
+        let entry = match &step.action {
+            ExecutionAction::RenameEntry { source, .. }
+            | ExecutionAction::StageCopy { source, .. }
+            | ExecutionAction::WriteStaging { source, .. }
+            | ExecutionAction::RemoveSource { source, .. }
+            | ExecutionAction::RemoveSourceDirectory { source, .. } => Some(source),
+            ExecutionAction::SetMetadata { entry, .. } => Some(entry),
+            ExecutionAction::RemoveOwnedCopy { owned }
+            | ExecutionAction::RemoveOwnedEmptyDirectory { owned } => Some(&owned.entry),
+            _ => None,
+        };
+        if let Some(EntryPrestate {
+            path,
+            identity: ExpectedIdentity::MetadataChecked { stamp, fields },
+        }) = entry
+        {
+            let actual = fresh
+                .parents
+                .iter()
+                .flat_map(|p| &p.entries)
+                .find(|e| {
+                    e.absolute_path == *path
+                        || (stamp.physical_id.is_some() && e.stamp.physical_id == stamp.physical_id)
+                })
+                .map(|e| &e.stamp)
+                .or_else(|| {
+                    fresh
+                        .parents
+                        .iter()
+                        .find(|p| {
+                            p.parent_path == *path
+                                || (stamp.physical_id.is_some()
+                                    && p.stamp.physical_id == stamp.physical_id)
+                        })
+                        .map(|p| &p.stamp)
+                })
+                .ok_or_else(mismatch)?;
+            if fields.iter().any(|field| {
+                crate::metadata::timestamp(actual, *field)
+                    != crate::metadata::timestamp(stamp, *field)
+            }) {
+                return Err(mismatch());
+            }
+        }
+    }
     let mut actual_parents = normalized(&fresh.parents);
     let expected_parents = normalized(&expected.parents);
     if actual_parents.len() != expected_parents.len() {

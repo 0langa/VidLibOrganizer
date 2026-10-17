@@ -295,6 +295,11 @@ pub struct ExecutionStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedIdentity {
     Observed(FileStamp),
+    /// Exact authorized metadata poststate; generic identities keep volatile-atime semantics.
+    MetadataChecked {
+        stamp: FileStamp,
+        fields: Vec<crate::TimestampField>,
+    },
     FromReceipt {
         step_id: StepId,
     },

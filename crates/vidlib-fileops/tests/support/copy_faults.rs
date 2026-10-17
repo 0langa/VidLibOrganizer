@@ -137,8 +137,29 @@ impl Filesystem for CopyFs {
     }
     fn rename_reserved(&mut self, r: &RenameReservation) -> Result<MutationOutcome, OpError> {
         self.at("before-rename");
+        if self.boundary == "change-atime-before-rename" {
+            let before = self.native.inspect(r.source())?.stamp;
+            self.native.set_metadata(
+                r.source(),
+                &before,
+                &MetadataUpdate {
+                    accessed_ns: Some(1_650_000_000_000_000_000),
+                    ..Default::default()
+                },
+            )?;
+        }
         let directory = self.native.inspect(r.source())?.kind == EntryKind::Directory;
-        let x = self.native.rename_reserved(r)?;
+        let mut x = self.native.rename_reserved(r)?;
+        if self.boundary == "change-atime-after-rename" {
+            let path = r.target();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_accessed(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_650_000_000),
+                ))
+                .unwrap();
+            x.observation = self.native.inspect(path)?;
+        }
         if directory {
             self.at("after-directory-quarantine");
         }
@@ -325,6 +346,14 @@ impl Filesystem for CopyFs {
         Ok(x)
     }
     fn remove_quarantined(&mut self, o: &OwnedRemoval) -> Result<Durability, OpError> {
+        if self.boundary == "change-atime-before-cleanup" {
+            std::fs::File::open(o.path())
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_accessed(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_650_000_000),
+                ))
+                .unwrap();
+        }
         let directory = self.native.inspect(o.path())?.kind == EntryKind::Directory;
         if self.boundary == "remove-permission" && !self.fired.replace(true) {
             return Err(OpError::new(

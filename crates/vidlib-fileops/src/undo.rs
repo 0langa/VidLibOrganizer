@@ -474,6 +474,21 @@ pub fn plan_undo(
     };
     let mut result =
         plan(&inventory, &batch, namespace, version).map_err(|e| invalid(e.to_string()))?;
+    for step in result
+        .execution
+        .groups
+        .iter_mut()
+        .flat_map(|g| &mut g.steps)
+    {
+        if let ExecutionAction::RenameEntry { source, .. } = &mut step.action {
+            if let ExpectedIdentity::Observed(stamp) = &source.identity {
+                source.identity = crate::metadata::checked_identity(
+                    stamp.clone(),
+                    timestamp_intents_at(completed, &source.path),
+                );
+            }
+        }
+    }
     append_metadata_undo(completed, &mut result)?;
     result.inverse_of = Some(completed.operation_id);
     result.execution.inverse_of = result.inverse_of;
@@ -559,6 +574,13 @@ fn directory_material(
         .iter()
         .find(|p| p.parent_path == path)
         .ok_or_else(|| invalid("directory itself must be captured"))?;
+    let fields = timestamp_intents_at(op, path);
+    crate::platform::check_timestamps(
+        &actual.stamp,
+        latest_metadata_post(op, path, expected),
+        &fields,
+        Phase::Verify,
+    )?;
     if check_stamp(&actual.stamp, expected, Phase::Verify).is_err()
         && !(expected
             .physical_id
@@ -668,6 +690,7 @@ fn plan_copy_undo(
         let mut steps = Vec::new();
         // Recreate missing source ancestors before any descendant copy-back.
         let mut restored = Vec::new();
+        let mut native_directory_metadata = Vec::new();
         for removed in op.steps.iter().rev().filter(|s| {
             s.step.group_id == historical_group.id && s.state == StepState::CompletionDurable
         }) {
@@ -905,7 +928,10 @@ fn plan_copy_undo(
                     ExecutionAction::WriteStaging {
                         source: EntryPrestate {
                             path: source.clone(),
-                            identity: ExpectedIdentity::Observed(expected.clone()),
+                            identity: crate::metadata::checked_identity(
+                                expected.clone(),
+                                timestamp_intents_at(op, &source),
+                            ),
                         },
                         staging: Box::new(OwnedEntryPrestate {
                             entry: EntryPrestate {
@@ -937,11 +963,51 @@ fn plan_copy_undo(
                     ExecutionAction::RenameEntry {
                         source: EntryPrestate {
                             path: source.clone(),
-                            identity: ExpectedIdentity::Observed(expected.clone()),
+                            identity: crate::metadata::checked_identity(
+                                expected.clone(),
+                                timestamp_intents_at(op, &source),
+                            ),
                         },
                         target: target.clone(),
                         temporary: false,
                     },
+                ));
+            }
+            if native_move && directory {
+                let mut changes = Vec::new();
+                for metadata in op
+                    .steps
+                    .iter()
+                    .rev()
+                    .filter(|s| s.state == StepState::CompletionDurable)
+                {
+                    if let ExecutionAction::SetMetadata {
+                        entry,
+                        changes: intent,
+                    } = &metadata.step.action
+                    {
+                        if entry.path == source {
+                            changes.extend(crate::metadata::inverse_changes(
+                                metadata
+                                    .receipts
+                                    .last()
+                                    .ok_or_else(|| invalid("metadata receipt missing"))?,
+                                intent,
+                            )?);
+                        }
+                    }
+                }
+                crate::metadata::original_directory_targets(
+                    op,
+                    original.step.entry_id,
+                    &mut changes,
+                )?;
+                native_directory_metadata.push((
+                    target.clone(),
+                    expected.clone(),
+                    id,
+                    changes,
+                    timestamp_intents_at(op, &source),
                 ));
             }
             if moving && !directory {
@@ -996,7 +1062,10 @@ fn plan_copy_undo(
                     OwnedEntryPrestate {
                         entry: EntryPrestate {
                             path: source.clone(),
-                            identity: ExpectedIdentity::Observed(expected.clone()),
+                            identity: crate::metadata::checked_identity(
+                                expected.clone(),
+                                timestamp_intents_at(op, &source),
+                            ),
                         },
                         created_by,
                     }
@@ -1018,7 +1087,10 @@ fn plan_copy_undo(
                         ExecutionAction::RenameEntry {
                             source: EntryPrestate {
                                 path: source.clone(),
-                                identity: ExpectedIdentity::Observed(expected.clone()),
+                                identity: crate::metadata::checked_identity(
+                                    expected.clone(),
+                                    timestamp_intents_at(op, &source),
+                                ),
                             },
                             target: quarantine.clone(),
                             temporary: true,
@@ -1137,6 +1209,35 @@ fn plan_copy_undo(
                         changes: vidlib_rename::destination::directory_metadata_changes(original),
                     },
                 });
+            }
+            native_directory_metadata
+                .sort_by_key(|(path, ..)| std::cmp::Reverse(path.components().count()));
+            for (path, original, entry_id, changes, fields) in native_directory_metadata {
+                let mut identity = if fields.is_empty() {
+                    ExpectedIdentity::DirectoryAfterEffects {
+                        original,
+                        created_by: None,
+                        effects: steps.iter().map(|s| s.id).collect(),
+                    }
+                } else {
+                    crate::metadata::checked_identity(original, fields)
+                };
+                for change in changes {
+                    let id = next();
+                    steps.push(ExecutionStep {
+                        id,
+                        entry_id,
+                        group_id: historical_group.id,
+                        action: ExecutionAction::SetMetadata {
+                            entry: EntryPrestate {
+                                path: path.clone(),
+                                identity,
+                            },
+                            changes: vec![change],
+                        },
+                    });
+                    identity = ExpectedIdentity::FromReceipt { step_id: id };
+                }
             }
             groups.push(ExecutionGroup {
                 id: historical_group.id,
@@ -1287,14 +1388,24 @@ fn append_metadata_undo(op: &OperationRecord, result: &mut RenamePlan) -> Result
             .rev()
             .find(|s| s.entry_id == row.entry_id)
             .map_or_else(
-                || ExpectedIdentity::Observed(row.stamp.clone()),
+                || {
+                    crate::metadata::checked_identity(
+                        row.stamp.clone(),
+                        timestamp_intents_at(op, &row.source_path),
+                    )
+                },
                 |s| ExpectedIdentity::FromReceipt { step_id: s.id },
             );
         if directory {
-            identity = ExpectedIdentity::DirectoryAfterEffects {
-                original: row.stamp.clone(),
-                created_by: None,
-                effects: group.steps.iter().map(|s| s.id).collect(),
+            let fields = timestamp_intents_at(op, &row.source_path);
+            identity = if fields.is_empty() {
+                ExpectedIdentity::DirectoryAfterEffects {
+                    original: row.stamp.clone(),
+                    created_by: None,
+                    effects: group.steps.iter().map(|s| s.id).collect(),
+                }
+            } else {
+                crate::metadata::checked_identity(row.stamp.clone(), fields)
             };
         }
         for (ordinal, change) in changes.into_iter().enumerate() {
@@ -1344,4 +1455,26 @@ fn latest_metadata_post<'a>(
             _ => None,
         })
         .unwrap_or(original)
+}
+
+fn timestamp_intents_at(op: &OperationRecord, path: &Path) -> Vec<TimestampField> {
+    let mut fields = Vec::new();
+    for pending in op
+        .steps
+        .iter()
+        .filter(|s| s.state == StepState::CompletionDurable)
+    {
+        if let ExecutionAction::SetMetadata { entry, changes } = &pending.step.action {
+            if entry.path == path {
+                for change in changes {
+                    if let MetadataChange::Timestamp { field, .. } = change {
+                        if !fields.contains(field) {
+                            fields.push(*field);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fields
 }

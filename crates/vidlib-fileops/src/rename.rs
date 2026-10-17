@@ -186,6 +186,8 @@ pub fn execute(
                     let material =
                         crate::recovery::evidence::material(&journal.operation(op)?, source, fs)?;
                     let stamp = &material;
+                    let fields =
+                        crate::metadata::controlled_fields(&journal.operation(op)?, source)?;
                     let (source_parent, target_parent) = crate::recovery::evidence::parents(
                         &journal.operation(op)?,
                         step,
@@ -211,6 +213,7 @@ pub fn execute(
                     attempted = true;
                     let action = if *temporary || reserved_source {
                         fs.rename_reserved(&crate::platform::RenameReservation {
+                            controlled_timestamps: fields.clone(),
                             operation: op,
                             step: step.id,
                             source: source.path.clone(),
@@ -223,6 +226,7 @@ pub fn execute(
                         })
                     } else {
                         fs.rename_reviewed(&crate::platform::RenameRequest {
+                            controlled_timestamps: &fields,
                             source: &source.path,
                             target,
                             expected: stamp,
@@ -415,11 +419,13 @@ fn validate_sources(plan: &RenamePlan) -> Result<(), OpError> {
             ));
         }
         match (&source.identity, last_steps.get(&step.entry_id)) {
-            (ExpectedIdentity::Observed(stamp), None)
-                if inventory
-                    .entries
-                    .iter()
-                    .any(|e| e.id == step.entry_id && e.stamp == *stamp) => {}
+            (
+                ExpectedIdentity::Observed(stamp) | ExpectedIdentity::MetadataChecked { stamp, .. },
+                None,
+            ) if inventory
+                .entries
+                .iter()
+                .any(|e| e.id == step.entry_id && e.stamp == *stamp) => {}
             (ExpectedIdentity::FromReceipt { step_id }, Some((previous, path)))
                 if step_id == previous && encode_path(path) == encode_path(&source.path) => {}
             _ => {

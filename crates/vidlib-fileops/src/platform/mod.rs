@@ -22,6 +22,7 @@ pub struct MutationOutcome {
 }
 #[derive(Clone, Debug, Default)]
 pub struct MetadataUpdate {
+    pub controlled_timestamps: Vec<vidlib_rename::TimestampField>,
     pub modified_ns: Option<i128>,
     pub accessed_ns: Option<i128>,
     pub created_ns: Option<i128>,
@@ -30,6 +31,7 @@ pub struct MetadataUpdate {
 }
 #[derive(Debug)]
 pub struct OwnedEntry {
+    pub controlled_timestamps: Vec<vidlib_rename::TimestampField>,
     pub path: PathBuf,
     pub stamp: FileStamp,
 }
@@ -56,6 +58,7 @@ impl OwnedRemoval {
 /// adapters must compare them with the held handles used for the rename syscall.
 #[derive(Debug)]
 pub struct RenameRequest<'a> {
+    pub controlled_timestamps: &'a [vidlib_rename::TimestampField],
     pub source: &'a Path,
     pub target: &'a Path,
     pub expected: &'a FileStamp,
@@ -67,6 +70,7 @@ pub struct RenameRequest<'a> {
 /// Exact operation/step paths and identity, not a general staging exemption.
 #[derive(Debug)]
 pub struct RenameReservation {
+    pub(crate) controlled_timestamps: Vec<vidlib_rename::TimestampField>,
     pub(crate) operation: vidlib_inventory::ids::OperationId,
     pub(crate) step: vidlib_inventory::ids::StepId,
     pub(crate) source: PathBuf,
@@ -259,6 +263,25 @@ fn validate_path(path: &Path) -> Result<(), OpError> {
     }
     Ok(())
 }
+pub(crate) fn check_timestamps(
+    actual: &FileStamp,
+    expected: &FileStamp,
+    fields: &[vidlib_rename::TimestampField],
+    phase: Phase,
+) -> Result<(), OpError> {
+    for field in fields {
+        if vidlib_rename::metadata::timestamp(actual, *field)
+            != vidlib_rename::metadata::timestamp(expected, *field)
+        {
+            return Err(OpError::new(
+                ErrorCode::StaleState,
+                phase,
+                "explicit timestamp poststate changed",
+            ));
+        }
+    }
+    Ok(())
+}
 pub(crate) fn check_stamp(
     actual: &FileStamp,
     expected: &FileStamp,
@@ -352,6 +375,7 @@ impl PlatformFs {
         target: &Path,
         expected: &FileStamp,
         reviewed_parents: Option<(&PhysicalId, &PhysicalId)>,
+        controlled_timestamps: &[vidlib_rename::TimestampField],
     ) -> Result<MutationOutcome, OpError> {
         let (source_parent, source_name) = parent(source)?;
         let (target_parent, target_name) = parent(target)?;
@@ -377,12 +401,24 @@ impl PlatformFs {
         let source_file = native::open_mutable_child(&source_parent, source_name, Phase::Rename)?;
         let before = native::observation(&source_file)?;
         check_stamp(&before.stamp, expected, Phase::Rename)?;
+        check_timestamps(
+            &before.stamp,
+            expected,
+            controlled_timestamps,
+            Phase::Rename,
+        )?;
         if !matches!(before.kind, EntryKind::File | EntryKind::Directory) {
             return Err(OpError::unsupported(Phase::Rename));
         }
         // Keep both parent descriptors and the source handle alive across the call.
         let immediate = native::child_observation(&source_parent, source_name)?;
         check_stamp(&immediate.stamp, expected, Phase::Rename)?;
+        check_timestamps(
+            &immediate.stamp,
+            expected,
+            controlled_timestamps,
+            Phase::Rename,
+        )?;
         verify_parent_binding(
             source.parent().expect("validated parent"),
             &source_parent,
@@ -449,6 +485,7 @@ impl Filesystem for PlatformFs {
             request.target,
             request.expected,
             Some((request.source_parent, request.target_parent)),
+            request.controlled_timestamps,
         )
     }
     fn rename_reserved(
@@ -477,6 +514,7 @@ impl Filesystem for PlatformFs {
             &authority.target,
             &authority.expected,
             Some((&authority.source_parent, &authority.target_parent)),
+            &authority.controlled_timestamps,
         )
     }
     fn capture_namespace(
@@ -630,7 +668,7 @@ impl Filesystem for PlatformFs {
     ) -> Result<MutationOutcome, OpError> {
         self.permit(source)?;
         self.permit(target)?;
-        self.move_entry(source, target, expected, None)
+        self.move_entry(source, target, expected, None, &[])
     }
     fn publish_staging(
         &mut self,
@@ -639,7 +677,13 @@ impl Filesystem for PlatformFs {
     ) -> Result<MutationOutcome, OpError> {
         self.permit_staging(&owned.path)?;
         self.permit(target)?;
-        self.move_entry(&owned.path, target, &owned.stamp, None)
+        self.move_entry(
+            &owned.path,
+            target,
+            &owned.stamp,
+            None,
+            &owned.controlled_timestamps,
+        )
     }
     fn create_directory(&mut self, path: &Path) -> Result<OwnedEntry, OpError> {
         self.create_directory_checked(path, None)
@@ -675,6 +719,7 @@ impl Filesystem for PlatformFs {
             target,
             &owned.stamp,
             Some((source_parent, target_parent)),
+            &owned.controlled_timestamps,
         )
     }
     fn remove_owned_reviewed(
@@ -715,6 +760,7 @@ impl Filesystem for PlatformFs {
         )?;
         Ok(StagingFile {
             ownership: OwnedEntry {
+                controlled_timestamps: vec![],
                 path: entry.path.clone(),
                 stamp: observed.stamp,
             },
@@ -798,6 +844,32 @@ impl Filesystem for PlatformFs {
             )
         })?;
         check_stamp(&immediate.stamp, expected, Phase::Metadata)?;
+        if update.accessed_ns.is_some() {
+            check_timestamps(
+                &native::observation(&file)?.stamp,
+                expected,
+                &[vidlib_rename::TimestampField::Accessed],
+                Phase::Metadata,
+            )?;
+            check_timestamps(
+                &immediate.stamp,
+                expected,
+                &[vidlib_rename::TimestampField::Accessed],
+                Phase::Metadata,
+            )?;
+        }
+        check_timestamps(
+            &native::observation(&file)?.stamp,
+            expected,
+            &update.controlled_timestamps,
+            Phase::Metadata,
+        )?;
+        check_timestamps(
+            &immediate.stamp,
+            expected,
+            &update.controlled_timestamps,
+            Phase::Metadata,
+        )?;
         native::metadata(&file, update)?;
         applied_parent_binding(
             path.parent().expect("validated parent"),
@@ -880,6 +952,7 @@ impl PlatformFs {
             Phase::Create,
         )?;
         Ok(OwnedEntry {
+            controlled_timestamps: vec![],
             path: path.to_owned(),
             stamp,
         })
@@ -916,6 +989,7 @@ impl PlatformFs {
         )?;
         Ok(StagingFile {
             ownership: OwnedEntry {
+                controlled_timestamps: vec![],
                 path: path.to_owned(),
                 stamp,
             },
@@ -945,6 +1019,12 @@ impl PlatformFs {
         let file = native::open_mutable_child(&parent, name, Phase::Remove)?;
         let observation = native::observation(&file)?;
         check_stamp(&observation.stamp, &entry.stamp, Phase::Remove)?;
+        check_timestamps(
+            &observation.stamp,
+            &entry.stamp,
+            &entry.controlled_timestamps,
+            Phase::Remove,
+        )?;
         let links_before = native::removal_link_count(&file)?;
         if links_before == 0 {
             return Err(OpError::new(
@@ -956,6 +1036,12 @@ impl PlatformFs {
         check_stamp(
             &native::child_observation(&parent, name)?.stamp,
             &entry.stamp,
+            Phase::Remove,
+        )?;
+        check_timestamps(
+            &native::child_observation(&parent, name)?.stamp,
+            &entry.stamp,
+            &entry.controlled_timestamps,
             Phase::Remove,
         )?;
         verify_parent_binding(
@@ -1177,6 +1263,45 @@ mod boundary_regressions {
     use std::fs;
     const UPDATED: i128 = 1_700_000_000_123_456_789;
 
+    #[test]
+    fn metadata_access_time_change_before_final_validation_is_stale_without_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        fs::write(&path, b"owned").unwrap();
+        let mut adapter = PlatformFs::default();
+        let expected = adapter.inspect(&path).unwrap().stamp;
+        let changed_path = path.clone();
+        let changed_expected = expected.clone();
+        let external = UPDATED - 10_000;
+        let _guard = install(Boundary::MetadataBeforeRevalidation, move || {
+            PlatformFs::default()
+                .set_metadata(
+                    &changed_path,
+                    &changed_expected,
+                    &MetadataUpdate {
+                        accessed_ns: Some(external),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        });
+        let result = adapter.set_metadata(
+            &path,
+            &expected,
+            &MetadataUpdate {
+                accessed_ns: Some(UPDATED),
+                ..Default::default()
+            },
+        );
+        assert!(
+            result.is_err(),
+            "native setter overwrote external accessed time"
+        );
+        assert_eq!(result.unwrap_err().code, ErrorCode::StaleState);
+        let actual = adapter.inspect(&path).unwrap().stamp;
+        assert_eq!(actual.accessed_ns, Some(external));
+        assert_eq!(actual.modified_ns, expected.modified_ns);
+    }
     #[test]
     fn metadata_rebinding_before_final_validation_is_stale_without_effect() {
         let dir = tempfile::tempdir().unwrap();

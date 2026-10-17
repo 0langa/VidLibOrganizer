@@ -141,6 +141,10 @@ struct EntryCodec {
 #[serde(remote = "ExpectedIdentity", deny_unknown_fields)]
 enum IdentityCodec {
     Observed(FileStamp),
+    MetadataChecked {
+        stamp: FileStamp,
+        fields: Vec<vidlib_rename::TimestampField>,
+    },
     FromReceipt {
         step_id: StepId,
     },

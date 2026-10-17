@@ -214,7 +214,7 @@ pub(crate) fn compile_group(
                 let expected = receipt(op, original.step.id)?.after.clone().ok_or_else(|| error("inverse rename poststate missing"))?;
                 fs.verify(target, &expected)?;
                 if !absent(fs, &source.path) { return Err(error("inverse rename target occupied")); }
-                compiled.push((original.step.id, mk(original, ExecutionAction::RenameEntry { source: EntryPrestate { path: target.clone(), identity: ExpectedIdentity::Observed(expected) }, target: source.path.clone(), temporary: reserved(op, &source.path) })));
+                compiled.push((original.step.id, mk(original, ExecutionAction::RenameEntry { source: EntryPrestate { path: target.clone(), identity: crate::metadata::checked_identity(expected, crate::metadata::controlled_fields(op, source)?) }, target: source.path.clone(), temporary: reserved(op, &source.path) })));
             }
             _ => {
                 let chain = crate::copy::restore_chain(op, original, fs).map_err(|mut error| { error.step_id = Some(original.step.id); error.item_id = Some(original.step.entry_id); error })?;

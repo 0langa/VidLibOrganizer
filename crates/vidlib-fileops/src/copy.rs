@@ -57,6 +57,20 @@ pub(crate) fn effect(
     fs: &mut dyn Filesystem,
     control: &JobControl,
 ) -> Result<StepReceipt, OpError> {
+    let fields = if let Some(entry) = crate::recovery::evidence::paths(&step.action).0 {
+        let fields = crate::metadata::controlled_fields(op, entry)?;
+        if !fields.is_empty() {
+            crate::platform::check_timestamps(
+                &fs.inspect(&entry.path)?.stamp,
+                &crate::recovery::evidence::material(op, entry, fs)?,
+                &fields,
+                crate::Phase::Verify,
+            )?;
+        }
+        fields
+    } else {
+        vec![]
+    };
     let (source_parent, target_parent) = parents(
         op,
         step,
@@ -113,6 +127,7 @@ pub(crate) fn effect(
             let metadata = input.metadata().map_err(io)?;
             let mut output = fs.open_owned_staging(
                 &OwnedEntry {
+                    controlled_timestamps: fields.clone(),
                     path: staging.entry.path.clone(),
                     stamp: expected_staging,
                 },
@@ -160,6 +175,7 @@ pub(crate) fn effect(
             result.durability = fs.preserve_staging_metadata(
                 &mut output,
                 &MetadataUpdate {
+                    controlled_timestamps: vec![],
                     modified_ns: expected.modified_ns,
                     accessed_ns: expected.accessed_ns,
                     created_ns: if cfg!(windows) {
@@ -206,6 +222,7 @@ pub(crate) fn effect(
             }
             let outcome = fs.publish_staging_reviewed(
                 &OwnedEntry {
+                    controlled_timestamps: fields.clone(),
                     path: staging.entry.path.clone(),
                     stamp: expected.clone(),
                 },
@@ -236,6 +253,7 @@ pub(crate) fn effect(
             result.before = Some(expected.clone());
             result.durability = fs.remove_quarantined(&crate::platform::OwnedRemoval {
                 owned: OwnedEntry {
+                    controlled_timestamps: fields.clone(),
                     path: source.path.clone(),
                     stamp: expected,
                 },
@@ -286,6 +304,7 @@ pub(crate) fn effect(
             result.before = Some(expected.clone());
             result.durability = fs.remove_quarantined(&crate::platform::OwnedRemoval {
                 owned: OwnedEntry {
+                    controlled_timestamps: fields.clone(),
                     path: source.path.clone(),
                     stamp: expected,
                 },
@@ -347,6 +366,7 @@ pub(crate) fn effect(
             result.before_path = Some(encode_path(&owned.entry.path));
             result.before = Some(expected.clone());
             let owned = OwnedEntry {
+                controlled_timestamps: fields.clone(),
                 path: owned.entry.path.clone(),
                 stamp: expected,
             };
@@ -560,6 +580,11 @@ pub(crate) fn restore_chain(
         group_id: original.step.group_id,
         action,
     };
+    let original_fields = crate::recovery::evidence::paths(&original.step.action)
+        .0
+        .map(|entry| crate::metadata::controlled_fields(op, entry))
+        .transpose()?
+        .unwrap_or_default();
     let copy_back = |input: &Path,
                      expected: &FileStamp,
                      target: &Path|
@@ -585,7 +610,10 @@ pub(crate) fn restore_chain(
                 ExecutionAction::WriteStaging {
                     source: EntryPrestate {
                         path: input.to_owned(),
-                        identity: ExpectedIdentity::Observed(expected.clone()),
+                        identity: crate::metadata::checked_identity(
+                            expected.clone(),
+                            original_fields.clone(),
+                        ),
                     },
                     staging: Box::new(OwnedEntryPrestate {
                         entry: EntryPrestate {
@@ -621,7 +649,7 @@ pub(crate) fn restore_chain(
         let mut actions = Vec::new();
         let mut entry = EntryPrestate {
             path: path.to_owned(),
-            identity: ExpectedIdentity::Observed(expected),
+            identity: crate::metadata::checked_identity(expected, original_fields.clone()),
         };
         if quarantine {
             let target = path.with_file_name(format!(
@@ -671,7 +699,10 @@ pub(crate) fn restore_chain(
                 ExecutionAction::SetMetadata {
                     entry: EntryPrestate {
                         path: entry.path.clone(),
-                        identity: ExpectedIdentity::Observed(expected.clone()),
+                        identity: crate::metadata::checked_identity(
+                            expected.clone(),
+                            original_fields.clone(),
+                        ),
                     },
                     changes,
                 },

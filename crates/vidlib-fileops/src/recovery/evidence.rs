@@ -14,7 +14,11 @@ use vidlib_inventory::{decode_path, encode_path, ids::*, FileStamp, NativePathRe
 use vidlib_rename::{EntryPrestate, ExecutionAction, ExecutionStep, ExpectedIdentity};
 pub(crate) fn stamp(op: &PendingOperation, entry: &EntryPrestate) -> Result<FileStamp, OpError> {
     match &entry.identity {
-        ExpectedIdentity::Observed(s) if s.physical_id.is_some() => Ok(s.clone()),
+        ExpectedIdentity::Observed(s) | ExpectedIdentity::MetadataChecked { stamp: s, .. }
+            if s.physical_id.is_some() =>
+        {
+            Ok(s.clone())
+        }
         ExpectedIdentity::DirectoryAfterEffects {
             original,
             created_by,
@@ -61,6 +65,45 @@ pub(crate) fn material(
     fs: &dyn Filesystem,
 ) -> Result<FileStamp, OpError> {
     let expected = prestate_with_effects(op, entry)?;
+    let fields = crate::metadata::controlled_fields(op, entry)?;
+    if !fields.is_empty() {
+        let actual = fs.inspect(&entry.path)?;
+        // Preflight pinned the original controlled poststate. Only this operation's
+        // durable child path effects can advance directory mtime; historical
+        // forward children never authorize a refreshed inverse prestate.
+        let child_path_effect = op
+            .steps
+            .iter()
+            .chain(op.recovery_effects.iter().map(|e| &e.inverse))
+            .filter(|s| {
+                !s.receipts.is_empty()
+                    && !matches!(s.step.action, ExecutionAction::SetMetadata { .. })
+            })
+            .flat_map(|s| &s.receipts)
+            .any(|fact| {
+                [&fact.before_path, &fact.after_path]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| decode_path(p).ok())
+                    .any(|p| p != entry.path && p.starts_with(&entry.path))
+            });
+        if actual.kind == vidlib_inventory::EntryKind::Directory && child_path_effect {
+            let retained: Vec<_> = fields
+                .iter()
+                .copied()
+                .filter(|f| *f != vidlib_rename::TimestampField::Modified)
+                .collect();
+            crate::platform::check_timestamps(
+                &actual.stamp,
+                &expected,
+                &retained,
+                crate::Phase::Verify,
+            )?;
+            let proof = crate::metadata::directory_proof(op, entry, &expected);
+            return material(op, &proof, fs);
+        }
+        crate::platform::check_timestamps(&actual.stamp, &expected, &fields, crate::Phase::Verify)?;
+    }
     if matches!(
         entry.identity,
         ExpectedIdentity::DirectoryAfterEffects { .. }
@@ -405,6 +448,28 @@ pub(crate) fn probe(
             }
         })
         .transpose()?;
+    if !matches!(step.action, ExecutionAction::SetMetadata { .. }) {
+        if let (Some(entry), Some(expected)) = (source, before.as_ref()) {
+            let fields = crate::metadata::controlled_fields(op, entry)?;
+            let surviving = if !source_absent {
+                Some(entry.path.as_path())
+            } else if matches!(step.action, ExecutionAction::RenameEntry { .. }) {
+                target
+            } else {
+                None
+            };
+            if let Some(path) = surviving {
+                if !fields.is_empty() {
+                    crate::platform::check_timestamps(
+                        &fs.inspect(path)?.stamp,
+                        expected,
+                        &fields,
+                        crate::Phase::Verify,
+                    )?;
+                }
+            }
+        }
+    }
     if matches!(
         step.action,
         ExecutionAction::RemoveOwnedEmptyDirectory { .. }

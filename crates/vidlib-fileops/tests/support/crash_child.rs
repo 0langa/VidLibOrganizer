@@ -436,6 +436,7 @@ pub fn persisted_phase_child(f: &mut Fixture, phase: &str, after: bool) {
                 let outcome = native
                     .publish_staging(
                         &OwnedEntry {
+                            controlled_timestamps: vec![],
                             path: staging.clone(),
                             stamp: before.clone(),
                         },
@@ -505,6 +506,7 @@ pub fn persisted_phase_child(f: &mut Fixture, phase: &str, after: bool) {
                 let before = native.inspect(&path).unwrap().stamp;
                 let durability = native
                     .remove_owned(&OwnedEntry {
+                        controlled_timestamps: vec![],
                         path: path.clone(),
                         stamp: before.clone(),
                     })

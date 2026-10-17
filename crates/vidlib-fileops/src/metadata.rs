@@ -70,7 +70,16 @@ pub(crate) fn effect(
     let observed = fs.verify(&entry.path, &before)?.stamp;
     verify_fields(&observed, &before, changes)?;
     let desired = poststate(&before, changes)?;
-    let mut update = MetadataUpdate::default();
+    let mut update = MetadataUpdate {
+        controlled_timestamps: controlled_fields(op, entry)?,
+        ..Default::default()
+    };
+    crate::platform::check_timestamps(
+        &observed,
+        &before,
+        &update.controlled_timestamps,
+        Phase::Metadata,
+    )?;
     for change in changes {
         match change {
             MetadataChange::Timestamp { field, value_ns } => match field {
@@ -299,6 +308,12 @@ pub(crate) fn prepare(
     let material = crate::recovery::evidence::material(op, entry, fs)?;
     verify_directory_authority(op, entry, &material, fs)?;
     let actual = fs.verify(&entry.path, &material)?.stamp;
+    crate::platform::check_timestamps(
+        &actual,
+        &material,
+        &controlled_fields(op, entry)?,
+        Phase::Metadata,
+    )?;
     if let Some(before) = pending(op, step).and_then(|p| p.metadata_prestate.as_ref()) {
         verify_fields(&actual, before, changes)?;
         return Ok(Some(before.clone()));
@@ -420,6 +435,63 @@ pub(crate) fn directory_proof(
     }
 }
 
+/// Field requirements follow exact durable receipt lineage. Named metadata
+/// effects update values through their receipts; path effects do not drop them.
+pub(crate) fn controlled_fields(
+    op: &PendingOperation,
+    entry: &EntryPrestate,
+) -> Result<Vec<TimestampField>, OpError> {
+    let mut fields = Vec::new();
+    let mut current = &entry.identity;
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        match current {
+            ExpectedIdentity::MetadataChecked {
+                fields: checked, ..
+            } => {
+                for field in checked {
+                    if !fields.contains(field) {
+                        fields.push(*field);
+                    }
+                }
+                break;
+            }
+            ExpectedIdentity::FromReceipt { step_id } => {
+                if !seen.insert(*step_id) {
+                    return Err(invalid("cyclic metadata authority"));
+                }
+                let prior = op
+                    .steps
+                    .iter()
+                    .chain(op.recovery_effects.iter().map(|e| &e.inverse))
+                    .find(|s| s.step.id == *step_id)
+                    .ok_or_else(|| invalid("metadata authority receipt missing"))?;
+                if let ExecutionAction::SetMetadata { changes, .. } = &prior.step.action {
+                    for change in changes {
+                        if let MetadataChange::Timestamp { field, .. } = change {
+                            if !fields.contains(field) {
+                                fields.push(*field);
+                            }
+                        }
+                    }
+                }
+                let Some(source) = crate::recovery::evidence::paths(&prior.step.action).0 else {
+                    break;
+                };
+                current = &source.identity;
+            }
+            _ => break,
+        }
+    }
+    Ok(fields)
+}
+pub(crate) fn checked_identity(stamp: FileStamp, fields: Vec<TimestampField>) -> ExpectedIdentity {
+    if fields.is_empty() {
+        ExpectedIdentity::Observed(stamp)
+    } else {
+        ExpectedIdentity::MetadataChecked { stamp, fields }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

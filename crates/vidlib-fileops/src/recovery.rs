@@ -200,11 +200,14 @@ fn rename_effect(
     let ExecutionAction::RenameEntry { source, target, .. } = &step.action else {
         return Err(error("this recovery effect requires its phase executor"));
     };
+    let fields = crate::metadata::controlled_fields(op, source)?;
     let before = fs.verify(&source.path, expected)?.stamp;
+    crate::platform::check_timestamps(&before, expected, &fields, crate::Phase::Verify)?;
     let rs = reserved(op, &source.path);
     let rt = reserved(op, target);
     let result = if rs || rt {
         fs.rename_reserved(&RenameReservation {
+            controlled_timestamps: fields.clone(),
             operation: op.operation_id,
             step: step.id,
             source: source.path.clone(),
@@ -217,6 +220,7 @@ fn rename_effect(
         })?
     } else {
         fs.rename_reviewed(&RenameRequest {
+            controlled_timestamps: &fields,
             source: &source.path,
             target,
             expected,
@@ -602,7 +606,10 @@ fn restore(
             action: ExecutionAction::RenameEntry {
                 source: EntryPrestate {
                     path: target.clone(),
-                    identity: ExpectedIdentity::Observed(expected.clone()),
+                    identity: crate::metadata::checked_identity(
+                        expected.clone(),
+                        crate::metadata::controlled_fields(&op, source)?,
+                    ),
                 },
                 target: source.path.clone(),
                 temporary: reserved(&op, &source.path),
