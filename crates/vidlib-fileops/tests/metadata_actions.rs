@@ -1967,10 +1967,19 @@ fn copy_undo_field_authority_survives_native_boundaries_and_canonical_validation
 #[cfg(target_os = "linux")]
 #[test]
 fn copy_undo_field_authority_survives_crash_reopen_and_recovery() {
+    copy_undo_crash_authority(&["before-rename", "after-rename"]);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_undo_committed_quarantine_receipt_keeps_controlled_authority() {
+    copy_undo_crash_authority(&["after-quarantine-receipt"]);
+}
+#[cfg(target_os = "linux")]
+fn copy_undo_crash_authority(boundaries: &[&str]) {
     use vidlib_fileops::recovery::{
         apply_recovery, reconcile, RecoveryChoice, RecoveryDisposition,
     };
-    for boundary in ["before-rename", "after-rename"] {
+    for boundary in boundaries {
         for changed in [false, true] {
             for restore in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -1994,6 +2003,30 @@ fn copy_undo_field_authority_survives_crash_reopen_and_recovery() {
                 let mut journal = Journal::open(&coordinator.database_path()).unwrap();
                 let pending = journal.pending().unwrap().pop().unwrap();
                 assert!(pending.steps.iter().any(|s| matches!(&s.step.action, ExecutionAction::RenameEntry { source: EntryPrestate { identity: ExpectedIdentity::MetadataChecked { fields, .. }, .. }, .. } if fields.contains(&TimestampField::Accessed))));
+                if *boundary == "after-quarantine-receipt" {
+                    assert_eq!(pending.steps.len(), 2);
+                    let renamed = &pending.steps[0];
+                    assert!(matches!(
+                        renamed.step.action,
+                        ExecutionAction::RenameEntry { .. }
+                    ));
+                    assert_eq!(
+                        renamed.state,
+                        vidlib_fileops::journal::StepState::CompletionDurable
+                    );
+                    assert_eq!(renamed.receipts.len(), 1);
+                    assert_eq!(
+                        renamed.receipts[0].phase,
+                        vidlib_fileops::events::CompletedPhase::Renamed
+                    );
+                    let cleanup = &pending.steps[1];
+                    assert!(matches!(
+                        cleanup.step.action,
+                        ExecutionAction::RemoveOwnedCopy { .. }
+                    ));
+                    assert_eq!(cleanup.state, vidlib_fileops::journal::StepState::Planned);
+                    assert!(cleanup.receipts.is_empty());
+                }
                 let survivor = fs::read_dir(base.join("destination"))
                     .unwrap()
                     .next()
@@ -2010,7 +2043,7 @@ fn copy_undo_field_authority_survives_crash_reopen_and_recovery() {
                         .unwrap();
                 }
                 let preview = reconcile(&pending, &mut native).unwrap();
-                if changed {
+                if changed && *boundary != "after-quarantine-receipt" {
                     assert!(preview
                         .actions
                         .iter()
@@ -2036,6 +2069,14 @@ fn copy_undo_field_authority_survives_crash_reopen_and_recovery() {
                         native.inspect(&survivor).unwrap().stamp.accessed_ns,
                         Some(1_650_000_000_000_000_000)
                     );
+                    if *boundary == "after-quarantine-receipt" {
+                        let retained = journal.operation(pending.operation_id).unwrap();
+                        assert_eq!(retained.steps[0].receipts, pending.steps[0].receipts);
+                        assert!(
+                            retained.recovery_effects.is_empty(),
+                            "changed value must not become inverse authority"
+                        );
+                    }
                 } else {
                     assert!(result.is_ok(), "{boundary},restore={restore}: {result:?}");
                     assert!(journal.pending().unwrap().is_empty());
@@ -2044,4 +2085,136 @@ fn copy_undo_field_authority_survives_crash_reopen_and_recovery() {
             }
         }
     }
+}
+
+#[test]
+fn directory_swap_metadata_increment_undo_restores_exact_objects() {
+    let mut f = Fixture::new();
+    for (name, bytes) in [
+        ("left", b"left bytes".as_slice()),
+        ("right", b"right bytes".as_slice()),
+    ] {
+        fs::create_dir(f.media.join(name)).unwrap();
+        fs::write(f.media.join(name).join("payload"), bytes).unwrap();
+    }
+    f.inventory = scan(
+        &InventoryRequest::new(vec![RootBinding::new(f.media.clone()).unwrap()]),
+        &JobControl::default(),
+    )
+    .unwrap();
+    let originals: Vec<_> = ["left", "right"]
+        .iter()
+        .map(|name| {
+            f.inventory
+                .entries
+                .iter()
+                .find(|e| e.absolute_path == f.media.join(name))
+                .unwrap()
+                .clone()
+        })
+        .collect();
+    let ids: Vec<_> = originals.iter().map(|e| e.id).collect();
+    f.recipe.selection = ids.clone();
+    f.recipe.numbering_order = ids.clone();
+    f.frozen.inventory_id = f.inventory.id;
+    f.frozen.generation = f.inventory.generation;
+    f.frozen.primary_order = ids;
+    f.recipe.metadata_changes = vec![
+        MetadataChange::TimestampIncrement {
+            field: TimestampField::Modified,
+            start_ns: 1_600_000_000_000_000_000,
+            step_ns: 1_000_000_000,
+        },
+        MetadataChange::TimestampIncrement {
+            field: TimestampField::Accessed,
+            start_ns: 1_600_000_010_000_000_000,
+            step_ns: 1_000_000_000,
+        },
+    ];
+    let mut batch = evaluate(&f.inventory, &f.recipe, &f.frozen).unwrap();
+    for row in &mut batch.rows {
+        row.target_path = f.media.join(if row.source_path.ends_with("left") {
+            "right"
+        } else {
+            "left"
+        });
+        row.status = RowStatus::Changed;
+    }
+    let candidates: Vec<_> = batch
+        .rows
+        .iter()
+        .map(|r| r.source_path.clone())
+        .chain(
+            f.inventory
+                .coverage
+                .iter()
+                .map(|c| c.directory.join(".capture")),
+        )
+        .collect();
+    let ns = PlatformFs::default()
+        .capture_namespace(&batch.grants, &candidates)
+        .unwrap();
+    let forward = plan(
+        &f.inventory,
+        &batch,
+        &ns,
+        PlanRef {
+            session_id: SessionId::new(),
+            plan_id: PlanId::new(),
+            revision: 1,
+        },
+    )
+    .unwrap();
+    let report = f.run(&forward);
+    assert_eq!(report.state, OperationState::Completed, "{report:?}");
+    let left = PlatformFs::default()
+        .inspect(&f.media.join("left"))
+        .unwrap()
+        .stamp;
+    let right = PlatformFs::default()
+        .inspect(&f.media.join("right"))
+        .unwrap()
+        .stamp;
+    assert_ne!(left.modified_ns, right.modified_ns);
+    assert_eq!(left.physical_id, originals[1].stamp.physical_id);
+    assert_eq!(right.physical_id, originals[0].stamp.physical_id);
+    let inverse = undo_plan(&f, report.operation_id.unwrap()).unwrap();
+    // Exercise the pure parent-facts lookup independently of duplicate directory
+    // entries in enclosing parent listings. No mutated snapshot authorizes effects.
+    let mut parent_only = inverse.execution.clone();
+    for parent in &mut parent_only.expected_namespace.parents {
+        parent.entries.retain(|e| {
+            !originals
+                .iter()
+                .any(|o| o.stamp.physical_id == e.stamp.physical_id)
+        });
+    }
+    vidlib_rename::validate::preflight(&parent_only, &parent_only.expected_namespace).unwrap();
+    let mut edited = parent_only.expected_namespace.clone();
+    let parent = edited
+        .parents
+        .iter_mut()
+        .find(|p| p.stamp.physical_id == originals[0].stamp.physical_id)
+        .unwrap();
+    parent.stamp.accessed_ns = Some(1_650_000_000_000_000_000);
+    assert!(vidlib_rename::validate::preflight(&parent_only, &edited).is_err());
+    let reversed = f.run(&inverse);
+    assert_eq!(reversed.state, OperationState::Completed, "{reversed:?}");
+    for entry in &originals {
+        let actual = PlatformFs::default()
+            .inspect(&entry.absolute_path)
+            .unwrap()
+            .stamp;
+        assert_eq!(actual.physical_id, entry.stamp.physical_id);
+        assert_eq!(actual.modified_ns, entry.stamp.modified_ns);
+        assert_eq!(actual.accessed_ns, entry.stamp.accessed_ns);
+    }
+    assert_eq!(
+        fs::read(f.media.join("left/payload")).unwrap(),
+        b"left bytes"
+    );
+    assert_eq!(
+        fs::read(f.media.join("right/payload")).unwrap(),
+        b"right bytes"
+    );
 }

@@ -520,6 +520,7 @@ pub fn preflight(execution: &ExecutionPlan, fresh: &NamespaceSnapshot) -> Result
         facts.sort_by(|a, b| a.parent_path.cmp(&b.parent_path));
         facts
     }
+    let mut prior_renames: Vec<(&Path, &Path)> = Vec::new();
     for step in execution.groups.iter().flat_map(|g| &g.steps) {
         let entry = match &step.action {
             ExecutionAction::RenameEntry { source, .. }
@@ -537,13 +538,24 @@ pub fn preflight(execution: &ExecutionPlan, fresh: &NamespaceSnapshot) -> Result
             identity: ExpectedIdentity::MetadataChecked { stamp, fields },
         }) = entry
         {
+            // A setter's future path can currently contain another selected object.
+            // Reverse the canonical preceding path effects, then require both the
+            // resulting path and exact native identity in the observed namespace.
+            let mut observed_path = path.clone();
+            for (source, target) in prior_renames.iter().rev() {
+                if let Ok(suffix) = observed_path.strip_prefix(target) {
+                    observed_path = source.join(suffix);
+                }
+            }
+            if stamp.physical_id.is_none() {
+                return Err(mismatch());
+            }
             let actual = fresh
                 .parents
                 .iter()
                 .flat_map(|p| &p.entries)
                 .find(|e| {
-                    e.absolute_path == *path
-                        || (stamp.physical_id.is_some() && e.stamp.physical_id == stamp.physical_id)
+                    e.absolute_path == observed_path && e.stamp.physical_id == stamp.physical_id
                 })
                 .map(|e| &e.stamp)
                 .or_else(|| {
@@ -551,9 +563,8 @@ pub fn preflight(execution: &ExecutionPlan, fresh: &NamespaceSnapshot) -> Result
                         .parents
                         .iter()
                         .find(|p| {
-                            p.parent_path == *path
-                                || (stamp.physical_id.is_some()
-                                    && p.stamp.physical_id == stamp.physical_id)
+                            p.parent_path == observed_path
+                                && p.stamp.physical_id == stamp.physical_id
                         })
                         .map(|p| &p.stamp)
                 })
@@ -564,6 +575,9 @@ pub fn preflight(execution: &ExecutionPlan, fresh: &NamespaceSnapshot) -> Result
             }) {
                 return Err(mismatch());
             }
+        }
+        if let ExecutionAction::RenameEntry { source, target, .. } = &step.action {
+            prior_renames.push((&source.path, target));
         }
     }
     let mut actual_parents = normalized(&fresh.parents);

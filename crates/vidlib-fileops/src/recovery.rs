@@ -595,7 +595,23 @@ fn restore(
             .last()
             .and_then(|r| r.after.clone())
             .ok_or_else(|| error("missing compensation receipt"))?;
-        let expected = verified_material(&op, target, &prior, fs)?;
+        let fields = crate::metadata::controlled_fields(&op, source)?;
+        let expected = if fields.is_empty() {
+            verified_material(&op, target, &prior, fs)?
+        } else {
+            // Resolve from the committed poststate before any live refresh. The
+            // field-aware material resolver permits only proven named child effects.
+            material(
+                &op,
+                &EntryPrestate {
+                    path: target.clone(),
+                    identity: ExpectedIdentity::FromReceipt {
+                        step_id: original.step.id,
+                    },
+                },
+                fs,
+            )?
+        };
         if !absent(fs, &source.path) {
             return Err(error("restoration destination is occupied or unavailable"));
         }
@@ -606,10 +622,7 @@ fn restore(
             action: ExecutionAction::RenameEntry {
                 source: EntryPrestate {
                     path: target.clone(),
-                    identity: crate::metadata::checked_identity(
-                        expected.clone(),
-                        crate::metadata::controlled_fields(&op, source)?,
-                    ),
+                    identity: crate::metadata::checked_identity(expected.clone(), fields),
                 },
                 target: source.path.clone(),
                 temporary: reserved(&op, &source.path),

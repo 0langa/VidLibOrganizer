@@ -150,6 +150,9 @@ impl Filesystem for CopyFs {
         }
         let directory = self.native.inspect(r.source())?.kind == EntryKind::Directory;
         let mut x = self.native.rename_reserved(r)?;
+        if self.boundary == "after-quarantine-receipt" {
+            self.fired.set(true);
+        }
         if self.boundary == "change-atime-after-rename" {
             let path = r.target();
             std::fs::File::open(path)
@@ -304,6 +307,11 @@ impl Filesystem for CopyFs {
         self.native.preserve_staging_metadata(s, u)
     }
     fn open_verified(&self, p: &Path, s: &FileStamp) -> Result<File, OpError> {
+        // The next historical-digest check runs after durable rename completion,
+        // before the cleanup intent. The parent asserts that exact journal state.
+        if self.boundary == "after-quarantine-receipt" && self.fired.get() {
+            self.at("after-quarantine-receipt");
+        }
         self.check_closed_writer(p);
         self.native.open_verified(p, s)
     }
