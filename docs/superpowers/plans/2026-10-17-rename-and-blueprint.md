@@ -306,16 +306,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Implements execute from 4.3 for in-place rename graph groups, consuming the exact approved PlanRef/source snapshots, Write lease, Journal and Filesystem. It emits receipts/events, never generates target names at runtime.
 
-- [ ] **Step 1 — Red:** Add `executes_exact_reviewed_plan`, `late_stale_item_changes_nothing_in_preflight`, `no_runtime_collision_suffix`, `all_graph_steps_have_prior_durable_intent`, and `failed_group_stops_following_groups`.
+- [x] **Step 1 — Red:** Add `executes_exact_reviewed_plan`, `late_stale_item_changes_nothing_in_preflight`, `no_runtime_collision_suffix`, `all_graph_steps_have_prior_durable_intent`, and `failed_group_stops_following_groups`.
   ```rust
   assert_eq!(std::fs::read(&expected_target)?, b"fixture");
   assert!(!unexpected_suffix.exists());
   assert_eq!(recorded_intents_before_actions, executed_step_ids);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test rename`.
-- [ ] **Step 3 — Implement:** Whole-selection preflight, then per-step identity/ancestor/freshness checks and no-replace execution under the writer lease. Flush intent before action and completion after; stop on journal or filesystem error. Retain unresolved steps and invalidate path-dependent results before releasing the writer. Avoid broad refactors of old duplicate actions.
-- [ ] **Step 4 — Verify green:** Rename tests on real temporary files and fault-injection adapter; Windows tests for sharing violations and timestamps. Cancel at deterministic group boundaries; assert completed groups are reported honestly.
-- [ ] **Step 5 — Commit:** `feat: execute reviewed rename plans with durable receipts`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test rename`.
+- [x] **Step 3 — Implement:** Whole-selection preflight, then per-step identity/ancestor/freshness checks and no-replace execution under the writer lease. Flush intent before action and completion after; stop on journal or filesystem error. Retain unresolved steps and invalidate path-dependent results before releasing the writer. Avoid broad refactors of old duplicate actions.
+- [ ] **Step 4 — Verify green (portable complete; Windows runtime pending):** Rename tests on real temporary files and fault-injection adapter; Windows tests for sharing violations and timestamps. Cancel at deterministic group boundaries; assert completed groups are reported honestly. Linux native tests and Windows cross-compilation pass; no Windows executor runtime pass is claimed.
+- [x] **Step 5 — Commit:** `feat: execute reviewed rename plans with durable receipts`.
 
 ### Task 08: Crash reconciliation and group compensation
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–06 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks and Task 06's Windows path fixtures remain incomplete. Task 07 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–07 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Task 07's Windows executor checks remain incomplete. Task 08 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -800,6 +800,7 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 04: `16c5def`, fix `16fdb4b`; evidence `3f589ec`, `39f166c` | Real-file WAL/FULL journal, exact native compiled steps, atomic receipts/outbox, pending states and checked migrations. 126 portable tests passed before review; all 25 covering journal tests pass after the performance fix, with scoped Clippy/fmt. Indexed hot-path work scales with batch size; v1→v2 migration preserves existing evidence. Independent review and scoped fix review clean. Task 03 action-model omission corrected. Task 08 owns audited non-application recovery; Task 19 owns separately durable staging creation/streaming phases. Windows runtime pending. Next eligible: Task 05. |
 | 2026-10-17 | Task 05: `bc34cf5` | Independent fs4 lease handles, startup recovery gate, exact persisted epochs/v3 migration, private plan registry and legacy duplicate job coordination. 161 full workspace Rust tests including 15 Linux desktop tests and 3 Node UI tests pass; scoped Clippy, fmt and Windows-target fileops compile pass. Lossless ICO→PNG unblocked desktop baseline. Independent review clean. Interrupted legacy batches remain conservatively gated until Tasks 08/27; installed Windows two-app/runtime checks pending. Next eligible: Task 06. |
 | 2026-10-17 | Task 06: `fa5051e`, corrections `838cb03`, review fix `a68207e` | Pure identity-based final paths, collision suffixes, protected cycle reservations, hierarchical material prestates and whole-selection preflight. Final focused 39 graph +18 contract tests and 3 policy tests pass; scoped Clippy/fmt pass. Earlier 189-test workspace run preceded final focused corrections. Windows-target fixtures compiled; runtime pending. Independent review and scoped fix review clean, including unselected carried-descendant path limits. Task 03 grant-snapshot consistency finding resolved. Native reservation execution and namespace inspection persistence remain Task 07. Next eligible: Task 07. |
+| 2026-10-17 | Task 07: `3c4e9d2`, review fix `20ee7cf` | Journaled exact in-place execution, whole-selection preflight, typed parent identities checked on native held handles, reserved-temp lineage, honest partial reports and safe epoch/terminal ordering. v4 migration preserves exact expected-namespace inspection and prior evidence. Native integration corrected Task 06 root-path trailing separators and owned-staging compatibility. Earlier 230-test workspace run passed; final 66 focused lib/platform/executor tests, Clippy/fmt and Windows compile pass. Independent review and scoped fix review clean. Windows sharing/timestamp/native runtime pending; crash reconciliation and compensation remain Task 08. Next eligible: Task 08. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -816,3 +817,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 05 installed app/runtime: two installed instances contending on shared app data during real scans, mutation/recovery, window close, fixed-local-volume validation and MSVC/offline packaging. Real backend subprocess contention and GNU-target compile pass; Windows runtime remains pending.
 
 - [ ] Windows Task 06 path runtime: UNC/extended paths, device namespace refusal, native UTF-16/unpaired surrogates and case-sensitive NTFS directory facts. Native graph/name assertions are compiled; no Windows runtime pass is claimed.
+
+- [ ] Windows Task 07 executor runtime: sharing violations, timestamp preservation, case-temporary moves, file-ID/parent-handle substitution and installed application behavior. Core Windows cross-compilation passes; executor native tests ran on Linux only. Production Windows mutations remain gated.
