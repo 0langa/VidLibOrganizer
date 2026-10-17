@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 use std::{
     fs,
     fs::File,
@@ -699,7 +701,7 @@ fn source_freshness_rechecked_after_prior_group() {
     assert!(!f.media.join("other").exists());
 }
 #[test]
-fn unimplemented_effects_fail_closed_before_first_rename() {
+fn forged_directory_effect_fails_closed_before_first_rename() {
     let mut f = Fixture::new(&[("a", "new"), ("b", "other")]);
     f.plan.execution.groups[1].steps[0].action = ExecutionAction::CreateDirectory {
         target: f.media.join("unsupported"),
@@ -708,9 +710,10 @@ fn unimplemented_effects_fail_closed_before_first_rename() {
         f.run(&mut PlatformFs::default(), &JobControl::default())
             .unwrap_err()
             .code,
-        ErrorCode::Unsupported
+        ErrorCode::StaleState
     );
     assert!(f.media.join("a").exists());
+    assert!(!f.media.join("unsupported").exists());
     assert!(!f.media.join("new").exists());
 }
 #[test]
@@ -779,6 +782,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
         .unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
+    legacy_schema::remove_copy_protocol(&db);
     db.execute_batch("UPDATE operations SET inspection=json_remove(inspection,'$.expected_namespace'); ALTER TABLE operations DROP COLUMN inspection_version; DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
     let journal = Journal::open(&f.coordinator.database_path()).unwrap();
     let record = journal.operation(op).unwrap();
@@ -793,7 +797,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        11
     );
 }
 #[test]
@@ -803,6 +807,7 @@ fn failed_v3_migration_rolls_back_schema_and_keeps_evidence() {
     let op = journal.begin(&f.plan.execution).unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
+    legacy_schema::remove_copy_protocol(&db);
     db.execute_batch("ALTER TABLE operations DROP COLUMN inspection_version; DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DROP TABLE recovery_restore; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3; CREATE TRIGGER reject_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
     let before: String = db
         .query_row("SELECT inspection FROM operations", [], |r| r.get(0))

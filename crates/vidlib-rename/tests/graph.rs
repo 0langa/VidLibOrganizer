@@ -912,6 +912,9 @@ fn simulate_material_prestates(inventory: &Inventory, plan: &RenamePlan) -> Vec<
             "target must be absent"
         );
         let expected = match &source.identity {
+            ExpectedIdentity::DirectoryAfterEffects { .. } => {
+                panic!("ordinary rename graph cannot refresh copy-directory material")
+            }
             ExpectedIdentity::Observed(stamp) => stamp,
             ExpectedIdentity::FromReceipt { step_id } => {
                 let (recorded_path, stamp) = &receipts[step_id];

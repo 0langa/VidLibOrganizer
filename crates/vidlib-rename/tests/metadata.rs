@@ -72,6 +72,7 @@ fn fixture() -> (tempfile::TempDir, Inventory, InputRequirements) {
         numbering_scope: Default::default(),
         timezone: FrozenTimezone::Utc,
         fields: vec![RequestedInput {
+            scope: Default::default(),
             entry_id: id,
             rule_id: Some("r".into()),
             key: FieldKey::Media {
@@ -115,6 +116,7 @@ fn requested_fields_only_and_cache_invalidates() {
         vec![PropertyKey::Media(MediaProperty::Width)]
     );
     req.fields.push(RequestedInput {
+        scope: Default::default(),
         key: FieldKey::Media {
             property: MediaProperty::Height,
         },
@@ -252,6 +254,7 @@ fn absent_identity_and_hard_link_aliases_never_merge_exact_paths() {
         .primary_order
         .iter()
         .map(|id| RequestedInput {
+            scope: Default::default(),
             entry_id: *id,
             ..req.fields[0].clone()
         })
@@ -269,6 +272,7 @@ fn absent_identity_and_hard_link_aliases_never_merge_exact_paths() {
     absent.entries[0].stamp.physical_id = None;
     req.primary_order = vec![absent.entries[0].id];
     req.fields = vec![RequestedInput {
+        scope: Default::default(),
         entry_id: absent.entries[0].id,
         ..req.fields[0].clone()
     }];
@@ -284,10 +288,12 @@ fn metadata_refresh_preserves_generated_values_and_explicit_missing_decisions() 
     let (_d, inv, mut req) = fixture();
     let p = Provider::new("1");
     req.fields.push(RequestedInput {
+        scope: Default::default(),
         key: FieldKey::Uuid,
         ..req.fields[0].clone()
     });
     req.fields.push(RequestedInput {
+        scope: Default::default(),
         key: FieldKey::Random,
         ..req.fields[0].clone()
     });
@@ -498,6 +504,7 @@ fn transient_helper_failure_is_retried_without_regenerating_uuid() {
     }
     let (_d, inv, mut req) = fixture();
     req.fields.push(RequestedInput {
+        scope: Default::default(),
         key: FieldKey::Uuid,
         ..req.fields[0].clone()
     });

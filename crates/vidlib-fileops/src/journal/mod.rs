@@ -56,6 +56,8 @@ pub struct PendingStep {
 pub struct PendingOperation {
     pub operation_id: OperationId,
     pub inverse_of: Option<OperationId>,
+    /// Immutable original receipts available only through a checked inverse link.
+    pub historical_receipts: Vec<StepReceipt>,
     pub history_visible: bool,
     /// Pending inverses or inverses retaining completed effects revoke replay.
     pub active_inverses: Vec<OperationId>,
@@ -77,8 +79,48 @@ pub struct RestoreContext {
 pub struct RecoveryEffect {
     pub original_step: StepId,
     pub inverse: PendingStep,
-    pub source_parent: vidlib_inventory::PhysicalId,
-    pub target_parent: vidlib_inventory::PhysicalId,
+    pub source_parent: ParentAuthority,
+    pub target_parent: ParentAuthority,
+    pub depends_on: Vec<StepId>,
+}
+/// Untagged concrete form preserves every historical parent JSON value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ParentAuthority {
+    Observed(vidlib_inventory::PhysicalId),
+    Created {
+        created_by: StepId,
+        path: NativePathRecord,
+    },
+}
+impl<'de> Deserialize<'de> for ParentAuthority {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum Stored {
+            Observed {
+                platform: vidlib_inventory::PathPlatform,
+                volume_identity: Vec<u8>,
+                file_identity: Vec<u8>,
+            },
+            Created {
+                created_by: StepId,
+                path: NativePathRecord,
+            },
+        }
+        Ok(match Stored::deserialize(deserializer)? {
+            Stored::Observed {
+                platform,
+                volume_identity,
+                file_identity,
+            } => Self::Observed(vidlib_inventory::PhysicalId {
+                platform,
+                volume_identity,
+                file_identity,
+            }),
+            Stored::Created { created_by, path } => Self::Created { created_by, path },
+        })
+    }
 }
 pub type OperationRecord = PendingOperation;
 /// Stable keyset cursor with a high-water mark; insertion/removal does not
@@ -389,7 +431,8 @@ impl Journal {
                 params![json(&event)?, event_id.to_string()],
             )
             .map_err(sql_error)?;
-            let state = if matches!(
+            let forward_inverse: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operation_inverses WHERE operation_id=?1) AND NOT EXISTS(SELECT 1 FROM recovery_effects WHERE operation_id=?1 AND inverse_step=?2)", params![op.to_string(),receipt.step_id.to_string()], |r| r.get(0)).map_err(sql_error)?;
+            let state = if !forward_inverse && matches!(
                 receipt.phase,
                 CompletedPhase::OwnedCopyRemoved | CompletedPhase::OwnedEmptyDirectoryRemoved
             ) {
@@ -716,7 +759,23 @@ fn load_prerequisites(
     {
         ids.insert(*step_id);
     }
+    if let Some(EntryPrestate {
+        identity:
+            ExpectedIdentity::DirectoryAfterEffects {
+                created_by,
+                effects,
+                ..
+            },
+        ..
+    }) = schema::source(&step.action)
+    {
+        ids.extend(created_by);
+        ids.extend(effects);
+    }
     if let Some(owned) = schema::owned(&step.action) {
+        if let ExpectedIdentity::FromReceipt { step_id } = owned.entry.identity {
+            ids.insert(step_id);
+        }
         ids.insert(owned.created_by);
     }
     match &step.action {
@@ -726,11 +785,20 @@ fn load_prerequisites(
         ExecutionAction::RemoveSource { published_by, .. } => {
             ids.insert(*published_by);
         }
+        ExecutionAction::RemoveSourceDirectory {
+            destination_created_by,
+            required_descendants,
+            ..
+        } => {
+            ids.insert(*destination_created_by);
+            ids.extend(required_descendants);
+        }
         _ => {}
     }
     let mut prerequisites = Prerequisites::new();
     for id in ids {
-        let payload: String = connection.query_row("SELECT r.payload FROM receipts r JOIN steps s ON s.operation_id=r.operation_id AND s.id=r.step_id WHERE r.operation_id=?1 AND r.step_id=?2 AND s.state IN ('CompletionDurable','Compensated')", params![op.to_string(),id.to_string()], |r| r.get(0)).map_err(|e| if matches!(e,rusqlite::Error::QueryReturnedNoRows) { recovery("required durable receipt is missing; reconcile by identity") } else { sql_error(e) })?;
+        let historical = schema::owned(&step.action).is_some_and(|owned| owned.created_by == id);
+        let payload: String = connection.query_row("SELECT r.payload FROM receipts r JOIN steps s ON s.operation_id=r.operation_id AND s.id=r.step_id WHERE r.step_id=?2 AND s.state IN ('CompletionDurable','Compensated') AND (r.operation_id=?1 OR (?3 AND r.operation_id=(SELECT original_operation FROM operation_inverses WHERE operation_id=?1))) ORDER BY (r.operation_id=?1) DESC LIMIT 1", params![op.to_string(),id.to_string(),historical], |r| r.get(0)).map_err(|e| if matches!(e,rusqlite::Error::QueryReturnedNoRows) { recovery("required durable receipt is missing; reconcile by identity") } else { sql_error(e) })?;
         prerequisites.insert(id, from_json::<schema::StoredReceipt>(&payload)?.0);
     }
     Ok(prerequisites)
@@ -818,7 +886,22 @@ fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationR
             .map(|s| parse_id(s))
             .collect::<Result<Vec<_>, _>>()?
     };
+    let historical_receipts = if let Some(original) = &inverse_of {
+        let mut statement=connection.prepare("SELECT r.payload FROM receipts r JOIN steps s ON s.operation_id=r.operation_id AND s.id=r.step_id WHERE r.operation_id=?1 AND s.state='CompletionDurable' ORDER BY s.sequence").map_err(sql_error)?;
+        let payloads = statement
+            .query_map([original], |r| r.get::<_, String>(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        payloads
+            .iter()
+            .map(|p| from_json::<schema::StoredReceipt>(p).map(|r| r.0))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        vec![]
+    };
     Ok(PendingOperation {
+        historical_receipts,
         inverse_of: inverse_of.map(|s| parse_id(&s)).transpose()?,
         history_visible,
         active_inverses,
@@ -874,8 +957,12 @@ fn event_kind(phase: CompletedPhase) -> EventKind {
     match phase {
         CompletedPhase::Renamed => EventKind::Rename,
         CompletedPhase::DirectoryCreated => EventKind::Directory,
-        CompletedPhase::CopyStaged | CompletedPhase::CopyPublished => EventKind::Copy,
-        CompletedPhase::SourceRemoved => EventKind::Removal,
+        CompletedPhase::StagingCreated
+        | CompletedPhase::CopyStaged
+        | CompletedPhase::CopyPublished => EventKind::Copy,
+        CompletedPhase::SourceRemoved | CompletedPhase::SourceDirectoryRemoved => {
+            EventKind::Removal
+        }
         CompletedPhase::MetadataSet => EventKind::Metadata,
         CompletedPhase::OwnedCopyRemoved | CompletedPhase::OwnedEmptyDirectoryRemoved => {
             EventKind::Compensation
@@ -894,6 +981,25 @@ fn resolved_stamp<'a>(
 ) -> Result<&'a FileStamp, OpError> {
     let stamp = match &entry.identity {
         ExpectedIdentity::Observed(stamp) => stamp,
+        ExpectedIdentity::DirectoryAfterEffects {
+            original,
+            created_by,
+            ..
+        } => {
+            if let Some(id) = created_by {
+                let fact = earlier_receipt(record, *id)?;
+                if fact.phase != CompletedPhase::DirectoryCreated
+                    || fact.after_path.as_ref() != Some(&vidlib_inventory::encode_path(&entry.path))
+                {
+                    return Err(recovery("directory creator path or kind differs"));
+                }
+                fact.after
+                    .as_ref()
+                    .ok_or_else(|| recovery("directory creator lacks identity"))?
+            } else {
+                original
+            }
+        }
         ExpectedIdentity::FromReceipt { step_id } => {
             let fact = earlier_receipt(record, *step_id)?;
             if fact.after_path.as_ref() != Some(&vidlib_inventory::encode_path(&entry.path)) {
@@ -931,6 +1037,20 @@ fn validate_resolved_inputs(step: &ExecutionStep, record: &Prerequisites) -> Res
                 || !valid_digest(verified.digest.as_ref())
             {
                 return Err(recovery("staging has no verified content receipt"));
+            }
+        }
+        ExecutionAction::RemoveSourceDirectory {
+            destination_created_by,
+            required_descendants,
+            ..
+        } => {
+            if earlier_receipt(record, *destination_created_by)?.phase
+                != CompletedPhase::DirectoryCreated
+            {
+                return Err(recovery("source directory destination ownership missing"));
+            }
+            for id in required_descendants {
+                earlier_receipt(record, *id)?;
             }
         }
         ExecutionAction::RemoveSource { published_by, .. } => {
@@ -971,8 +1091,15 @@ fn validate_receipt(
     if let (Some(entry), Some(observed)) = (before, &receipt.before) {
         let expected = resolved_stamp(entry, record)?;
         if observed.physical_id != expected.physical_id
-            || (expected.size.is_some() && observed.size != expected.size)
-            || (expected.modified_ns.is_some() && observed.modified_ns != expected.modified_ns)
+            || (!matches!(
+                step.action,
+                ExecutionAction::RemoveOwnedEmptyDirectory { .. }
+            ) && !matches!(
+                entry.identity,
+                ExpectedIdentity::DirectoryAfterEffects { .. }
+            ) && ((expected.size.is_some() && observed.size != expected.size)
+                || (expected.modified_ns.is_some()
+                    && observed.modified_ns != expected.modified_ns)))
         {
             return Err(invalid(
                 "receipt prestate differs from expected identity/state",
@@ -1014,6 +1141,135 @@ fn validate_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parent_authority_codec_rejects_mixed_or_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = crate::Filesystem::inspect(&crate::PlatformFs::default(), dir.path())
+            .unwrap()
+            .stamp
+            .physical_id
+            .unwrap();
+        let old = serde_json::to_value(&id).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ParentAuthority>(old.clone()).unwrap(),
+            ParentAuthority::Observed(id)
+        );
+        for extra in [
+            serde_json::json!({"unexpected":true}),
+            serde_json::json!({"created_by":StepId::new(),"path":vidlib_inventory::encode_path(dir.path())}),
+        ] {
+            let mut invalid = old.clone();
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(
+                serde_json::from_value::<ParentAuthority>(invalid).is_err(),
+                "mixed future/native parent authority must be rejected"
+            );
+        }
+    }
+    #[test]
+    fn copy_protocol_migrations_preserve_old_inverse_parents_facts_and_rollback() {
+        let migrations = [
+            schema::SQL,
+            schema::V2_SQL,
+            schema::V3_SQL,
+            schema::V4_SQL,
+            schema::V5_SQL,
+            schema::V6_SQL,
+            schema::V7_SQL,
+            schema::V8_SQL,
+            schema::V9_SQL,
+            schema::V10_SQL,
+        ];
+        for old_version in 8..=10 {
+            for conflict in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("operations.sqlite3");
+                let db = Connection::open(&path).unwrap();
+                for (index, sql) in migrations.iter().enumerate().take(old_version) {
+                    db.execute_batch(sql).unwrap();
+                    db.execute(
+                        "INSERT INTO schema_migrations VALUES(?1,?2)",
+                        params![(index + 1) as i64, format!("{:x}", md5::compute(sql))],
+                    )
+                    .unwrap();
+                }
+                db.pragma_update(None, "user_version", old_version as i64)
+                    .unwrap();
+                db.execute_batch("INSERT INTO operations(id,state,inspection,groups_json,approved_plan) VALUES('op','RecoveryRequired','original inspection','[]','approved'); INSERT INTO steps VALUES('op','original','group',0,'CompletionDurable','legacy StageCopy'); INSERT INTO steps VALUES('op','inverse','group',1,'Planned','legacy inverse'); INSERT INTO receipts VALUES('op','original','immutable original digest receipt'); INSERT INTO operation_events(id,operation_id,step_id,payload) VALUES('event','op','original','immutable original event');").unwrap();
+                let parents = "[{\"platform\":\"UnixBytes\",\"volume_identity\":[1],\"file_identity\":[2]},{\"platform\":\"UnixBytes\",\"volume_identity\":[1],\"file_identity\":[3]}]";
+                db.execute(
+                    if old_version == 10 {
+                        "INSERT INTO recovery_effects VALUES('op','original','inverse',?1,0)"
+                    } else {
+                        "INSERT INTO recovery_effects VALUES('op','original','inverse',?1)"
+                    },
+                    [parents],
+                )
+                .unwrap();
+                if conflict {
+                    db.execute_batch("CREATE TABLE recovery_dependencies(retained TEXT); INSERT INTO recovery_dependencies VALUES('untouched');").unwrap();
+                }
+                let opened = Journal::open(&path);
+                if conflict {
+                    assert!(opened.is_err());
+                    assert_eq!(
+                        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                            .unwrap(),
+                        old_version as i64
+                    );
+                    assert_eq!(
+                        db.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                            .get::<_, i64>(0))
+                            .unwrap(),
+                        old_version as i64
+                    );
+                    assert_eq!(
+                        db.query_row("SELECT retained FROM recovery_dependencies", [], |r| r
+                            .get::<_, String>(
+                            0
+                        ))
+                        .unwrap(),
+                        "untouched"
+                    );
+                } else {
+                    assert!(opened.is_ok(), "v{old_version}: {:?}", opened.err());
+                    assert_eq!(
+                        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                            .unwrap(),
+                        schema::VERSION
+                    );
+                }
+                assert_eq!(
+                    db.query_row("SELECT parents FROM recovery_effects", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    parents
+                );
+                assert_eq!(
+                    db.query_row("SELECT payload FROM receipts", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "immutable original digest receipt"
+                );
+                assert_eq!(
+                    db.query_row("SELECT payload FROM operation_events", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "immutable original event"
+                );
+                assert_eq!(
+                    db.query_row("SELECT compiled FROM steps WHERE id='original'", [], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .unwrap(),
+                    "legacy StageCopy"
+                );
+            }
+        }
+    }
     // A missing connection-local setting on either writer reopen or fresh reader
     // would weaken the journal's durability/integrity guarantees.
     #[test]

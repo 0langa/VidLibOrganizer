@@ -44,10 +44,12 @@ pub fn evaluate(
             "resolve associations before freezing primary order",
         ));
     }
-    if recipe.destination != Destination::SameDirectory || !recipe.metadata_changes.is_empty() {
+    if matches!(recipe.destination, Destination::Granted { .. })
+        || !recipe.metadata_changes.is_empty()
+    {
         return Err(RenameError::new(
             RenameErrorCode::UnsupportedConfiguration,
-            "configuration requires a later evaluator",
+            "choose explicit Copy or Move; legacy destination mode is ambiguous, and metadata changes are not enabled",
         ));
     }
     for rule in recipe.rules.iter().filter(|r| r.enabled) {
@@ -214,6 +216,7 @@ pub fn evaluate(
                         render_template(
                             parts,
                             &TemplateContext {
+                                scope: Default::default(),
                                 entry,
                                 original: &original,
                                 current: &current,
@@ -289,6 +292,7 @@ pub fn evaluate(
         rows.push(row);
     }
     let mut batch = EvaluatedBatch {
+        inventory: inventory.clone(),
         recipe: recipe.clone(),
         inventory_id: inventory.id,
         generation: inventory.generation,
@@ -420,11 +424,18 @@ fn validate_inputs(
                 "frozen value refers to an unselected entry",
             ));
         }
-        if value
-            .rule_id
-            .as_ref()
-            .is_some_and(|id| !recipe.rules.iter().any(|r| &r.id == id))
-            || !seen.insert((value.entry_id, &value.rule_id, &value.key))
+        if (value.scope == FrozenScope::Rule
+            && value
+                .rule_id
+                .as_ref()
+                .is_some_and(|id| !recipe.rules.iter().any(|r| &r.id == id)))
+            || (value.scope == FrozenScope::Destination
+                && (value.rule_id.is_some()
+                    || !matches!(
+                        recipe.destination,
+                        Destination::CopyTo { .. } | Destination::MoveTo { .. }
+                    )))
+            || !seen.insert((value.scope, value.entry_id, &value.rule_id, &value.key))
             || !valid_frozen_value(&value.key, &value.value)
             || matches!(&value.value, FrozenFieldValue::Timestamp { timezone: Some(zone), .. } | FrozenFieldValue::LocalTimestamp { timezone: Some(zone), .. } if !valid_timezone(zone))
         {

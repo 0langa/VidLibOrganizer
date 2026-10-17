@@ -242,3 +242,81 @@ pub async fn select_sources(
         })
     }
 }
+
+/// Backend-only native destination picker seam; never accepts IPC path text.
+pub fn install_destination_at(
+    state: &AppState,
+    path: PathBuf,
+    expected_revision: Option<u64>,
+) -> Result<SourceDto, CommandError> {
+    use vidlib_fileops::Filesystem;
+    let entry = vidlib_fileops::PlatformFs::default().inspect(&path)?;
+    if entry.kind != vidlib_inventory::EntryKind::Directory {
+        return Err(vidlib_fileops::OpError::new(
+            vidlib_fileops::ErrorCode::InvalidPath,
+            vidlib_fileops::Phase::Verify,
+            "Choose an existing native directory",
+        )
+        .into());
+    }
+    let root = RootBinding::new(path).map_err(|e| {
+        vidlib_fileops::OpError::new(
+            vidlib_fileops::ErrorCode::InvalidPath,
+            vidlib_fileops::Phase::Verify,
+            e.to_string(),
+        )
+    })?;
+    let grant = vidlib_inventory::SourceGrant {
+        source: GrantSource::NativeSelection,
+        ..root.source_grant
+    };
+    let mut r = state.rename.lock().map_err(|_| {
+        vidlib_fileops::OpError::new(
+            vidlib_fileops::ErrorCode::StaleState,
+            vidlib_fileops::Phase::Verify,
+            "Rename state unavailable",
+        )
+    })?;
+    if expected_revision.is_some_and(|revision| revision != r.revision) {
+        return Err(vidlib_fileops::OpError::new(
+            vidlib_fileops::ErrorCode::StaleState,
+            vidlib_fileops::Phase::Verify,
+            "Destination selection was superseded",
+        )
+        .into());
+    }
+    state
+        .plans
+        .lock()
+        .map_err(|_| {
+            vidlib_fileops::OpError::new(
+                vidlib_fileops::ErrorCode::StaleState,
+                vidlib_fileops::Phase::Verify,
+                "Plan state unavailable",
+            )
+        })?
+        .invalidate();
+    let result = SourceDto {
+        grant_id: grant.id,
+        display: grant.path.to_string_lossy().into_owned(),
+    };
+    r.replace_destination(grant)?;
+    Ok(result)
+}
+#[tauri::command]
+pub async fn select_destination(
+    request: InputRevision,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<SourceDto>, CommandError> {
+    crate::commands::rename::update_inputs_owned(&state, request.clone())?;
+    if let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_title("Choose Copy or Move destination")
+        .pick_folder()
+        .await
+    {
+        install_destination_at(&state, folder.path().to_path_buf(), Some(request.revision))
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}

@@ -8,6 +8,7 @@ license.workspace = true
 vidlib-engine = { path = "../vidlib-engine" }
 serde = { version = "1.0", features = ["derive"] }
 md5 = "0.8"
+sha2 = "0.10"
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 vidlib-inventory = { path = "../vidlib-inventory" }
 vidlib-rename = { path = "../vidlib-rename" }

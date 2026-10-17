@@ -56,6 +56,7 @@ fn preview(state: &AppState) -> UiPlanRef {
         preview_owned(
             state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 2,
@@ -381,6 +382,7 @@ fn all_selected_conflicts_block_apply_beyond_first_page() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 2,
@@ -449,6 +451,7 @@ fn directory_capture_preserves_unselected_nested_children_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 2,
@@ -591,6 +594,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 2,
@@ -612,6 +616,7 @@ fn carrying_private_namespace_is_blocked_but_unrelated_descendants_work() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 3,
@@ -691,6 +696,7 @@ fn empty_directory_rename_retains_complete_namespace_for_undo() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 2,
@@ -897,6 +903,7 @@ fn recovery_all_actions_are_reachable_through_one_review() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 2,
@@ -1129,6 +1136,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
         preview_owned(
             &state,
             RenameRequestDto {
+                destination: None,
                 recipe_json: None,
                 rebind_selection: false,
                 revision: 4,
@@ -1146,6 +1154,7 @@ fn delayed_older_preview_dispatch_cannot_replace_current_backend_plan() {
     assert!(preview_owned(
         &state,
         RenameRequestDto {
+            destination: None,
             recipe_json: None,
             rebind_selection: false,
             revision: 3,
@@ -1657,6 +1666,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
             metadata_changes: vec![],
         };
         let request = RenameRequestDto {
+            destination: None,
             revision,
             selected_ids: selected.clone(),
             rule: NamingRule::Template {
@@ -1687,6 +1697,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         );
     }
     let request = RenameRequestDto {
+        destination: None,
         revision: 4,
         selected_ids: selected.clone(),
         rule: NamingRule::Template {
@@ -1761,6 +1772,7 @@ fn real_metadata_reaches_ordered_and_legacy_template_preview() {
         metadata_changes: vec![],
     };
     let request = RenameRequestDto {
+        destination: None,
         revision: 5,
         selected_ids: selected,
         rule: NamingRule::Keep,
@@ -2009,4 +2021,207 @@ fn manual_companion_binding_requires_current_selected_grants() {
     assert!(completed);
     assert!(confirm_owned(&state, PlanRequest { plan_ref }).is_err());
     assert!(media.join("subtitles/unrelated.EN.srt").exists());
+}
+
+#[test]
+fn explicit_destination_grant_reaches_legacy_and_ordered_preview() {
+    let (dir, state) = fixture();
+    let target = dir.path().join("destination");
+    std::fs::create_dir(&target).unwrap();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let items = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let selected = items
+        .items
+        .iter()
+        .filter(|v| v["displayName"] == "original.mp4")
+        .map(|v| v["itemId"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    for (revision, ordered) in [(2, false), (3, true)] {
+        let destination =
+            vidlib_tauri::selection::install_destination_at(&state, target.clone(), None).unwrap();
+        let request = json!({"revision":revision.to_string(),"selectedIds":selected,"rule":"fixedStem","fixedStem":"Renamed","destination":{"type":"copyTo","grantId":destination.grant_id,"layout":{"type":"folderTemplate","parts":[{"type":"literal","value":"Films/2026"}]}}});
+        let mut request = request;
+        if ordered {
+            let recipe = vidlib_rename::RecipeV1 {
+                schema_version: 1,
+                revision: 1,
+                selection: vec![],
+                selection_filter: None,
+                numbering_order: vec![],
+                numbering_scope: Default::default(),
+                rules: vec![vidlib_rename::Rule {
+                    id: "final".into(),
+                    enabled: true,
+                    segment: vidlib_rename::SegmentSelector::Stem,
+                    parameters: vidlib_rename::RuleParameters::FixedStem {
+                        value: "Ordered".into(),
+                    },
+                }],
+                companions: vidlib_rename::CompanionPolicy::None,
+                destination: vidlib_rename::Destination::SameDirectory,
+                collision_policy: vidlib_rename::CollisionPolicy::Block,
+                metadata_changes: vec![],
+            };
+            request["recipeJson"] = json!(serde_json::to_string(&recipe).unwrap());
+            request["rebindSelection"] = json!(true);
+        }
+        let parsed = serde_json::from_value::<RenameRequestDto>(request);
+        assert!(parsed.is_ok(), "destination DTO: {:?}", parsed.err());
+        let preview = wait(&state, preview_owned(&state, parsed.unwrap()).unwrap());
+        let plan = serde_json::from_value::<UiPlanRef>(preview["planRef"].clone()).unwrap();
+        let page = page_owned(
+            &state,
+            PageRequest {
+                plan_ref: plan,
+                query: PageQuery::new(revision),
+            },
+        )
+        .unwrap();
+        let wanted = target.join(if ordered {
+            "Films/2026/Ordered.mp4"
+        } else {
+            "Films/2026/Renamed.mp4"
+        });
+        assert_eq!(
+            page.items[0]["newDisplay"],
+            wanted.to_string_lossy().as_ref()
+        );
+        assert_eq!(preview["counts"]["blocked"], "0");
+    }
+}
+
+#[test]
+fn destination_nested_template_dto_is_strict_camel_case() {
+    let grant = vidlib_inventory::ids::GrantId::new();
+    let request = json!({"revision":"1","selectedIds":[],"destination":{"type":"copyTo","grantId":grant,"layout":{"type":"folderTemplate","parts":[{"type":"optional","value":[{"type":"field","value":{"key":{"type":"sizeBytes"},"format":{"type":"integer","radix":"hexUpper","padding":4},"fallback":null}},{"type":"field","value":{"key":{"type":"media","property":"videoCodec"},"format":{"type":"text"},"fallback":"unknown"}}]}]}}});
+    let decoded = serde_json::from_value::<RenameRequestDto>(request.clone());
+    assert!(
+        decoded.is_ok(),
+        "nested camelCase layout must decode: {:?}",
+        decoded.err()
+    );
+    for (pointer, value) in [
+        ("/destination", json!({"type":"inPlace","unknown":true})),
+        (
+            "/destination/layout",
+            json!({"type":"preserveHierarchy","unknown":true}),
+        ),
+        (
+            "/destination/layout/parts/0/value/0/value/key/type",
+            json!("size_bytes"),
+        ),
+        (
+            "/destination/layout/parts/0/value/0/value/format/radix",
+            json!("hex_upper"),
+        ),
+        (
+            "/destination/layout/parts/0/value/1/value/key/property",
+            json!("video_codec"),
+        ),
+        (
+            "/destination/layout/parts/0/value/0/value/key",
+            json!({"type":"sizeBytes","unknown":true}),
+        ),
+        (
+            "/destination/layout/parts/0/value/0/value/format",
+            json!({"type":"text","unknown":true}),
+        ),
+        (
+            "/destination/layout/parts/0/value/0/value",
+            json!({"key":{"type":"sizeBytes"},"format":{"type":"text"},"unknown":true}),
+        ),
+    ] {
+        let mut invalid = request.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            serde_json::from_value::<RenameRequestDto>(invalid).is_err(),
+            "accepted non-contract nested value at {pointer}"
+        );
+    }
+}
+
+#[test]
+fn destination_stale_forged_and_imported_ids_never_create_native_authority() {
+    let (dir, state) = fixture();
+    let target = dir.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    wait(
+        &state,
+        inventory_owned(&state, InventoryRequestDto { revision: 1 }).unwrap(),
+    );
+    let page = inventory_page_owned(
+        &state,
+        InventoryPageRequest {
+            query: PageQuery::new(1),
+        },
+    )
+    .unwrap();
+    let selected: Vec<_> = page
+        .items
+        .iter()
+        .filter(|v| v["displayName"] == "original.mp4")
+        .map(|v| v["itemId"].clone())
+        .collect();
+    let old =
+        vidlib_tauri::selection::install_destination_at(&state, target.clone(), None).unwrap();
+    vidlib_tauri::selection::install_destination_at(&state, target.clone(), None).unwrap();
+    for (index, (grant, imported)) in [
+        (old.grant_id, false),
+        (vidlib_inventory::ids::GrantId::new(), false),
+        (vidlib_inventory::ids::GrantId::new(), true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut request = json!({"revision":(index+2).to_string(),"selectedIds":selected,"destination":{"type":"copyTo","grantId":grant,"layout":{"type":"preserveHierarchy"}}});
+        if imported {
+            let recipe = vidlib_rename::RecipeV1 {
+                schema_version: 1,
+                revision: 1,
+                selection: vec![],
+                selection_filter: None,
+                numbering_order: vec![],
+                numbering_scope: Default::default(),
+                rules: vec![],
+                companions: vidlib_rename::CompanionPolicy::None,
+                destination: vidlib_rename::Destination::CopyTo {
+                    grant_id: grant,
+                    layout: vidlib_rename::DestinationLayout::PreserveHierarchy,
+                },
+                collision_policy: vidlib_rename::CollisionPolicy::Block,
+                metadata_changes: vec![],
+            };
+            request.as_object_mut().unwrap().remove("destination");
+            request["recipeJson"] = json!(serde_json::to_string(&recipe).unwrap());
+            request["rebindSelection"] = json!(true);
+        }
+        let id = preview_owned(&state, serde_json::from_value(request).unwrap()).unwrap();
+        let mut terminal = false;
+        for _ in 0..500 {
+            let status = status_owned(&state, JobRequest { job_id: id }).unwrap();
+            if status.state != "running" {
+                assert_eq!(status.state, "failed", "{status:?}");
+                assert!(status.error.unwrap().message.contains("native picker"));
+                terminal = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(terminal);
+    }
+    assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read(dir.path().join("media/original.mp4")).unwrap(),
+        b"media"
+    );
 }

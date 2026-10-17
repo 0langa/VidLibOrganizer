@@ -47,6 +47,19 @@ fn current_path(op: &OperationRecord, original: &Path) -> PathBuf {
     current
 }
 
+// Explicit destination operations retain both selected source and destination
+// grants. Their quarantines do not move the original path's restore authority.
+fn grant_path(op: &OperationRecord, original: &Path) -> PathBuf {
+    if matches!(
+        op.inspection["recipe"]["destination"]["type"].as_str(),
+        Some("copy_to" | "move_to")
+    ) {
+        original.to_owned()
+    } else {
+        current_path(op, original)
+    }
+}
+
 /// Backend-only capture inputs. This is read-only context, never mutation
 /// authority; `plan_undo` still validates historical lineage, complete subtree
 /// evidence and the supplied fresh namespace before the ordinary executor.
@@ -62,15 +75,22 @@ pub fn capture_context(completed: &OperationRecord) -> Result<UndoCaptureContext
     {
         grants.grants.push(SourceGrant {
             id: decode(&value["id"])?,
-            path: current_path(completed, &path(&value["path"])?),
+            path: grant_path(completed, &path(&value["path"])?),
             source: decode(&value["source"])?,
         });
     }
     let (parents, entries, _) = transformed_namespace(completed)?;
+    let grant_candidates = grants
+        .grants
+        .iter()
+        .filter(|g| !parents.iter().any(|(p, _)| p == &g.path))
+        .map(|g| g.path.clone())
+        .collect::<Vec<_>>();
     let mut candidates: Vec<_> = entries
         .into_keys()
         .chain(parents.into_iter().map(|(p, _)| p.join(".vidlib-capture")))
         .filter(|p| grants.grants.iter().any(|g| p.starts_with(&g.path)))
+        .chain(grant_candidates)
         .collect();
     candidates.sort();
     candidates.dedup();
@@ -103,6 +123,15 @@ pub fn plan_undo(
         return Err(invalid(
             "undo support removed or an inverse already retains effects",
         ));
+    }
+    if completed.steps.iter().any(|s| {
+        s.state == StepState::CompletionDurable
+            && matches!(
+                s.step.action,
+                ExecutionAction::PublishCopy { .. } | ExecutionAction::CreateDirectory { .. }
+            )
+    }) {
+        return plan_copy_undo(completed, namespace, version);
     }
     let mut retained = BTreeMap::new();
     for pending in &completed.steps {
@@ -140,7 +169,7 @@ pub fn plan_undo(
     {
         grants.grants.push(SourceGrant {
             id: decode(&value["id"])?,
-            path: current_path(completed, &path(&value["path"])?),
+            path: grant_path(completed, &path(&value["path"])?),
             source: decode(&value["source"])?,
         });
     }
@@ -424,6 +453,7 @@ pub fn plan_undo(
         })
         .collect();
     let batch = EvaluatedBatch {
+        inventory: inventory.clone(),
         recipe,
         inventory_id: inventory.id,
         generation: inventory.generation,
@@ -532,4 +562,544 @@ fn directory_material(
         ));
     }
     Ok(actual.stamp.clone())
+}
+
+fn plan_copy_undo(
+    op: &OperationRecord,
+    ns: &NamespaceSnapshot,
+    version: PlanRef,
+) -> Result<RenamePlan, OpError> {
+    let context = capture_context(op)?;
+    if context.grants != ns.grants {
+        return Err(invalid("historical destination grants changed"));
+    }
+    let grants = context.grants;
+    let roots: Vec<_> = grants
+        .grants
+        .iter()
+        .map(|g| RootBinding {
+            id: RootId::from_uuid(*g.id.as_uuid()),
+            source_grant: g.clone(),
+            path: g.path.clone(),
+            evidence: RootEvidence::default(),
+            capabilities: FilesystemCapabilities::default(),
+        })
+        .collect();
+    let mut rows = Vec::new();
+    let mut entries = Vec::new();
+    let mut groups = Vec::new();
+    let mut sequence = 0u64;
+    let mut next = || -> StepId {
+        sequence += 1;
+        format!(
+            "{:x}",
+            md5::compute(format!(
+                "copy-undo:{}:{}:{sequence}",
+                op.operation_id, version.plan_id
+            ))
+        )
+        .parse()
+        .expect("digest ID")
+    };
+    let observed = |path: &Path, stamp: &FileStamp, dir: bool| -> Result<FileStamp, OpError> {
+        let actual = ns
+            .parents
+            .iter()
+            .flat_map(|p| &p.entries)
+            .find(|e| e.absolute_path == path)
+            .ok_or_else(|| invalid("owned copy is missing"))?;
+        if dir {
+            if actual.kind != EntryKind::Directory || actual.stamp.physical_id != stamp.physical_id
+            {
+                return Err(invalid("created directory identity changed"));
+            }
+        } else {
+            check_stamp(&actual.stamp, stamp, Phase::Verify)?;
+        }
+        Ok(actual.stamp.clone())
+    };
+    for historical_group in op.groups.iter().rev() {
+        let mut steps = Vec::new();
+        // Recreate missing source ancestors before any descendant copy-back.
+        let mut restored = Vec::new();
+        for removed in op.steps.iter().rev().filter(|s| {
+            s.step.group_id == historical_group.id && s.state == StepState::CompletionDurable
+        }) {
+            let ExecutionAction::RemoveSourceDirectory {
+                source,
+                destination_created_by,
+                ..
+            } = &removed.step.action
+            else {
+                continue;
+            };
+            let ExpectedIdentity::FromReceipt { step_id } = source.identity else {
+                return Err(invalid("removed directory quarantine missing"));
+            };
+            let prior = op
+                .steps
+                .iter()
+                .find(|s| s.step.id == step_id)
+                .ok_or_else(|| invalid("directory quarantine missing"))?;
+            let ExecutionAction::RenameEntry {
+                source:
+                    EntryPrestate {
+                        path,
+                        identity:
+                            ExpectedIdentity::DirectoryAfterEffects {
+                                original,
+                                created_by: None,
+                                ..
+                            },
+                    },
+                ..
+            } = &prior.step.action
+            else {
+                return Err(invalid("directory original metadata missing"));
+            };
+            if ns
+                .parents
+                .iter()
+                .flat_map(|p| &p.entries)
+                .any(|e| e.absolute_path == *path)
+            {
+                return Err(invalid("original source directory recreated; undo refused"));
+            }
+            let create = next();
+            let entry_id = EntryId::from_uuid(*destination_created_by.as_uuid());
+            steps.push(ExecutionStep {
+                id: create,
+                entry_id,
+                group_id: historical_group.id,
+                action: ExecutionAction::CreateDirectory {
+                    target: path.clone(),
+                },
+            });
+            restored.push((
+                path.clone(),
+                original.clone(),
+                create,
+                entry_id,
+                *destination_created_by,
+            ));
+        }
+        for original in op.steps.iter().rev().filter(|s| {
+            s.step.group_id == historical_group.id && s.state == StepState::CompletionDurable
+        }) {
+            let native_move = matches!(
+                original.step.action,
+                ExecutionAction::RenameEntry {
+                    temporary: false,
+                    ..
+                }
+            );
+            let (source, created_by, directory, moving, target, expected) = match &original
+                .step
+                .action
+            {
+                ExecutionAction::RenameEntry {
+                    source,
+                    target,
+                    temporary: false,
+                } => {
+                    let stamp = original
+                        .receipts
+                        .last()
+                        .and_then(|r| r.after.as_ref())
+                        .ok_or_else(|| invalid("native move receipt missing"))?;
+                    let directory = ns.parents.iter().any(|p| p.parent_path == *target);
+                    if ns
+                        .parents
+                        .iter()
+                        .flat_map(|p| &p.entries)
+                        .any(|e| e.absolute_path == source.path)
+                    {
+                        return Err(invalid("original native source recreated"));
+                    }
+                    (
+                        target.clone(),
+                        original.step.id,
+                        directory,
+                        true,
+                        source.path.clone(),
+                        if directory {
+                            directory_material(op, ns, target, stamp)?
+                        } else {
+                            observed(target, stamp, false)?
+                        },
+                    )
+                }
+                ExecutionAction::PublishCopy {
+                    staging, target, ..
+                } => {
+                    let fact = original
+                        .receipts
+                        .last()
+                        .ok_or_else(|| invalid("publication receipt missing"))?;
+                    let stamp = fact
+                        .after
+                        .as_ref()
+                        .ok_or_else(|| invalid("publication identity missing"))?;
+                    if !fact
+                        .digest
+                        .as_ref()
+                        .is_some_and(|d| d.algorithm == "sha256" && d.bytes.len() == 32)
+                    {
+                        return Err(invalid("full SHA256 ownership required for copy undo"));
+                    }
+                    let removed=op.steps.iter().find(|s|s.state==StepState::CompletionDurable && matches!(&s.step.action,ExecutionAction::RemoveSource{published_by,..} if *published_by==original.step.id));
+                    let original_source = if let Some(remove) = removed {
+                        let ExecutionAction::RemoveSource { source, .. } = &remove.step.action
+                        else {
+                            unreachable!()
+                        };
+                        let ExpectedIdentity::FromReceipt { step_id } = source.identity else {
+                            return Err(invalid("move quarantine lineage missing"));
+                        };
+                        match &op
+                            .steps
+                            .iter()
+                            .find(|s| s.step.id == step_id)
+                            .ok_or_else(|| invalid("quarantine missing"))?
+                            .step
+                            .action
+                        {
+                            ExecutionAction::RenameEntry { source, .. } => source.path.clone(),
+                            _ => return Err(invalid("quarantine source invalid")),
+                        }
+                    } else {
+                        target.clone()
+                    };
+                    (
+                        target.clone(),
+                        staging.created_by,
+                        false,
+                        removed.is_some(),
+                        original_source,
+                        observed(target, stamp, false)?,
+                    )
+                }
+                ExecutionAction::CreateDirectory { target } => {
+                    let stamp = original
+                        .receipts
+                        .last()
+                        .and_then(|r| r.after.as_ref())
+                        .ok_or_else(|| invalid("created directory receipt missing"))?;
+                    (
+                        target.clone(),
+                        original.step.id,
+                        true,
+                        restored
+                            .iter()
+                            .any(|(_, _, _, _, creator)| *creator == original.step.id),
+                        restored
+                            .iter()
+                            .find(|(_, _, _, _, creator)| *creator == original.step.id)
+                            .map_or_else(|| target.clone(), |(path, ..)| path.clone()),
+                        directory_material(op, ns, target, stamp)?,
+                    )
+                }
+                _ => continue,
+            };
+            if !grants.grants.iter().any(|g| source.starts_with(&g.path))
+                || !grants.grants.iter().any(|g| target.starts_with(&g.path))
+            {
+                return Err(invalid("inverse path outside historical grant"));
+            }
+            if ns.policy.guards_move(&source) {
+                return Err(invalid("owned copy is protected"));
+            }
+            let id = EntryId::from_uuid(*original.step.id.as_uuid());
+            let group = historical_group.id;
+            let mk = |id_step, action| ExecutionStep {
+                id: id_step,
+                entry_id: id,
+                group_id: group,
+                action,
+            };
+            if moving && !directory && !native_move {
+                let future_parent = restored
+                    .iter()
+                    .any(|(p, ..)| Some(p.as_path()) == target.parent());
+                let parent = ns
+                    .parents
+                    .iter()
+                    .find(|p| Some(p.parent_path.as_path()) == target.parent());
+                if parent.is_none() && !future_parent {
+                    return Err(invalid("original source parent unavailable"));
+                }
+                if parent.is_some_and(|p| p.entries.iter().any(|e| e.absolute_path == target)) {
+                    return Err(invalid("original source recreated; undo refused"));
+                }
+                let staging =
+                    target.with_file_name(format!(".vidlib-staging-undo-{}", original.step.id));
+                if parent.is_some_and(|p| p.entries.iter().any(|e| e.absolute_path == staging)) {
+                    return Err(invalid("undo staging reservation occupied"));
+                }
+                let create = next();
+                let write = next();
+                steps.push(mk(
+                    create,
+                    ExecutionAction::CreateStaging {
+                        staging: staging.clone(),
+                    },
+                ));
+                steps.push(mk(
+                    write,
+                    ExecutionAction::WriteStaging {
+                        source: EntryPrestate {
+                            path: source.clone(),
+                            identity: ExpectedIdentity::Observed(expected.clone()),
+                        },
+                        staging: Box::new(OwnedEntryPrestate {
+                            entry: EntryPrestate {
+                                path: staging.clone(),
+                                identity: ExpectedIdentity::FromReceipt { step_id: create },
+                            },
+                            created_by: create,
+                        }),
+                    },
+                ));
+                steps.push(mk(
+                    next(),
+                    ExecutionAction::PublishCopy {
+                        staging: OwnedEntryPrestate {
+                            entry: EntryPrestate {
+                                path: staging,
+                                identity: ExpectedIdentity::FromReceipt { step_id: write },
+                            },
+                            created_by: create,
+                        },
+                        target: target.clone(),
+                        verified_by: write,
+                    },
+                ));
+            }
+            if native_move {
+                steps.push(mk(
+                    next(),
+                    ExecutionAction::RenameEntry {
+                        source: EntryPrestate {
+                            path: source.clone(),
+                            identity: ExpectedIdentity::Observed(expected.clone()),
+                        },
+                        target: target.clone(),
+                        temporary: false,
+                    },
+                ));
+            } else {
+                let owned = if directory {
+                    OwnedEntryPrestate {
+                        entry: EntryPrestate {
+                            path: source.clone(),
+                            identity: ExpectedIdentity::Observed(expected.clone()),
+                        },
+                        created_by,
+                    }
+                } else {
+                    let quarantine = source
+                        .with_file_name(format!("{}undo-{}", RENAME_TEMP_PREFIX, original.step.id));
+                    if ns
+                        .parents
+                        .iter()
+                        .flat_map(|p| &p.entries)
+                        .any(|e| e.absolute_path == quarantine)
+                        || !ns.policy.allows_rename_reservation(&quarantine)
+                    {
+                        return Err(invalid("undo quarantine unavailable"));
+                    }
+                    let moved = next();
+                    steps.push(mk(
+                        moved,
+                        ExecutionAction::RenameEntry {
+                            source: EntryPrestate {
+                                path: source.clone(),
+                                identity: ExpectedIdentity::Observed(expected.clone()),
+                            },
+                            target: quarantine.clone(),
+                            temporary: true,
+                        },
+                    ));
+                    OwnedEntryPrestate {
+                        entry: EntryPrestate {
+                            path: quarantine,
+                            identity: ExpectedIdentity::FromReceipt { step_id: moved },
+                        },
+                        created_by,
+                    }
+                };
+                steps.push(mk(
+                    next(),
+                    if directory {
+                        ExecutionAction::RemoveOwnedEmptyDirectory { owned }
+                    } else {
+                        ExecutionAction::RemoveOwnedCopy { owned }
+                    },
+                ));
+            }
+            let root = roots
+                .iter()
+                .filter(|r| source.starts_with(&r.path))
+                .max_by_key(|r| r.path.components().count())
+                .ok_or_else(|| invalid("inverse source grant missing"))?;
+            let display = source
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            entries.push(EntrySnapshot {
+                id,
+                root_id: root.id,
+                relative_path: encode_path(source.strip_prefix(&root.path).unwrap()),
+                absolute_path: source.clone(),
+                display_name: display.clone(),
+                display_path: source.to_string_lossy().into_owned(),
+                kind: if directory {
+                    EntryKind::Directory
+                } else {
+                    EntryKind::File
+                },
+                stamp: expected.clone(),
+                observed_ns: ns.window.finished_ns,
+                issues: vec![],
+            });
+            rows.push(PlanRow {
+                carried_descendants: 0,
+                entry_id: id,
+                group_id: group,
+                primary_id: id,
+                source_path: source.clone(),
+                target_path: target.clone(),
+                old_display_name: display,
+                new_display_name: if moving {
+                    target
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    "Delete created copy".into()
+                },
+                old_display_path: source.to_string_lossy().into_owned(),
+                new_display_path: if moving {
+                    target.to_string_lossy().into_owned()
+                } else {
+                    "Delete created copy".into()
+                },
+                stamp: expected,
+                status: RowStatus::Changed,
+                explanations: vec![RuleExplanation {
+                    rule_id: if native_move { "undo-native-move" } else { "undo-delete-created-copy" }.into(),
+                    before: source.to_string_lossy().into_owned(),
+                    after: if native_move { "Move back using the recorded native identity".into() }
+                    else if directory { "Remove only the operation-owned directory after its children are undone and it is empty".into() }
+                    else if moving {
+                        "Copy back, verify, then delete the created destination copy".into()
+                    } else {
+                        "Delete only the created copy after identity and full SHA256 verification"
+                            .into()
+                    },
+                }],
+                issues: vec![],
+            });
+        }
+        if !steps.is_empty() {
+            for (path, original, create, entry_id, _) in restored.iter().rev() {
+                let effects = steps
+                    .iter()
+                    .filter(|s| {
+                        let (source, target) = crate::recovery::evidence::paths(&s.action);
+                        source
+                            .map(|e| e.path.as_path())
+                            .into_iter()
+                            .chain(target)
+                            .any(|p| p != path && p.starts_with(path))
+                    })
+                    .map(|s| s.id)
+                    .collect();
+                steps.push(ExecutionStep {
+                    id: next(),
+                    entry_id: *entry_id,
+                    group_id: historical_group.id,
+                    action: ExecutionAction::SetMetadata {
+                        entry: EntryPrestate {
+                            path: path.clone(),
+                            identity: ExpectedIdentity::DirectoryAfterEffects {
+                                original: original.clone(),
+                                created_by: Some(*create),
+                                effects,
+                            },
+                        },
+                        changes: vidlib_rename::destination::directory_metadata_changes(original),
+                    },
+                });
+            }
+            groups.push(ExecutionGroup {
+                id: historical_group.id,
+                depends_on: vec![],
+                steps,
+            });
+        }
+    }
+    if rows.is_empty() {
+        return Err(invalid("no retained copies to undo"));
+    }
+    let ids: Vec<_> = rows.iter().map(|r| r.entry_id).collect();
+    let inventory = Inventory {
+        id: decode(&op.inspection["inventory"]["id"])?,
+        generation: ns.namespace_epoch,
+        roots,
+        entries,
+        coverage: vec![],
+        window: ns.window.clone(),
+        issues: vec![],
+    };
+    let recipe = RecipeV1 {
+        schema_version: 1,
+        revision: 1,
+        selection: ids.clone(),
+        selection_filter: None,
+        numbering_order: ids.clone(),
+        numbering_scope: Default::default(),
+        rules: vec![],
+        companions: CompanionPolicy::None,
+        destination: Destination::SameDirectory,
+        collision_policy: CollisionPolicy::Block,
+        metadata_changes: vec![],
+    };
+    let frozen = FrozenInputs {
+        inventory_id: inventory.id,
+        generation: inventory.generation,
+        now_ns: ns.window.finished_ns,
+        timezone: FrozenTimezone::Utc,
+        primary_order: ids,
+        numbering_scope: Default::default(),
+        values: vec![],
+    };
+    Ok(RenamePlan {
+        inverse_of: Some(op.operation_id),
+        version,
+        inventory_id: inventory.id,
+        generation: inventory.generation,
+        recipe_revision: 1,
+        counts: PlanCounts::from_rows(&rows).map_err(|e| invalid(e.to_string()))?,
+        rows,
+        issues: vec![],
+        execution: ExecutionPlan {
+            inverse_of: Some(op.operation_id),
+            expected_namespace: ns.clone(),
+            groups,
+            provenance: InspectionProvenance {
+                approved_plan: version,
+                inventory,
+                recipe,
+                frozen_inputs: frozen.clone(),
+                grants: grants.clone(),
+                namespace_epoch: ns.namespace_epoch,
+                policy_epoch: ns.policy_epoch,
+            },
+        },
+        frozen_inputs: frozen,
+        grants,
+    })
 }

@@ -225,10 +225,25 @@ pub struct CompanionAssociation {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Destination {
     SameDirectory,
+    CopyTo {
+        grant_id: GrantId,
+        layout: DestinationLayout,
+    },
+    MoveTo {
+        grant_id: GrantId,
+        layout: DestinationLayout,
+    },
     Granted {
         grant_id: GrantId,
         layout: Vec<TemplatePart>,
     },
+}
+pub type DestinationPolicy = Destination;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DestinationLayout {
+    PreserveHierarchy,
+    FolderTemplate { parts: Vec<TemplatePart> },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -417,6 +432,17 @@ impl RecipeV1 {
                 | RuleParameters::Regex { .. }
                 | RuleParameters::PadNumbers { .. } => {}
             }
+        }
+        if let Destination::CopyTo {
+            layout: DestinationLayout::FolderTemplate { parts },
+            ..
+        }
+        | Destination::MoveTo {
+            layout: DestinationLayout::FolderTemplate { parts },
+            ..
+        } = &self.destination
+        {
+            validate_template(parts, 0)?;
         }
         if let Destination::Granted { layout, .. } = &self.destination {
             validate_template(layout, 0)?;

@@ -594,6 +594,24 @@ mod qualification {
         }
     }
     #[test]
+    fn native_staging_writer_must_close_before_publication_handle_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("staging");
+        let target = dir.path().join("published");
+        let parent = directory(dir.path()).unwrap();
+        let mut writer = create(&parent, source.file_name().unwrap(), false).unwrap();
+        std::io::Write::write_all(&mut writer, b"verified bytes").unwrap();
+        writer.sync_all().unwrap();
+        assert_eq!(
+            move_native(&source, &target).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        drop(writer);
+        move_native(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"verified bytes");
+        assert!(!source.exists());
+    }
+    #[test]
     fn native_locked_file_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
@@ -699,4 +717,17 @@ mod qualification {
             ErrorCode::ReparsePoint
         );
     }
+}
+
+pub(super) fn open_writer(parent: &File, name: &OsStr) -> Result<File, OpError> {
+    let file = relative(
+        parent,
+        name,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        false,
+        false,
+        true,
+    )?;
+    reject_reparse(&file)?;
+    Ok(file)
 }

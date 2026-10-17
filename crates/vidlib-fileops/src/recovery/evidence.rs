@@ -14,9 +14,31 @@ use vidlib_inventory::{decode_path, encode_path, ids::*, FileStamp, NativePathRe
 use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExecutionStep, ExpectedIdentity, MetadataChange, TimestampField,
 };
-pub(super) fn stamp(op: &PendingOperation, entry: &EntryPrestate) -> Result<FileStamp, OpError> {
+pub(crate) fn stamp(op: &PendingOperation, entry: &EntryPrestate) -> Result<FileStamp, OpError> {
     match &entry.identity {
         ExpectedIdentity::Observed(s) if s.physical_id.is_some() => Ok(s.clone()),
+        ExpectedIdentity::DirectoryAfterEffects {
+            original,
+            created_by,
+            effects,
+        } => {
+            for id in effects {
+                receipt(op, *id)?;
+            }
+            if let Some(id) = created_by {
+                let fact = receipt(op, *id)?;
+                if fact.phase != CompletedPhase::DirectoryCreated
+                    || fact.after_path.as_ref() != Some(&encode_path(&entry.path))
+                {
+                    return Err(error("directory creator path or kind differs"));
+                }
+                fact.after
+                    .clone()
+                    .ok_or_else(|| error("directory creator identity missing"))
+            } else {
+                Ok(original.clone())
+            }
+        }
         ExpectedIdentity::FromReceipt { step_id } => {
             let r = op
                 .steps
@@ -35,31 +57,88 @@ pub(super) fn stamp(op: &PendingOperation, entry: &EntryPrestate) -> Result<File
         _ => Err(error("source identity is unknown")),
     }
 }
-pub(super) fn absent(fs: &dyn Filesystem, path: &Path) -> bool {
+pub(crate) fn material(
+    op: &PendingOperation,
+    entry: &EntryPrestate,
+    fs: &dyn Filesystem,
+) -> Result<FileStamp, OpError> {
+    let expected = stamp(op, entry)?;
+    if let ExpectedIdentity::DirectoryAfterEffects { effects, .. } = &entry.identity {
+        let authorized = op.inspection["grants"]
+            .as_array()
+            .ok_or_else(|| error("missing native grants"))?
+            .iter()
+            .map(|value| {
+                serde_json::from_value::<NativePathRecord>(value["path"].clone())
+                    .map_err(|_| error("invalid grant path"))
+                    .and_then(|path| {
+                        decode_path(&path).map_err(|_| error("unavailable grant path"))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|grant| entry.path.starts_with(grant));
+        if !authorized {
+            return Err(error("directory material is outside native grants"));
+        }
+        for pending in op
+            .steps
+            .iter()
+            .chain(op.recovery_effects.iter().map(|e| &e.inverse))
+        {
+            for fact in &pending.receipts {
+                let child = [&fact.before_path, &fact.after_path]
+                    .into_iter()
+                    .flatten()
+                    .map(decode_path)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| error("invalid child receipt path"))?
+                    .iter()
+                    .any(|p| p != &entry.path && p.starts_with(&entry.path));
+                if child && !effects.contains(&fact.step_id) {
+                    return Err(error("unnamed directory child effect"));
+                }
+            }
+        }
+        verified_material_inner(op, &entry.path, &expected, fs, true)
+    } else {
+        Ok(expected)
+    }
+}
+pub(crate) fn absent(fs: &dyn Filesystem, path: &Path) -> bool {
     matches!(fs.inspect(path), Err(e) if e.code == ErrorCode::SourceMissing)
 }
-pub(super) fn paths(action: &ExecutionAction) -> (Option<&EntryPrestate>, Option<&Path>) {
+pub(crate) fn paths(action: &ExecutionAction) -> (Option<&EntryPrestate>, Option<&Path>) {
     match action {
         ExecutionAction::RenameEntry { source, target, .. } => (Some(source), Some(target)),
         ExecutionAction::StageCopy { source, staging } => (Some(source), Some(staging)),
+        ExecutionAction::CreateStaging { staging } => (None, Some(staging)),
+        ExecutionAction::WriteStaging { source, staging } => {
+            (Some(source), Some(&staging.entry.path))
+        }
         ExecutionAction::PublishCopy {
             staging, target, ..
         } => (Some(&staging.entry), Some(target)),
         ExecutionAction::CreateDirectory { target } => (None, Some(target)),
         ExecutionAction::SetMetadata { entry, .. } => (Some(entry), Some(&entry.path)),
-        ExecutionAction::RemoveSource { source, .. } => (Some(source), None),
+        ExecutionAction::RemoveSource { source, .. }
+        | ExecutionAction::RemoveSourceDirectory { source, .. } => (Some(source), None),
         ExecutionAction::RemoveOwnedCopy { owned }
         | ExecutionAction::RemoveOwnedEmptyDirectory { owned } => (Some(&owned.entry), None),
     }
 }
-pub(super) fn phase(action: &ExecutionAction) -> CompletedPhase {
+pub(crate) fn phase(action: &ExecutionAction) -> CompletedPhase {
     match action {
         ExecutionAction::RenameEntry { .. } => CompletedPhase::Renamed,
-        ExecutionAction::StageCopy { .. } => CompletedPhase::CopyStaged,
+        ExecutionAction::CreateStaging { .. } => CompletedPhase::StagingCreated,
+        ExecutionAction::StageCopy { .. } | ExecutionAction::WriteStaging { .. } => {
+            CompletedPhase::CopyStaged
+        }
         ExecutionAction::PublishCopy { .. } => CompletedPhase::CopyPublished,
         ExecutionAction::CreateDirectory { .. } => CompletedPhase::DirectoryCreated,
         ExecutionAction::SetMetadata { .. } => CompletedPhase::MetadataSet,
         ExecutionAction::RemoveSource { .. } => CompletedPhase::SourceRemoved,
+        ExecutionAction::RemoveSourceDirectory { .. } => CompletedPhase::SourceDirectoryRemoved,
         ExecutionAction::RemoveOwnedCopy { .. } => CompletedPhase::OwnedCopyRemoved,
         ExecutionAction::RemoveOwnedEmptyDirectory { .. } => {
             CompletedPhase::OwnedEmptyDirectoryRemoved
@@ -100,6 +179,18 @@ pub(crate) fn parent_map(
             break;
         }
         if !step.receipts.is_empty() {
+            if let ExecutionAction::CreateDirectory { target } = &step.step.action {
+                let id = step
+                    .receipts
+                    .last()
+                    .and_then(|r| r.after.as_ref())
+                    .and_then(|s| s.physical_id.clone())
+                    .ok_or_else(|| error("created directory identity missing"))?;
+                parents.push((target.clone(), id));
+            }
+            if let ExecutionAction::RemoveSourceDirectory { source, .. } = &step.step.action {
+                parents.retain(|(p, _)| !p.starts_with(&source.path));
+            }
             if let ExecutionAction::RenameEntry { source, target, .. } = &step.step.action {
                 for (p, _) in &mut parents {
                     rebase(p, &source.path, target);
@@ -110,6 +201,21 @@ pub(crate) fn parent_map(
     if before.is_none() {
         for inverse in &op.recovery_effects {
             if !inverse.inverse.receipts.is_empty() {
+                if let ExecutionAction::CreateDirectory { target } = &inverse.inverse.step.action {
+                    let fact = receipt(op, inverse.inverse.step.id)?;
+                    let id = fact
+                        .after
+                        .as_ref()
+                        .and_then(|s| s.physical_id.clone())
+                        .ok_or_else(|| error("inverse directory identity missing"))?;
+                    parents.retain(|(p, _)| p != target);
+                    parents.push((target.clone(), id));
+                }
+                if let ExecutionAction::RemoveOwnedEmptyDirectory { owned } =
+                    &inverse.inverse.step.action
+                {
+                    parents.retain(|(p, _)| !p.starts_with(&owned.entry.path));
+                }
                 if let ExecutionAction::RenameEntry { source, target, .. } =
                     &inverse.inverse.step.action
                 {
@@ -122,12 +228,66 @@ pub(crate) fn parent_map(
     }
     Ok(parents)
 }
-pub(super) fn parents(
+pub(crate) fn parents(
     op: &PendingOperation,
     step: &ExecutionStep,
     inverse: bool,
     fs: &dyn Filesystem,
 ) -> Result<(PhysicalId, PhysicalId), OpError> {
+    if let Some(effect) = op
+        .recovery_effects
+        .iter()
+        .find(|e| e.inverse.step.id == step.id)
+    {
+        let (source, target) = paths(&step.action);
+        let source_path = source
+            .map(|s| s.path.as_path())
+            .or(target)
+            .ok_or_else(|| error("missing inverse path"))?;
+        let target_path = target.unwrap_or(source_path);
+        let resolve = |authority: &crate::journal::ParentAuthority,
+                       path: &Path|
+         -> Result<PhysicalId, OpError> {
+            let parent = path
+                .parent()
+                .ok_or_else(|| error("inverse parent missing"))?;
+            let id = match authority {
+                crate::journal::ParentAuthority::Observed(id) => id.clone(),
+                crate::journal::ParentAuthority::Created { created_by, path } => {
+                    let creator = op
+                        .recovery_effects
+                        .iter()
+                        .find(|e| e.inverse.step.id == *created_by)
+                        .ok_or_else(|| error("inverse parent creator lineage missing"))?;
+                    if creator.inverse.step.group_id != step.group_id
+                        || !effect.depends_on.contains(created_by)
+                        || decode_path(path).ok().as_deref() != Some(parent)
+                        || !matches!(&creator.inverse.step.action, ExecutionAction::CreateDirectory { target } if target == parent)
+                    {
+                        return Err(error("inverse parent path, kind or dependency differs"));
+                    }
+                    let fact = receipt(op, *created_by)?;
+                    if fact.phase != CompletedPhase::DirectoryCreated
+                        || fact.after_path.as_ref() != Some(path)
+                    {
+                        return Err(error("inverse parent lacks durable creation receipt"));
+                    }
+                    fact.after
+                        .as_ref()
+                        .and_then(|s| s.physical_id.clone())
+                        .ok_or_else(|| error("inverse parent identity missing"))?
+                }
+            };
+            if fs.inspect(parent)?.stamp.physical_id.as_ref() != Some(&id) {
+                return Err(error("inverse parent identity changed"));
+            }
+            Ok(id)
+        };
+        return Ok((
+            resolve(&effect.source_parent, source_path)?,
+            resolve(&effect.target_parent, target_path)?,
+        ));
+    }
     let map = parent_map(op, if inverse { None } else { Some(step.id) })?;
     let (source, target) = paths(&step.action);
     let source_path = source
@@ -149,12 +309,18 @@ pub(super) fn parents(
     };
     Ok((lookup(source_path)?, lookup(target_path)?))
 }
-pub(super) fn digest_matches(
+pub(crate) fn digest_matches(
     fs: &dyn Filesystem,
     path: &Path,
     stamp: &FileStamp,
     digest: &ContentDigest,
 ) -> Result<bool, OpError> {
+    if digest.algorithm == "sha256" {
+        return Ok(
+            crate::copy::sha256(fs, path, stamp, &vidlib_inventory::JobControl::default())?
+                == *digest,
+        );
+    }
     if digest.algorithm != "md5" {
         return Err(error(
             "digest algorithm has no verified recovery implementation",
@@ -175,15 +341,17 @@ pub(super) fn digest_matches(
     fs.verify(path, stamp)?;
     Ok(context.finalize().0.as_slice() == digest.bytes)
 }
-pub(super) fn receipt(op: &PendingOperation, id: StepId) -> Result<&StepReceipt, OpError> {
+pub(crate) fn receipt(op: &PendingOperation, id: StepId) -> Result<&StepReceipt, OpError> {
     op.steps
         .iter()
+        .chain(op.recovery_effects.iter().map(|e| &e.inverse))
         .find(|s| s.step.id == id)
         .and_then(|s| s.receipts.last())
+        .or_else(|| op.historical_receipts.iter().find(|r| r.step_id == id))
         .ok_or_else(|| error("required ownership receipt is missing"))
 }
 /// Resolve a single actual action gap; planned later steps are never guessed.
-pub(super) fn probe(
+pub(crate) fn probe(
     op: &PendingOperation,
     pending: &PendingStep,
     fs: &dyn Filesystem,
@@ -204,7 +372,24 @@ pub(super) fn probe(
         .any(|e| e.inverse.step.id == step.id);
     parents(op, step, inverse, fs)?;
     let (source, target) = paths(&step.action);
-    let before = source.map(|s| stamp(op, s)).transpose()?;
+    let mut before = source.map(|s| material(op, s, fs)).transpose()?;
+    if matches!(
+        step.action,
+        ExecutionAction::RemoveOwnedEmptyDirectory { .. }
+    ) {
+        if let (Some(source), Some(expected)) = (source, before.as_ref()) {
+            if let Ok(current) = fs.inspect(&source.path) {
+                if current.kind != vidlib_inventory::EntryKind::Directory
+                    || current.stamp.physical_id != expected.physical_id
+                    || current.stamp.created_ns != expected.created_ns
+                    || current.stamp.windows_attributes != expected.windows_attributes
+                {
+                    return Err(error("owned directory replaced"));
+                }
+                before = Some(current.stamp);
+            }
+        }
+    }
     let source_present = source
         .zip(before.as_ref())
         .is_some_and(|(s, e)| fs.verify(&s.path, e).is_ok());
@@ -250,8 +435,25 @@ pub(super) fn probe(
                 RecoveryDisposition::Unresolved
             }
         }
-        ExecutionAction::CreateDirectory { .. } => {
+        ExecutionAction::CreateDirectory { .. } | ExecutionAction::CreateStaging { .. } => {
             if target_absent {
+                RecoveryDisposition::NotApplied
+            } else {
+                RecoveryDisposition::Unresolved
+            }
+        }
+        ExecutionAction::WriteStaging { staging, .. } => {
+            let created = receipt(op, staging.created_by)?;
+            let current = fs.inspect(&staging.entry.path)?;
+            if source_present
+                && current.kind == vidlib_inventory::EntryKind::File
+                && created.phase == CompletedPhase::StagingCreated
+                && current.stamp.physical_id.is_some()
+                && current.stamp.physical_id
+                    == created.after.as_ref().and_then(|s| s.physical_id.clone())
+            {
+                // The write/verification was not durably completed. Rewriting
+                // this recorded object is safe; never synthesize a digest.
                 RecoveryDisposition::NotApplied
             } else {
                 RecoveryDisposition::Unresolved
@@ -262,6 +464,25 @@ pub(super) fn probe(
             // An existing staging object cannot be claimed by its filename.
             if source_present && target_absent {
                 RecoveryDisposition::NotApplied
+            } else {
+                RecoveryDisposition::Unresolved
+            }
+        }
+        ExecutionAction::RemoveSourceDirectory {
+            destination_created_by,
+            required_descendants,
+            ..
+        } => {
+            crate::copy::verify_directory_destination(
+                op,
+                *destination_created_by,
+                required_descendants,
+                fs,
+            )?;
+            if source_present {
+                RecoveryDisposition::NotApplied
+            } else if source_absent {
+                RecoveryDisposition::Applied
             } else {
                 RecoveryDisposition::Unresolved
             }
@@ -360,14 +581,25 @@ pub(super) fn probe(
 // Child renames legitimately change directory material stamps. Refresh only
 // after checking the entire reviewed namespace transformed by durable effects,
 // including both forward and inverse carries. Unknown children remain blockers.
-pub(super) fn verified_material(
+pub(crate) fn verified_material(
     op: &PendingOperation,
     path: &Path,
     expected: &FileStamp,
     fs: &dyn Filesystem,
 ) -> Result<FileStamp, OpError> {
-    if let Ok(observed) = fs.verify(path, expected) {
-        return Ok(observed.stamp);
+    verified_material_inner(op, path, expected, fs, false)
+}
+fn verified_material_inner(
+    op: &PendingOperation,
+    path: &Path,
+    expected: &FileStamp,
+    fs: &dyn Filesystem,
+    force: bool,
+) -> Result<FileStamp, OpError> {
+    if !force {
+        if let Ok(observed) = fs.verify(path, expected) {
+            return Ok(observed.stamp);
+        }
     }
     let observed = fs.inspect(path)?;
     if observed.kind != vidlib_inventory::EntryKind::Directory
@@ -376,11 +608,24 @@ pub(super) fn verified_material(
         return Err(error("compensation material or identity changed"));
     }
     let (directories, entries, changed) = transformed_namespace(op)?;
+    let factual = entries
+        .get(path)
+        .map(|(stamp, _)| stamp)
+        .unwrap_or(expected);
+    let unchanged_attributes = |stamp: &FileStamp| {
+        stamp.created_ns == factual.created_ns
+            && stamp.windows_attributes == factual.windows_attributes
+    };
+    if !unchanged_attributes(&observed.stamp) {
+        return Err(error(
+            "directory attributes changed without an authorized effect",
+        ));
+    }
     let identity = expected
         .physical_id
         .as_ref()
         .ok_or_else(|| error("directory identity missing"))?;
-    if !changed.contains(identity)
+    if (!force && !changed.contains(identity))
         || !directories
             .iter()
             .any(|(p, id)| p == path && id == identity)
@@ -405,6 +650,10 @@ pub(super) fn verified_material(
                 .map_err(|_| error("invalid grant source"))?,
         });
     }
+    let directories = directories
+        .into_iter()
+        .filter(|(p, _)| !force || p.starts_with(path))
+        .collect::<Vec<_>>();
     let candidates = directories
         .iter()
         .map(|(p, _)| p.join(".vidlib-capture"))
@@ -422,6 +671,12 @@ pub(super) fn verified_material(
         {
             return Err(error("directory capture is incomplete or replaced"));
         }
+        if entries.get(directory).is_some_and(|(stamp, _)| {
+            captured.stamp.created_ns != stamp.created_ns
+                || captured.stamp.windows_attributes != stamp.windows_attributes
+        }) {
+            return Err(error("captured descendant directory attributes changed"));
+        }
         let expected_entries = entries
             .iter()
             .filter(|(p, _)| p.parent() == Some(directory.as_path()))
@@ -437,6 +692,12 @@ pub(super) fn verified_material(
                 .ok_or_else(|| error("expected namespace entry missing"))?;
             if actual.kind != *kind || actual.stamp.physical_id != stamp.physical_id {
                 return Err(error("namespace ownership changed"));
+            }
+            if *kind == vidlib_inventory::EntryKind::Directory
+                && (actual.stamp.created_ns != stamp.created_ns
+                    || actual.stamp.windows_attributes != stamp.windows_attributes)
+            {
+                return Err(error("descendant directory attributes changed"));
             }
             if *kind == vidlib_inventory::EntryKind::Directory
                 && stamp
@@ -457,11 +718,14 @@ pub(super) fn verified_material(
         .iter()
         .find(|p| p.parent_path == path)
         .ok_or_else(|| error("verified directory capture missing"))?;
+    if !unchanged_attributes(&captured.stamp) {
+        return Err(error("directory attributes changed during verification"));
+    }
     Ok(fs.verify(path, &captured.stamp)?.stamp)
 }
 
-pub(super) fn reserved(op: &PendingOperation, path: &Path) -> bool {
-    op.steps.iter().any(|s| matches!(&s.step.action,ExecutionAction::RenameEntry{target,temporary:true,..} if target==path))
+pub(crate) fn reserved(op: &PendingOperation, path: &Path) -> bool {
+    op.steps.iter().chain(op.recovery_effects.iter().map(|e| &e.inverse)).any(|s| matches!(&s.step.action,ExecutionAction::RenameEntry{target,temporary:true,..} if target==path))
 }
 
 /// Replay factual original and compensation effects, never just effective step
@@ -504,25 +768,88 @@ pub(crate) fn transformed_namespace(op: &PendingOperation) -> Result<NamespaceEv
         .chain(op.recovery_effects.iter().map(|e| &e.inverse))
         .filter(|s| !s.receipts.is_empty())
     {
-        let ExecutionAction::RenameEntry { source, target, .. } = &pending.step.action else {
-            return Err(error("directory refresh lacks phase namespace evidence"));
-        };
+        let fact = pending.receipts.last().expect("factual effect");
+        let before = fact
+            .before_path
+            .as_ref()
+            .map(decode_path)
+            .transpose()
+            .map_err(|_| error("invalid effect path"))?;
+        let after = fact
+            .after_path
+            .as_ref()
+            .map(decode_path)
+            .transpose()
+            .map_err(|_| error("invalid effect path"))?;
         for (directory, id) in &directories {
-            if Some(directory.as_path()) == source.path.parent()
-                || Some(directory.as_path()) == target.parent()
+            if before.as_ref().and_then(|p| p.parent()) == Some(directory.as_path())
+                || after.as_ref().and_then(|p| p.parent()) == Some(directory.as_path())
             {
                 changed.push(id.clone());
             }
         }
-        entries = entries
-            .into_iter()
-            .map(|(mut path, value)| {
-                rebase(&mut path, &source.path, target);
-                (path, value)
-            })
-            .collect();
-        for (directory, _) in &mut directories {
-            rebase(directory, &source.path, target);
+        match &pending.step.action {
+            ExecutionAction::RenameEntry { .. } | ExecutionAction::PublishCopy { .. } => {
+                let source = before
+                    .as_ref()
+                    .ok_or_else(|| error("move source missing"))?;
+                let target = after.as_ref().ok_or_else(|| error("move target missing"))?;
+                entries = entries
+                    .into_iter()
+                    .map(|(mut p, v)| {
+                        rebase(&mut p, source, target);
+                        (p, v)
+                    })
+                    .collect();
+                for (p, _) in &mut directories {
+                    rebase(p, source, target);
+                }
+                if let Some((stamp, _)) = entries.get_mut(target) {
+                    *stamp = fact
+                        .after
+                        .clone()
+                        .ok_or_else(|| error("move stamp missing"))?;
+                }
+            }
+            ExecutionAction::CreateDirectory { .. }
+            | ExecutionAction::CreateStaging { .. }
+            | ExecutionAction::StageCopy { .. }
+            | ExecutionAction::WriteStaging { .. }
+            | ExecutionAction::SetMetadata { .. } => {
+                let path = after.ok_or_else(|| error("created path missing"))?;
+                let stamp = fact
+                    .after
+                    .clone()
+                    .ok_or_else(|| error("created stamp missing"))?;
+                let kind = if matches!(pending.step.action, ExecutionAction::CreateDirectory { .. })
+                {
+                    vidlib_inventory::EntryKind::Directory
+                } else {
+                    entries
+                        .get(&path)
+                        .map_or(vidlib_inventory::EntryKind::File, |(_, k)| *k)
+                };
+                if kind == vidlib_inventory::EntryKind::Directory
+                    && !directories.iter().any(|(p, _)| *p == path)
+                {
+                    directories.push((
+                        path.clone(),
+                        stamp
+                            .physical_id
+                            .clone()
+                            .ok_or_else(|| error("directory identity missing"))?,
+                    ));
+                }
+                entries.insert(path, (stamp, kind));
+            }
+            ExecutionAction::RemoveSource { .. }
+            | ExecutionAction::RemoveSourceDirectory { .. }
+            | ExecutionAction::RemoveOwnedCopy { .. }
+            | ExecutionAction::RemoveOwnedEmptyDirectory { .. } => {
+                let path = before.ok_or_else(|| error("removed path missing"))?;
+                entries.remove(&path);
+                directories.retain(|(p, _)| *p != path);
+            }
         }
     }
     Ok((directories, entries, changed))

@@ -558,3 +558,52 @@ fn owned_staging_cannot_borrow_cycle_or_explicit_policy_authority() {
         fs::remove_file(stage).unwrap();
     }
 }
+
+#[test]
+fn copy_mutations_reject_replaced_reviewed_parent_before_effect() {
+    for effect in ["directory", "staging", "publish", "cleanup"] {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        let mut native = PlatformFs::default();
+        let reviewed = native.inspect(&parent).unwrap().stamp.physical_id.unwrap();
+        let owned = if matches!(effect, "publish" | "cleanup") {
+            let staged = native
+                .create_staging(&parent.join(".vidlib-staging-owned"))
+                .unwrap();
+            drop(staged.file);
+            Some(staged.ownership)
+        } else {
+            None
+        };
+        fs::rename(&parent, dir.path().join("old")).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(parent.join(".vidlib-staging-owned"), b"external").unwrap();
+        let result = match effect {
+            "directory" => native
+                .create_directory_reviewed(&parent.join("new"), &reviewed)
+                .map(|_| ()),
+            "staging" => native
+                .create_staging_reviewed(&parent.join(".vidlib-staging-new"), &reviewed)
+                .map(|_| ()),
+            "publish" => native
+                .publish_staging_reviewed(
+                    owned.as_ref().unwrap(),
+                    &parent.join("new"),
+                    &reviewed,
+                    &reviewed,
+                )
+                .map(|_| ()),
+            _ => native
+                .remove_owned_reviewed(owned.as_ref().unwrap(), &reviewed)
+                .map(|_| ()),
+        };
+        assert!(result.is_err(), "{effect}");
+        assert!(!parent.join("new").exists());
+        assert!(!parent.join(".vidlib-staging-new").exists());
+        assert_eq!(
+            fs::read(parent.join(".vidlib-staging-owned")).unwrap(),
+            b"external"
+        );
+    }
+}

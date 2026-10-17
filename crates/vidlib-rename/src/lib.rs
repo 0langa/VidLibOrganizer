@@ -39,3 +39,6 @@ pub mod metadata;
 
 pub mod companions;
 pub use companions::*;
+
+pub mod destination;
+pub use destination::resolve_destinations;

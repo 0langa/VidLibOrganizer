@@ -6,11 +6,8 @@ use crate::{
     platform::Durability,
     ErrorCode, Filesystem, OpError, Phase,
 };
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
-use vidlib_inventory::{encode_path, ids::*, FileStamp, JobControl, PhysicalId};
+use std::{collections::BTreeMap, path::PathBuf};
+use vidlib_inventory::{encode_path, ids::*, JobControl};
 use vidlib_rename::{ExecutionAction, ExpectedIdentity, RenamePlan};
 
 /// Backend-only report: completed groups and receipts remain factual on partial failure.
@@ -64,19 +61,6 @@ pub fn execute(
     {
         return Err(stale("plan authority snapshots disagree or require review"));
     }
-    if plan
-        .execution
-        .groups
-        .iter()
-        .flat_map(|g| &g.steps)
-        .any(|s| !matches!(s.action, ExecutionAction::RenameEntry { .. }))
-    {
-        return Err(OpError::new(
-            ErrorCode::Unsupported,
-            Phase::Verify,
-            "only compiled in-place renames are implemented",
-        ));
-    }
     validate_sources(plan)?;
     // Reuse original representatives: a file grant authorizes capturing its own
     // parent, without granting sibling sources or requesting an ungranted target.
@@ -96,6 +80,7 @@ pub fn execute(
                 .iter()
                 .map(|e| &e.absolute_path)
                 .chain(parent.entries.iter().map(|e| &e.absolute_path))
+                .chain(plan.rows.iter().map(|row| &row.target_path))
                 .find(|p| {
                     p.parent() == Some(parent.parent_path.as_path())
                         && p.starts_with(&authority.path)
@@ -120,11 +105,6 @@ pub fn execute(
         failure: None,
     };
     let mut receipts: BTreeMap<StepId, StepReceipt> = BTreeMap::new();
-    let mut parents: Vec<(PathBuf, FileStamp)> = expected
-        .parents
-        .iter()
-        .map(|p| (p.parent_path.clone(), p.stamp.clone()))
-        .collect();
     let mut reservations: BTreeMap<PathBuf, (StepId, EntryId)> = BTreeMap::new();
     let mut attempted = false;
     let mut journal_failure = None;
@@ -143,6 +123,42 @@ pub fn execute(
                     report.state = OperationState::RecoveryRequired;
                     return Ok(());
                 }
+                if plan.inverse_of.is_some() {
+                    crate::copy::verify_historical_source(
+                        &journal.operation(op)?,
+                        step,
+                        fs,
+                        control,
+                    )?;
+                }
+                if !matches!(step.action, ExecutionAction::RenameEntry { .. }) {
+                    journal.intent(op, step)?;
+                    attempted = true;
+                    let record = journal.operation(op)?;
+                    match crate::copy::effect(&record, step, fs, control) {
+                        Ok(receipt) => {
+                            journal.complete(op, &receipt)?;
+                            let durability = receipt.durability.clone();
+                            receipts.insert(step.id, receipt.clone());
+                            report.receipts.push(receipt);
+                            if durability != Durability::Synced {
+                                report.state = OperationState::RecoveryRequired;
+                                return Ok(());
+                            }
+                        }
+                        Err(mut error) => {
+                            cancelled_partial = control.is_cancelled();
+                            journal.mark_unresolved(op, step.id)?;
+                            error.operation_id = Some(op);
+                            error.step_id = Some(step.id);
+                            error.item_id = Some(step.entry_id);
+                            report.failure = Some(error);
+                            report.state = OperationState::RecoveryRequired;
+                            return Ok(());
+                        }
+                    }
+                    continue;
+                }
                 let ExecutionAction::RenameEntry {
                     source,
                     target,
@@ -152,31 +168,15 @@ pub fn execute(
                     unreachable!("validated action")
                 };
                 let effect = (|| -> Result<StepReceipt, OpError> {
-                    let stamp = match &source.identity {
-                        ExpectedIdentity::Observed(stamp) => stamp,
-                        ExpectedIdentity::FromReceipt { step_id } => receipts
-                            .get(step_id)
-                            .and_then(|r| r.after.as_ref())
-                            .ok_or_else(|| stale("missing durable source receipt"))?,
-                    };
-                    let reviewed_parent = |path: Option<&Path>| -> Result<PhysicalId, OpError> {
-                        let path = path.ok_or_else(|| stale("missing parent path"))?;
-                        let (_, expected) = parents
-                            .iter()
-                            .find(|(p, _)| p == path)
-                            .ok_or_else(|| stale("missing original parent identity"))?;
-                        let identity = expected
-                            .physical_id
-                            .as_ref()
-                            .ok_or_else(|| stale("missing original parent identity"))?;
-                        let observed = fs.inspect(path)?;
-                        if observed.stamp.physical_id.as_ref() != Some(identity) {
-                            return Err(stale("ancestor identity changed"));
-                        }
-                        Ok(identity.clone())
-                    };
-                    let source_parent = reviewed_parent(source.path.parent())?;
-                    let target_parent = reviewed_parent(target.parent())?;
+                    let material =
+                        crate::recovery::evidence::material(&journal.operation(op)?, source, fs)?;
+                    let stamp = &material;
+                    let (source_parent, target_parent) = crate::recovery::evidence::parents(
+                        &journal.operation(op)?,
+                        step,
+                        false,
+                        fs,
+                    )?;
                     let before = fs.verify(&source.path, stamp)?;
                     let reserved_source =
                         reservations
@@ -241,11 +241,6 @@ pub fn execute(
                 })();
                 match effect {
                     Ok(receipt) => {
-                        for (path, _) in &mut parents {
-                            if let Ok(relative) = path.strip_prefix(&source.path) {
-                                *path = target.join(relative);
-                            }
-                        }
                         if *temporary {
                             reservations.insert(target.clone(), (step.id, step.entry_id));
                         }
@@ -351,6 +346,15 @@ pub fn execute(
 // Backend plans are not imported authority. Still verify duplicated row/source
 // ownership at this boundary before a forged/stale compiled effect can act.
 fn validate_sources(plan: &RenamePlan) -> Result<(), OpError> {
+    if plan
+        .execution
+        .groups
+        .iter()
+        .flat_map(|g| &g.steps)
+        .any(|s| !matches!(s.action, ExecutionAction::RenameEntry { .. }))
+    {
+        return crate::copy::validate_plan(plan).map_err(|error| stale(&error.message));
+    }
     let inventory = &plan.execution.provenance.inventory;
     let mut locations: BTreeMap<_, _> = inventory
         .entries

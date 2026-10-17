@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+#[path = "support/legacy_schema.rs"]
+mod legacy_schema;
 use std::{fs, path::PathBuf};
 use vidlib_fileops::{
     coordinator::{Coordinator, LeaseKind},
@@ -676,6 +678,7 @@ fn failed_v6_inverse_migration_retains_original_evidence() {
     let original = f.complete();
     drop(f.journal());
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
+    legacy_schema::remove_copy_protocol(&db);
     db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DELETE FROM schema_migrations WHERE version>=7; PRAGMA user_version=6; CREATE TABLE operation_inverses(evidence TEXT); INSERT INTO operation_inverses VALUES('retain me');").unwrap();
     assert!(Journal::open(&f.coordinator.database_path()).is_err());
     assert_eq!(
@@ -705,6 +708,7 @@ fn v6_history_migrates_without_inventing_inverse_authority() {
     let original = f.complete();
     let events = f.journal().events_after(0, 200).unwrap().items;
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
+    legacy_schema::remove_copy_protocol(&db);
     db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DROP TABLE operation_inverses; DELETE FROM schema_migrations WHERE version>=7; PRAGMA user_version=6;").unwrap();
     drop(db);
     let journal = f.journal();

@@ -114,7 +114,10 @@ pub(crate) fn validate_batch(
                 let expected = row
                     .source_path
                     .with_file_name(format!("{stem}{}", asset.retained_suffix));
-                if row.target_path != expected {
+                if row.target_path.file_name() != expected.file_name()
+                    || (matches!(batch.recipe.destination, Destination::SameDirectory)
+                        && row.target_path != expected)
+                {
                     return Err(invalid(
                         "companion target differs from its final primary name",
                     ));
@@ -189,11 +192,12 @@ pub(crate) fn same_path(left: &Path, right: &Path, facts: &DirectoryFacts) -> bo
             .is_some_and(|(a, b)| facts.names_equal(a, b).unwrap_or(true))
 }
 
-pub(crate) fn validate_rows(
+pub(crate) fn validate_rows_mode(
     inventory: &Inventory,
     rows: &mut [PlanRow],
     parents: &TargetParents,
     ns: &NamespaceSnapshot,
+    destination: bool,
 ) {
     for row in rows {
         let entry = inventory
@@ -379,13 +383,15 @@ pub(crate) fn validate_rows(
             );
             continue;
         }
-        match (&row.stamp.physical_id, &facts.stamp.physical_id) {
-            (Some(source), Some(parent))
-                if source.platform == parent.platform
-                    && source.volume_identity == parent.volume_identity => {}
-            _ => {
-                issue(row, RenameErrorCode::UnsupportedConfiguration, "same-volume identity evidence required; cross-volume copy is not compiled here");
-                continue;
+        if !destination {
+            match (&row.stamp.physical_id, &facts.stamp.physical_id) {
+                (Some(source), Some(parent))
+                    if source.platform == parent.platform
+                        && source.volume_identity == parent.volume_identity => {}
+                _ => {
+                    issue(row, RenameErrorCode::UnsupportedConfiguration, "same-volume identity evidence required; cross-volume copy is not compiled here");
+                    continue;
+                }
             }
         }
         if facts.validate_path(&row.target_path).is_err() {

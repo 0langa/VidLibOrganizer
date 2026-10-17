@@ -382,6 +382,7 @@ fn transient_path_swap_cannot_feed_the_helper_substituted_media() {
         numbering_scope: Default::default(),
         timezone: FrozenTimezone::Utc,
         fields: vec![RequestedInput {
+            scope: Default::default(),
             entry_id: id,
             rule_id: Some("r".into()),
             key: FieldKey::Media {

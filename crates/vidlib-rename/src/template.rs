@@ -3,6 +3,7 @@ use crate::*;
 use vidlib_inventory::{decode_path, EntrySnapshot};
 
 pub struct TemplateContext<'a> {
+    pub scope: FrozenScope,
     pub entry: &'a EntrySnapshot,
     pub original: &'a NameParts,
     pub current: &'a NameParts,
@@ -68,21 +69,29 @@ fn render(parts: &[TemplatePart], context: &TemplateContext<'_>) -> Result<Strin
     }
     Ok(output)
 }
-pub(crate) fn frozen_value<'a>(
+fn frozen_value<'a>(
     inputs: &'a FrozenInputs,
     entry: &EntrySnapshot,
     rule_id: &str,
     key: &FieldKey,
+    scope: FrozenScope,
 ) -> Option<&'a FrozenFieldValue> {
     inputs
         .values
         .iter()
-        .find(|v| v.entry_id == entry.id && v.rule_id.as_deref() == Some(rule_id) && &v.key == key)
+        .find(|v| {
+            v.scope == scope
+                && v.entry_id == entry.id
+                && v.rule_id.as_deref() == Some(rule_id)
+                && &v.key == key
+        })
         .or_else(|| {
-            inputs
-                .values
-                .iter()
-                .find(|v| v.entry_id == entry.id && v.rule_id.is_none() && &v.key == key)
+            inputs.values.iter().find(|v| {
+                v.entry_id == entry.id
+                    && v.rule_id.is_none()
+                    && &v.key == key
+                    && (v.scope == scope || matches!(key, FieldKey::Hash { .. }))
+            })
         })
         .map(|v| &v.value)
 }
@@ -139,9 +148,15 @@ fn value(key: &FieldKey, context: &TemplateContext<'_>) -> Result<FrozenFieldVal
             })
             .unwrap_or_else(absent)
         }
-        _ => frozen_value(context.inputs, context.entry, context.rule_id, key)
-            .cloned()
-            .unwrap_or_else(absent),
+        _ => frozen_value(
+            context.inputs,
+            context.entry,
+            context.rule_id,
+            key,
+            context.scope,
+        )
+        .cloned()
+        .unwrap_or_else(absent),
     })
 }
 fn absent() -> FrozenFieldValue {
@@ -170,7 +185,13 @@ fn formatted(
         }
         (_, ValueFormat::Date { pattern }) => {
             let date = if let FieldKey::Date { source } = key {
-                crate::dates::date_source(context.entry, context.rule_id, *source, context.inputs)?
+                crate::dates::date_source_scoped(
+                    context.entry,
+                    context.rule_id,
+                    *source,
+                    context.inputs,
+                    context.scope,
+                )?
             } else if key.is_date() {
                 match value {
                     FrozenFieldValue::Timestamp { ns, .. } => DateValue::Instant { ns: *ns },

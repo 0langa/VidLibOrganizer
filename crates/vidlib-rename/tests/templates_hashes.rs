@@ -196,6 +196,7 @@ fn all_template_field_families() {
         ),
     ] {
         inputs.values.push(FrozenValue {
+            scope: Default::default(),
             entry_id: inputs.primary_order[0],
             rule_id: Some("r".into()),
             key,
@@ -328,6 +329,7 @@ fn full_file_hashes_include_bytes_after_first_mebibyte_and_share_one_read() {
             HashAlgorithm::Sha512,
         ] {
             req.fields.push(RequestedInput {
+                scope: Default::default(),
                 entry_id: *id,
                 rule_id: Some("r".into()),
                 key: FieldKey::Hash { algorithm },
@@ -374,6 +376,7 @@ fn counter_scope_order_and_explicit_override_retention() {
     recipe.numbering_order.truncate(2);
     seed.primary_order = recipe.numbering_order.clone();
     seed.values.push(FrozenValue {
+        scope: Default::default(),
         entry_id: recipe.selection[0],
         rule_id: Some("r".into()),
         key: FieldKey::Counter,
@@ -501,6 +504,7 @@ fn every_canonical_media_property_is_typed_and_missing_is_blocking() {
             RenameErrorCode::MetadataMissing
         );
         inputs.values.push(FrozenValue {
+            scope: Default::default(),
             entry_id: inputs.primary_order[0],
             rule_id: None,
             key: FieldKey::Media { property },
@@ -552,6 +556,7 @@ fn date_sources_are_distinct_and_unknown_recording_zone_is_not_optional_missing(
             fallback: None,
         }])]);
     inputs.values.push(FrozenValue {
+        scope: Default::default(),
         entry_id: inputs.primary_order[0],
         rule_id: None,
         key: FieldKey::Date {
@@ -593,6 +598,7 @@ fn frozen_missing_decisions_nested_optional_and_segment_boundaries() {
         property: MediaProperty::Height,
     })]);
     inputs.values.push(FrozenValue {
+        scope: Default::default(),
         entry_id: inputs.primary_order[0],
         rule_id: Some("r".into()),
         key: FieldKey::Media {
@@ -618,6 +624,7 @@ fn all_requested_algorithms_share_one_full_read_and_cached_hashes_recheck_source
         HashAlgorithm::Blake3,
     ] {
         req.fields.push(RequestedInput {
+            scope: Default::default(),
             entry_id: recipe.selection[0],
             rule_id: Some("r".into()),
             key: FieldKey::Hash { algorithm },
@@ -738,4 +745,59 @@ fn cached_hash_revalidation_rejects_stale_selected_anchor_root() {
         cache.content_bytes_read, 5,
         "failed revalidation must preserve the prior cache"
     );
+}
+
+#[test]
+fn destination_generated_values_cannot_alias_a_rule_named_destination() {
+    let (_dir, inventory, mut recipe, _) = fixture(
+        &["clip.mkv"],
+        RuleParameters::Template {
+            parts: vec![
+                field(FieldKey::Uuid),
+                TemplatePart::Literal("-".into()),
+                field(FieldKey::Random),
+            ],
+        },
+    );
+    recipe.rules[0].id = "destination".into();
+    let target = tempfile::tempdir().unwrap();
+    let grant = SourceGrant {
+        id: ids::GrantId::new(),
+        path: target.path().to_owned(),
+        source: GrantSource::NativeSelection,
+    };
+    recipe.destination = Destination::CopyTo {
+        grant_id: grant.id,
+        layout: DestinationLayout::FolderTemplate {
+            parts: vec![
+                field(FieldKey::Uuid),
+                TemplatePart::Literal("-".into()),
+                field(FieldKey::Random),
+            ],
+        },
+    };
+    let mut cache = FrozenInputCache::default();
+    let requirements = InputRequirements::from_recipe(&recipe, FrozenTimezone::Utc).unwrap();
+    let inputs = cache
+        .prepare(&requirements, &inventory, &JobControl::default())
+        .unwrap();
+    let batch = evaluate(&inventory, &recipe, &inputs).unwrap();
+    let mut grants = batch.grants.clone();
+    grants.grants.push(grant);
+    let batch = resolve_destinations(batch, &recipe.destination, &grants).unwrap();
+    let row = &batch.rows[0];
+    assert_ne!(
+        row.target_path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        row.target_path.file_stem().unwrap().to_string_lossy(),
+        "destination and rule must own separate frozen random/UUID values"
+    );
+    let again = cache
+        .prepare(&requirements, &inventory, &JobControl::default())
+        .unwrap();
+    assert_eq!(inputs, again);
 }

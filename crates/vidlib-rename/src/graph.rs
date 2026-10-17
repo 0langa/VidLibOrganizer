@@ -15,22 +15,53 @@ pub fn plan(
     version: PlanRef,
 ) -> Result<RenamePlan, RenameError> {
     validate_batch(inventory, evaluated, namespace)?;
+    let destination = matches!(
+        evaluated.recipe.destination,
+        Destination::CopyTo { .. } | Destination::MoveTo { .. }
+    );
     let mut rows = evaluated.rows.clone();
     let parents: TargetParents = rows
         .iter()
-        .filter_map(|r| r.target_path.parent().map(|p| (r.entry_id, p.to_owned())))
+        .filter_map(|r| {
+            r.target_path.parent().map(|p| {
+                (
+                    r.entry_id,
+                    if destination {
+                        namespace
+                            .parents
+                            .iter()
+                            .filter(|f| p.starts_with(&f.parent_path))
+                            .max_by_key(|f| f.parent_path.components().count())
+                            .map_or_else(|| p.to_owned(), |f| f.parent_path.clone())
+                    } else {
+                        p.to_owned()
+                    },
+                )
+            })
+        })
         .collect();
     resolve_paths(inventory, &mut rows);
-    validate_rows(inventory, &mut rows, &parents, namespace);
+    validate_rows_mode(inventory, &mut rows, &parents, namespace, destination);
     resolve_collisions(inventory, &mut rows, namespace, &parents, &evaluated.recipe)?;
-    validate_rows(inventory, &mut rows, &parents, namespace);
+    validate_rows_mode(inventory, &mut rows, &parents, namespace, destination);
     validate_carried_paths(inventory, &mut rows, namespace);
     let mut groups = Vec::new();
     if rows
         .iter()
         .all(|r| matches!(r.status, RowStatus::Changed | RowStatus::Unchanged))
     {
-        match compile(inventory, &rows, &parents, namespace) {
+        match if destination
+            && !crate::destination::can_rename(&rows, namespace, &evaluated.recipe.destination)
+        {
+            crate::destination::compile(
+                inventory,
+                &rows,
+                namespace,
+                matches!(evaluated.recipe.destination, Destination::MoveTo { .. }),
+            )
+        } else {
+            compile(inventory, &rows, &parents, namespace)
+        } {
             Ok(compiled) => groups = compiled,
             Err(message) => {
                 for row in rows.iter_mut().filter(|r| r.status == RowStatus::Changed) {
@@ -374,7 +405,11 @@ fn resolve_collisions(
                 if dirs.contains(&rows[i].entry_id) {
                     let source = rows[i].source_path.clone();
                     for (j, row) in rows.iter_mut().enumerate().filter(|(j, _)| *j != i) {
-                        if parents[&row.entry_id].starts_with(&source)
+                        if (parents[&row.entry_id].starts_with(&source)
+                            || (matches!(
+                                recipe.destination,
+                                Destination::CopyTo { .. } | Destination::MoveTo { .. }
+                            ) && row.source_path.starts_with(&source)))
                             && j != i
                             && row.target_path != previous
                         {

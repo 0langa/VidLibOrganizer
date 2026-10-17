@@ -95,11 +95,16 @@ fn receipt(step: &ExecutionStep, phase: CompletedPhase) -> StepReceipt {
     let (before, after) = match &step.action {
         ExecutionAction::RenameEntry { source, target, .. } => (Some(&source.path), Some(target)),
         ExecutionAction::CreateDirectory { target } => (None, Some(target)),
+        ExecutionAction::CreateStaging { staging } => (None, Some(staging)),
+        ExecutionAction::WriteStaging { source, staging } => {
+            (Some(&source.path), Some(&staging.entry.path))
+        }
         ExecutionAction::StageCopy { source, staging } => (Some(&source.path), Some(staging)),
         ExecutionAction::PublishCopy {
             staging, target, ..
         } => (Some(&staging.entry.path), Some(target)),
-        ExecutionAction::RemoveSource { source, .. } => (Some(&source.path), None),
+        ExecutionAction::RemoveSource { source, .. }
+        | ExecutionAction::RemoveSourceDirectory { source, .. } => (Some(&source.path), None),
         ExecutionAction::SetMetadata { entry, .. } => (Some(&entry.path), Some(&entry.path)),
         ExecutionAction::RemoveOwnedCopy { owned }
         | ExecutionAction::RemoveOwnedEmptyDirectory { owned } => (Some(&owned.entry.path), None),
@@ -963,8 +968,18 @@ fn v7_history_revision_upgrade_preserves_evidence_and_rolls_back_failure() {
     let mut journal = Journal::open(&path).unwrap();
     let op = journal.begin(&plan).unwrap();
     drop(journal);
+    // Materialize the historical shape, including later protocol teardown; a
+    // user_version-only downgrade would not be an actual v7 database.
+    let downgrade = |db: &Connection| {
+        db.execute_batch("DROP TABLE recovery_dependencies; DROP TABLE recovery_groups; DROP TABLE copy_protocol;
+            ALTER TABLE recovery_effects RENAME TO recovery_effects_new;
+            CREATE TABLE recovery_effects(operation_id TEXT NOT NULL, original_step TEXT NOT NULL, inverse_step TEXT NOT NULL, parents TEXT NOT NULL, PRIMARY KEY(operation_id,original_step), UNIQUE(operation_id,inverse_step), FOREIGN KEY(operation_id,original_step) REFERENCES steps(operation_id,id), FOREIGN KEY(operation_id,inverse_step) REFERENCES steps(operation_id,id));
+            INSERT INTO recovery_effects SELECT operation_id,original_step,inverse_step,parents FROM recovery_effects_new;
+            DROP TABLE recovery_effects_new;
+            DROP INDEX history_by_state; DROP TABLE history_revision; DELETE FROM schema_migrations WHERE version>=8; PRAGMA user_version=7;").unwrap();
+    };
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE IF EXISTS history_revision; DELETE FROM schema_migrations WHERE version>=8; PRAGMA user_version=7;").unwrap();
+    downgrade(&db);
     drop(db);
     let journal = Journal::open(&path).unwrap();
     assert_eq!(
@@ -976,12 +991,13 @@ fn v7_history_revision_upgrade_preserves_evidence_and_rolls_back_failure() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        8,
+        11,
         "v7 history schema did not upgrade"
     );
     drop(journal);
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("DROP INDEX IF EXISTS history_by_state; DROP TABLE history_revision; DELETE FROM schema_migrations WHERE version>=8; PRAGMA user_version=7; CREATE TABLE history_revision(evidence TEXT); INSERT INTO history_revision VALUES('retain me');").unwrap();
+    downgrade(&db);
+    db.execute_batch("CREATE TABLE history_revision(evidence TEXT); INSERT INTO history_revision VALUES('retain me');").unwrap();
     assert!(Journal::open(&path).is_err());
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))

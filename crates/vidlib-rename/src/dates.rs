@@ -396,6 +396,15 @@ pub(crate) fn date_source(
     source: DateSource,
     inputs: &FrozenInputs,
 ) -> Result<DateValue, RuleIssue> {
+    date_source_scoped(entry, rule_id, source, inputs, crate::FrozenScope::Rule)
+}
+pub(crate) fn date_source_scoped(
+    entry: &vidlib_inventory::EntrySnapshot,
+    rule_id: &str,
+    source: DateSource,
+    inputs: &FrozenInputs,
+    scope: crate::FrozenScope,
+) -> Result<DateValue, RuleIssue> {
     if source == DateSource::Now {
         return Ok(DateValue::Instant { ns: inputs.now_ns });
     }
@@ -404,13 +413,15 @@ pub(crate) fn date_source(
             .values
             .iter()
             .find(|value| {
-                value.entry_id == entry.id
+                value.scope == scope
+                    && value.entry_id == entry.id
                     && value.rule_id.as_deref() == Some(rule_id)
                     && value.key == FieldKey::Date { source }
             })
             .or_else(|| {
                 inputs.values.iter().find(|value| {
-                    value.entry_id == entry.id
+                    value.scope == scope
+                        && value.entry_id == entry.id
                         && value.rule_id.is_none()
                         && value.key == FieldKey::Date { source }
                 })

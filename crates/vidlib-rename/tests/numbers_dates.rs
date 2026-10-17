@@ -139,6 +139,7 @@ fn explicit_date_reformat() {
 fn missing_recording_timezone_stays_unknown() {
     let (_dir, inventory, recipe, mut inputs) = fixture(&["clip.mkv"], date(false, None));
     inputs.values.push(FrozenValue {
+        scope: Default::default(),
         entry_id: recipe.selection[0],
         rule_id: Some("r".into()),
         key: FieldKey::Date {
@@ -393,6 +394,7 @@ fn date_fixed_iana_utc_and_recorded_assumption() {
         p["operation"]["rule"]["output_format"] = "%Y-%m-%d_%H-%M-%S_%z".into();
         let (_dir, inventory, recipe, mut inputs) = fixture(&["clip.mkv"], parameter(p));
         inputs.values.push(FrozenValue {
+            scope: Default::default(),
             entry_id: recipe.selection[0],
             rule_id: None,
             key: FieldKey::Date {
@@ -472,6 +474,7 @@ fn typed_recording_local_time_uses_explicit_zone_and_policy() {
         "typed local recording timestamps must be accepted: {value:?}"
     );
     inputs.values.push(FrozenValue {
+        scope: Default::default(),
         entry_id: recipe.selection[0],
         rule_id: None,
         key: FieldKey::Date {

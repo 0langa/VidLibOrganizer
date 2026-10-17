@@ -328,3 +328,14 @@ pub(super) fn open_mutable_child(
 ) -> Result<File, OpError> {
     open_child(parent, name, false)
 }
+
+pub(super) fn open_writer(parent: &File, name: &std::ffi::OsStr) -> Result<File, OpError> {
+    fs::openat(
+        parent,
+        name,
+        OFlags::RDWR | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|e| io_error(e.into(), Phase::Write))
+}

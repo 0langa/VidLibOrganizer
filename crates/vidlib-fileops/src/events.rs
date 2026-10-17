@@ -7,9 +7,11 @@ use vidlib_rename::PlanRef;
 pub enum CompletedPhase {
     Renamed,
     DirectoryCreated,
+    StagingCreated,
     CopyStaged,
     CopyPublished,
     SourceRemoved,
+    SourceDirectoryRemoved,
     MetadataSet,
     OwnedCopyRemoved,
     OwnedEmptyDirectoryRemoved,

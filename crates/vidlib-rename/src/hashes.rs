@@ -8,6 +8,7 @@ use std::{
 use vidlib_inventory::{ids::EntryId, Inventory, JobControl};
 #[derive(Clone, Debug)]
 pub struct RequestedInput {
+    pub scope: FrozenScope,
     pub entry_id: EntryId,
     pub rule_id: Option<String>,
     pub key: FieldKey,
@@ -52,8 +53,31 @@ impl InputRequirements {
             for entry_id in &recipe.numbering_order {
                 for key in &keys {
                     fields.push(RequestedInput {
+                        scope: Default::default(),
                         entry_id: *entry_id,
                         rule_id: Some(rule.id.clone()),
+                        key: key.clone(),
+                    });
+                }
+            }
+        }
+        if let Destination::CopyTo {
+            layout: DestinationLayout::FolderTemplate { parts },
+            ..
+        }
+        | Destination::MoveTo {
+            layout: DestinationLayout::FolderTemplate { parts },
+            ..
+        } = &recipe.destination
+        {
+            let mut keys = vec![];
+            collect(parts, &mut keys);
+            for entry_id in &recipe.numbering_order {
+                for key in &keys {
+                    fields.push(RequestedInput {
+                        scope: FrozenScope::Destination,
+                        entry_id: *entry_id,
+                        rule_id: None,
                         key: key.clone(),
                     });
                 }
@@ -193,6 +217,7 @@ impl FrozenInputCache {
             })?;
             for (algorithm, hash) in hashes {
                 retained.values.push(FrozenValue {
+                    scope: Default::default(),
                     entry_id: id,
                     rule_id: None,
                     key: FieldKey::Hash { algorithm },
@@ -211,6 +236,7 @@ impl FrozenInputCache {
                 && !counter_ordinals.contains_key(&field.entry_id)
             {
                 Some(FrozenValue {
+                    scope: field.scope,
                     entry_id: field.entry_id,
                     rule_id: field.rule_id.clone(),
                     key: field.key.clone(),
@@ -222,6 +248,7 @@ impl FrozenInputCache {
                 lookup(&retained, field).cloned()
             };
             let value = previous.unwrap_or_else(|| FrozenValue {
+                scope: field.scope,
                 entry_id: field.entry_id,
                 rule_id: field.rule_id.clone(),
                 key: field.key.clone(),
@@ -246,7 +273,10 @@ impl FrozenInputCache {
                 retained.values.push(value.clone());
             }
             if !output.values.iter().any(|v| {
-                v.entry_id == value.entry_id && v.rule_id == value.rule_id && v.key == value.key
+                v.scope == value.scope
+                    && v.entry_id == value.entry_id
+                    && v.rule_id == value.rule_id
+                    && v.key == value.key
             }) {
                 output.values.push(value);
             }
@@ -260,12 +290,20 @@ fn lookup<'a>(inputs: &'a FrozenInputs, field: &RequestedInput) -> Option<&'a Fr
     inputs
         .values
         .iter()
-        .find(|v| v.entry_id == field.entry_id && v.rule_id == field.rule_id && v.key == field.key)
+        .find(|v| {
+            v.scope == field.scope
+                && v.entry_id == field.entry_id
+                && v.rule_id == field.rule_id
+                && v.key == field.key
+        })
         .or_else(|| {
-            inputs
-                .values
-                .iter()
-                .find(|v| v.entry_id == field.entry_id && v.rule_id.is_none() && v.key == field.key)
+            inputs.values.iter().find(|v| {
+                v.scope == field.scope
+                    && v.entry_id == field.entry_id
+                    && v.rule_id.is_none()
+                    && v.key == field.key
+                    && (v.scope == field.scope || matches!(field.key, FieldKey::Hash { .. }))
+            })
         })
 }
 fn needs_frozen(key: &FieldKey) -> bool {

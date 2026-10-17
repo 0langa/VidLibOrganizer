@@ -1,5 +1,6 @@
 //! Compiled-step recovery. Inspection never grants mutation authority; reviewed
 //! application rechecks durable state and fresh native evidence under a lease.
+pub(crate) mod directory;
 use crate::{
     coordinator::{Lease, LeaseKind},
     events::CompletedPhase,
@@ -99,7 +100,8 @@ pub fn reconcile(
                 temporary: true,
                 ..
             } => Some(target),
-            ExecutionAction::StageCopy { staging, .. } => Some(staging),
+            ExecutionAction::StageCopy { staging, .. }
+            | ExecutionAction::CreateStaging { staging } => Some(staging),
             _ => None,
         };
         if let Some(path) = temporary {
@@ -392,6 +394,18 @@ fn resume(
         let Some(pending) = op.steps.iter().find(|s| s.state == StepState::Planned) else {
             break;
         };
+        if !matches!(pending.step.action, ExecutionAction::RenameEntry { .. }) {
+            if op.state == OperationState::RecoveryRequired {
+                journal.set_state(op_id, OperationState::Running)?;
+            }
+            journal.intent(op_id, &pending.step)?;
+            let receipt = crate::copy::effect(&op, &pending.step, fs, control)?;
+            journal.complete(op_id, &receipt)?;
+            if receipt.durability != Durability::Synced {
+                return Err(error("recovered copy durability unconfirmed"));
+            }
+            continue;
+        }
         let (source, target) = paths(&pending.step.action);
         let (sp, tp) = parents(&op, &pending.step, false, fs)?;
         let source =
@@ -434,19 +448,59 @@ fn restore(
             return Err(error("restoration cancelled before next inverse"));
         }
         let op = journal.operation(op_id)?;
-        if let Some(effect) = op.recovery_effects.iter().find(|e| {
-            e.inverse.step.group_id == group
-                && op
-                    .steps
-                    .iter()
-                    .any(|s| s.step.id == e.original_step && s.state != StepState::Compensated)
-        }) {
-            if effect.inverse.state != StepState::CompletionDurable {
-                let mut gap = effect.inverse.clone();
-                if gap.state == StepState::Planned {
-                    gap.state = StepState::IntentDurable;
-                }
-                let (disposition, fact) = probe(&op, &gap, fs)?;
+        let active_effects: Vec<_> =
+            op.recovery_effects
+                .iter()
+                .filter(|e| {
+                    e.inverse.step.group_id == group
+                        && op.steps.iter().any(|s| {
+                            s.step.id == e.original_step && s.state != StepState::Compensated
+                        })
+                })
+                .collect();
+        if op.recovery_effects.is_empty()
+            && op.steps.iter().any(|s| {
+                s.step.group_id == group
+                    && matches!(
+                        s.step.action,
+                        ExecutionAction::RemoveSourceDirectory { .. }
+                            | ExecutionAction::RemoveOwnedEmptyDirectory { .. }
+                    )
+            })
+        {
+            let effects = directory::compile_group(&op, group, fs)?;
+            if !effects.is_empty() {
+                journal.recovery_group(op_id, group, &effects)?;
+                continue;
+            }
+        }
+        if let Some(effect) = active_effects
+            .iter()
+            .find(|e| {
+                !matches!(
+                    e.inverse.state,
+                    StepState::CompletionDurable | StepState::Compensated
+                ) && e.depends_on.iter().all(|id| {
+                    op.recovery_effects.iter().any(|p| {
+                        p.inverse.step.id == *id
+                            && matches!(
+                                p.inverse.state,
+                                StepState::CompletionDurable | StepState::Compensated
+                            )
+                    })
+                })
+            })
+            .or(active_effects.first())
+        {
+            if !matches!(
+                effect.inverse.state,
+                StepState::CompletionDurable | StepState::Compensated
+            ) {
+                let (disposition, fact) = if effect.inverse.state == StepState::Planned {
+                    (RecoveryDisposition::NotApplied, None)
+                } else {
+                    probe(&op, &effect.inverse, fs)?
+                };
                 match disposition {
                     RecoveryDisposition::Applied => {
                         let mut fact = fact.expect("inverse fact");
@@ -458,15 +512,17 @@ fn restore(
                             resolve_gap(&op, &effect.inverse, journal, fs)?;
                         }
                         journal.rearm_inverse(op_id, effect.inverse.step.id)?;
-                        let (s, _) = paths(&effect.inverse.step.action);
-                        let expected = stamp(&op, s.expect("inverse source"))?;
-                        let r = rename_effect(
-                            &op,
-                            &effect.inverse.step,
-                            &expected,
-                            (&effect.source_parent, &effect.target_parent),
-                            fs,
-                        )?;
+                        let r = if matches!(
+                            effect.inverse.step.action,
+                            ExecutionAction::RenameEntry { .. }
+                        ) {
+                            let (s, _) = paths(&effect.inverse.step.action);
+                            let expected = material(&op, s.expect("inverse source"), fs)?;
+                            let (sp, tp) = parents(&op, &effect.inverse.step, true, fs)?;
+                            rename_effect(&op, &effect.inverse.step, &expected, (&sp, &tp), fs)?
+                        } else {
+                            crate::copy::effect(&op, &effect.inverse.step, fs, control)?
+                        };
                         journal.complete(op_id, &r)?;
                         if r.durability != Durability::Synced {
                             return Err(error("inverse durability unconfirmed"));
@@ -475,7 +531,20 @@ fn restore(
                     _ => return Err(error("inverse effect cannot be safely reconciled")),
                 }
             }
-            journal.finish_compensation(op_id, effect.original_step, effect.inverse.step.id)?;
+            let fresh = journal.operation(op_id)?;
+            if fresh
+                .recovery_effects
+                .iter()
+                .filter(|e| e.original_step == effect.original_step)
+                .all(|e| {
+                    matches!(
+                        e.inverse.state,
+                        StepState::CompletionDurable | StepState::Compensated
+                    )
+                })
+            {
+                journal.finish_compensation(op_id, effect.original_step, effect.inverse.step.id)?;
+            }
             continue;
         }
         let Some(original) = op
@@ -486,6 +555,22 @@ fn restore(
         else {
             break;
         };
+        if let Some(evidence) = crate::copy::consumed_inverse(&op, original, fs)? {
+            journal.compensate_consumed(op_id, original.step.id, evidence)?;
+            continue;
+        }
+        if !matches!(original.step.action, ExecutionAction::RenameEntry { .. }) {
+            let chain = crate::copy::restore_chain(&op, original, fs)?;
+            let effects = chain
+                .into_iter()
+                .map(|inverse| {
+                    let (sp, tp) = parents(&op, &inverse, true, fs)?;
+                    Ok((inverse, sp, tp))
+                })
+                .collect::<Result<Vec<_>, OpError>>()?;
+            journal.recovery_chain(op_id, original.step.id, &effects)?;
+            continue;
+        }
         let ExecutionAction::RenameEntry { source, target, .. } = &original.step.action else {
             return Err(error("phase has no verified inverse executor"));
         };

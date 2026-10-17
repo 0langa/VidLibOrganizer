@@ -94,9 +94,18 @@ pub enum FrozenTimezone {
         seconds: i32,
     },
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrozenScope {
+    #[default]
+    Rule,
+    Destination,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenValue {
+    #[serde(default)]
+    pub scope: FrozenScope,
     pub entry_id: EntryId,
     pub rule_id: Option<String>,
     pub key: FieldKey,
@@ -215,6 +224,7 @@ pub struct PlanRowDto {
 }
 #[derive(Clone, Debug)]
 pub struct EvaluatedBatch {
+    pub inventory: Inventory,
     pub recipe: RecipeV1,
     pub inventory_id: InventoryId,
     pub generation: u64,
@@ -285,7 +295,16 @@ pub struct ExecutionStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedIdentity {
     Observed(FileStamp),
-    FromReceipt { step_id: StepId },
+    FromReceipt {
+        step_id: StepId,
+    },
+    /// Refresh directory material only after these durable child effects and a
+    /// complete expected namespace proof. The original metadata stays frozen.
+    DirectoryAfterEffects {
+        original: FileStamp,
+        created_by: Option<StepId>,
+        effects: Vec<StepId>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryPrestate {
@@ -312,6 +331,16 @@ pub enum ExecutionAction {
     CreateDirectory {
         target: PathBuf,
     },
+    /// Commit actual create-new ownership before any content write.
+    CreateStaging {
+        staging: PathBuf,
+    },
+    /// Write only a durably owned staging object; independently verify content.
+    WriteStaging {
+        source: EntryPrestate,
+        staging: Box<OwnedEntryPrestate>,
+    },
+    /// Legacy combined action retained for inspection/recovery only.
     /// Create-new staging and verified copying; the receipt records new native
     /// identity plus verified digest. Publication is a separate effect.
     StageCopy {
@@ -326,6 +355,11 @@ pub enum ExecutionAction {
     RemoveSource {
         source: EntryPrestate,
         published_by: StepId,
+    },
+    RemoveSourceDirectory {
+        source: EntryPrestate,
+        destination_created_by: StepId,
+        required_descendants: Vec<StepId>,
     },
     SetMetadata {
         entry: EntryPrestate,

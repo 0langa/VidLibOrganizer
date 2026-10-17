@@ -1,4 +1,6 @@
 //! Owned desktop boundary. Native inventory, plans, grants and recovery stay here.
+#[path = "destination_dto.rs"]
+mod destination_dto;
 use crate::app_state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -145,6 +147,8 @@ pub struct InventoryPageRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameRequestDto {
     #[serde(default)]
+    pub destination: Option<DestinationDto>,
+    #[serde(default)]
     pub recipe_json: Option<String>,
     #[serde(default)]
     pub rebind_selection: bool,
@@ -163,6 +167,54 @@ pub struct RenameRequestDto {
     pub row_overrides: Vec<RowOverrideDto>,
     #[serde(default)]
     pub companions: Option<CompanionPolicyDto>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum DestinationDto {
+    InPlace {},
+    CopyTo {
+        #[serde(rename = "grantId")]
+        grant_id: GrantId,
+        layout: DestinationLayoutDto,
+    },
+    MoveTo {
+        #[serde(rename = "grantId")]
+        grant_id: GrantId,
+        layout: DestinationLayoutDto,
+    },
+}
+#[derive(Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum DestinationLayoutDto {
+    PreserveHierarchy {},
+    FolderTemplate {
+        parts: Vec<destination_dto::TemplatePartDto>,
+    },
+}
+impl From<DestinationLayoutDto> for DestinationLayout {
+    fn from(value: DestinationLayoutDto) -> Self {
+        match value {
+            DestinationLayoutDto::PreserveHierarchy {} => Self::PreserveHierarchy,
+            DestinationLayoutDto::FolderTemplate { parts } => Self::FolderTemplate {
+                parts: parts.into_iter().map(Into::into).collect(),
+            },
+        }
+    }
+}
+impl From<DestinationDto> for Destination {
+    fn from(value: DestinationDto) -> Self {
+        match value {
+            DestinationDto::InPlace {} => Self::SameDirectory,
+            DestinationDto::CopyTo { grant_id, layout } => Self::CopyTo {
+                grant_id,
+                layout: layout.into(),
+            },
+            DestinationDto::MoveTo { grant_id, layout } => Self::MoveTo {
+                grant_id,
+                layout: layout.into(),
+            },
+        }
+    }
 }
 /// The command envelope uses camelCase; portable recipe documents keep their
 /// versioned core representation. Only inventory IDs cross this boundary.
@@ -333,6 +385,7 @@ struct RecoveryReview {
 #[derive(Default)]
 pub struct RenameState {
     pub(crate) roots: Vec<RootBinding>,
+    pub(crate) destination_grant: Option<SourceGrant>,
     pub(crate) revision: u64,
     pub(crate) selection_generation: u64,
     pub(crate) inventory: Option<Arc<Inventory>>,
@@ -567,6 +620,7 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
         .clone()
         .ok_or_else(|| stale("Scan sources first"))?;
     let policy = r.policy.clone();
+    let destination_grant = r.destination_grant.clone();
     let frozen_inputs = r.frozen_inputs.clone();
     let metadata_provider = state.metadata_provider.clone();
     let selection_generation = r.selection_generation;
@@ -618,6 +672,16 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
                 metadata_changes: vec![],
             }
         };
+        if let Some(destination) = request.destination {
+            recipe.destination = destination.into();
+        }
+        if let Destination::CopyTo { grant_id, .. } | Destination::MoveTo { grant_id, .. } =
+            recipe.destination
+        {
+            if !destination_grant.as_ref().is_some_and(|g| g.id == grant_id) {
+                return Err(stale("Choose the current destination folder with the native picker, then preview again."));
+            }
+        }
         if let Some(companions) = request.companions {
             recipe.companions = companions.into();
         }
@@ -668,33 +732,21 @@ pub fn preview_owned(state: &AppState, request: RenameRequestDto) -> Result<JobI
             .collect::<Vec<RowOverride>>();
         let evaluated =
             evaluate_with_mappings(&inventory, &recipe, &inputs, &mappings, &overrides)?;
-        // Capture originals, including unselected carried descendants. A selected
-        // file itself authorizes parent occupancy without granting sibling sources.
-        let selected: BTreeSet<_> = evaluated.rows.iter().map(|r| r.entry_id).collect();
-        let selected_directories: BTreeSet<_> = inventory
-            .entries
-            .iter()
-            .filter(|e| selected.contains(&e.id) && e.kind == EntryKind::Directory)
-            .map(|e| e.absolute_path.clone())
-            .collect();
-        let carried =
-            |path: &std::path::Path| path.ancestors().any(|p| selected_directories.contains(p));
-        let mut candidates: Vec<_> = inventory
-            .entries
-            .iter()
-            .filter(|e| selected.contains(&e.id) || carried(&e.absolute_path))
-            .map(|e| e.absolute_path.clone())
-            .chain(
-                inventory
-                    .coverage
-                    .iter()
-                    .filter(|c| carried(&c.directory))
-                    .map(|c| c.directory.join(".vidlib-capture")),
-            )
-            .collect();
-        candidates.sort();
-        candidates.dedup();
-        let namespace = fs.capture_namespace(&evaluated.grants, &candidates)?;
+        let mut grants = evaluated.grants.clone();
+        if matches!(
+            recipe.destination,
+            Destination::CopyTo { .. } | Destination::MoveTo { .. }
+        ) {
+            grants.grants.push(
+                destination_grant
+                    .ok_or_else(|| stale("Current native destination grant missing"))?,
+            );
+        }
+        let evaluated = resolve_destinations(evaluated, &recipe.destination, &grants)?;
+        let namespace = fs.capture_namespace(
+            &evaluated.grants,
+            &destination::capture_candidates(&evaluated),
+        )?;
         let plan = vidlib_rename::plan(&inventory, &evaluated, &namespace, version)?;
         if control.is_cancelled() {
             return Err(stale("Preview cancelled"));
@@ -1174,6 +1226,15 @@ pub fn session_owned(state: &AppState, _request: EmptyRequest) -> Result<Value> 
 }
 command!(rename_session, EmptyRequest, Value, session_owned);
 impl RenameState {
+    pub(crate) fn replace_destination(&mut self, grant: SourceGrant) -> Result<()> {
+        self.selection_generation = self
+            .selection_generation
+            .checked_add(1)
+            .ok_or_else(|| stale("Selection generation overflow"))?;
+        self.destination_grant = Some(grant);
+        self.reviews.clear();
+        Ok(())
+    }
     pub(crate) fn replace_sources(&mut self, roots: Vec<RootBinding>) -> Result<()> {
         self.selection_generation = self
             .selection_generation
@@ -1289,6 +1350,7 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        destination: None,
                         recipe_json: None,
                         rebind_selection: false,
                         revision,
@@ -1474,6 +1536,7 @@ mod tests {
                 preview_owned(
                     &state,
                     RenameRequestDto {
+                        destination: None,
                         recipe_json: None,
                         rebind_selection: false,
                         revision: 2,

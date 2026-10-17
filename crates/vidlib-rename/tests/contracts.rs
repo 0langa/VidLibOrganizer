@@ -40,6 +40,7 @@ fn fixture() -> (tempfile::TempDir, Inventory, RecipeV1, FrozenInputs) {
         primary_order: vec![id],
         numbering_scope: Default::default(),
         values: vec![FrozenValue {
+            scope: Default::default(),
             entry_id: id,
             rule_id: Some("rename".into()),
             key: FieldKey::Uuid,

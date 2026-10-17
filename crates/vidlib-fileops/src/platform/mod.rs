@@ -39,6 +39,18 @@ pub struct StagingFile {
     pub file: File,
 }
 
+/// Minted by the executor from a durable compiled quarantine receipt.
+#[derive(Debug)]
+pub struct OwnedRemoval {
+    pub(crate) owned: OwnedEntry,
+    pub(crate) parent: PhysicalId,
+}
+impl OwnedRemoval {
+    pub fn path(&self) -> &Path {
+        &self.owned.path
+    }
+}
+
 /// Exact rename input plus the reviewed parent identities. The executor rebases
 /// paths after preceding directory moves while retaining those identities. Native
 /// adapters must compare them with the held handles used for the rename syscall.
@@ -99,6 +111,56 @@ pub trait Filesystem {
         Err(OpError::unsupported(Phase::Rename))
     }
 
+    /// Copy effects bind reviewed identities to the held mutation handles.
+    fn create_directory_reviewed(
+        &mut self,
+        _path: &Path,
+        _parent: &PhysicalId,
+    ) -> Result<OwnedEntry, OpError> {
+        Err(OpError::unsupported(Phase::Create))
+    }
+    fn create_staging_reviewed(
+        &mut self,
+        _path: &Path,
+        _parent: &PhysicalId,
+    ) -> Result<StagingFile, OpError> {
+        Err(OpError::unsupported(Phase::Create))
+    }
+    fn publish_staging_reviewed(
+        &mut self,
+        _owned: &OwnedEntry,
+        _target: &Path,
+        _source_parent: &PhysicalId,
+        _target_parent: &PhysicalId,
+    ) -> Result<MutationOutcome, OpError> {
+        Err(OpError::unsupported(Phase::Rename))
+    }
+    fn remove_owned_reviewed(
+        &mut self,
+        _owned: &OwnedEntry,
+        _parent: &PhysicalId,
+    ) -> Result<Durability, OpError> {
+        Err(OpError::unsupported(Phase::Remove))
+    }
+
+    /// Reopen only a recorded owned staging identity, without truncating it.
+    fn open_owned_staging(
+        &mut self,
+        _entry: &OwnedEntry,
+        _parent: &PhysicalId,
+    ) -> Result<StagingFile, OpError> {
+        Err(OpError::unsupported(Phase::Write))
+    }
+    fn preserve_staging_metadata(
+        &self,
+        _staging: &mut StagingFile,
+        _update: &MetadataUpdate,
+    ) -> Result<Durability, OpError> {
+        Err(OpError::unsupported(Phase::Metadata))
+    }
+    fn remove_quarantined(&mut self, _authority: &OwnedRemoval) -> Result<Durability, OpError> {
+        Err(OpError::unsupported(Phase::Remove))
+    }
     fn capture_namespace(
         &self,
         grants: &GrantSet,
@@ -426,7 +488,7 @@ impl Filesystem for PlatformFs {
         let mut parents = Vec::new();
         for candidate in candidates {
             validate_path(candidate)?;
-            let path = candidate.parent().ok_or_else(|| {
+            let mut path = candidate.parent().ok_or_else(|| {
                 OpError::new(
                     ErrorCode::InvalidPath,
                     Phase::Capture,
@@ -445,6 +507,28 @@ impl Filesystem for PlatformFs {
                     Phase::Capture,
                     "candidate is outside supplied native grants",
                 ));
+            }
+            loop {
+                match native::directory(path) {
+                    Ok(_) => break,
+                    Err(error) if error.code == ErrorCode::SourceMissing => {
+                        path = path.parent().ok_or_else(|| {
+                            OpError::new(
+                                ErrorCode::SourceMissing,
+                                Phase::Capture,
+                                "destination grant unavailable",
+                            )
+                        })?;
+                        if !grants.grants.iter().any(|g| path.starts_with(&g.path)) {
+                            return Err(OpError::new(
+                                ErrorCode::OutsideGrant,
+                                Phase::Capture,
+                                "destination root must already exist",
+                            ));
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if let Some(existing) = parents
                 .iter_mut()
@@ -558,67 +642,93 @@ impl Filesystem for PlatformFs {
         self.move_entry(&owned.path, target, &owned.stamp, None)
     }
     fn create_directory(&mut self, path: &Path) -> Result<OwnedEntry, OpError> {
-        self.permit(path)?;
-        let (parent, name) = parent(path)?;
-        native::mutation_supported(&parent, Phase::Create)?;
-        validate_destination_name(&parent, name)?;
-        verify_parent_binding(
-            path.parent().expect("validated parent"),
-            &parent,
-            Phase::Create,
-        )?;
-        let file = native::create(&parent, name, true)?;
-        let stamp = native::observation(&file)
-            .map_err(|_| {
-                OpError::new(
-                    ErrorCode::RecoveryRequired,
-                    Phase::Create,
-                    "created directory identity unavailable",
-                )
-            })?
-            .stamp;
-        applied_parent_binding(
-            path.parent().expect("validated parent"),
-            &parent,
-            Phase::Create,
-        )?;
-        Ok(OwnedEntry {
-            path: path.to_owned(),
-            stamp,
-        })
+        self.create_directory_checked(path, None)
     }
     fn create_staging(&mut self, path: &Path) -> Result<StagingFile, OpError> {
-        self.permit_staging(path)?;
-        let (parent, name) = parent(path)?;
-        native::mutation_supported(&parent, Phase::Create)?;
-        validate_destination_name(&parent, name)?;
+        self.create_staging_checked(path, None)
+    }
+    fn create_directory_reviewed(
+        &mut self,
+        path: &Path,
+        parent: &PhysicalId,
+    ) -> Result<OwnedEntry, OpError> {
+        self.create_directory_checked(path, Some(parent))
+    }
+    fn create_staging_reviewed(
+        &mut self,
+        path: &Path,
+        parent: &PhysicalId,
+    ) -> Result<StagingFile, OpError> {
+        self.create_staging_checked(path, Some(parent))
+    }
+    fn publish_staging_reviewed(
+        &mut self,
+        owned: &OwnedEntry,
+        target: &Path,
+        source_parent: &PhysicalId,
+        target_parent: &PhysicalId,
+    ) -> Result<MutationOutcome, OpError> {
+        self.permit_staging(&owned.path)?;
+        self.permit(target)?;
+        self.move_entry(
+            &owned.path,
+            target,
+            &owned.stamp,
+            Some((source_parent, target_parent)),
+        )
+    }
+    fn remove_owned_reviewed(
+        &mut self,
+        owned: &OwnedEntry,
+        parent: &PhysicalId,
+    ) -> Result<Durability, OpError> {
+        if self.permit(&owned.path).is_err() {
+            self.permit_staging(&owned.path)?;
+        }
+        self.remove_checked(owned, Some(parent))
+    }
+    fn open_owned_staging(
+        &mut self,
+        entry: &OwnedEntry,
+        reviewed_parent: &PhysicalId,
+    ) -> Result<StagingFile, OpError> {
+        self.permit_staging(&entry.path)?;
+        let (parent, name) = parent(&entry.path)?;
+        native::mutation_supported(&parent, Phase::Write)?;
+        if native::observation(&parent)?.stamp.physical_id.as_ref() != Some(reviewed_parent) {
+            return Err(OpError::new(
+                ErrorCode::StaleState,
+                Phase::Write,
+                "staging parent changed",
+            ));
+        }
+        let file = native::open_writer(&parent, name)?;
+        let observed = native::observation(&file)?;
+        if observed.kind != EntryKind::File {
+            return Err(OpError::unsupported(Phase::Write));
+        }
+        check_stamp(&observed.stamp, &entry.stamp, Phase::Write)?;
         verify_parent_binding(
-            path.parent().expect("validated parent"),
+            entry.path.parent().expect("validated"),
             &parent,
-            Phase::Create,
-        )?;
-        let file = native::create(&parent, name, false)?;
-        let stamp = native::observation(&file)
-            .map_err(|_| {
-                OpError::new(
-                    ErrorCode::RecoveryRequired,
-                    Phase::Create,
-                    "created staging identity unavailable",
-                )
-            })?
-            .stamp;
-        applied_parent_binding(
-            path.parent().expect("validated parent"),
-            &parent,
-            Phase::Create,
+            Phase::Write,
         )?;
         Ok(StagingFile {
             ownership: OwnedEntry {
-                path: path.to_owned(),
-                stamp,
+                path: entry.path.clone(),
+                stamp: observed.stamp,
             },
             file,
         })
+    }
+    fn preserve_staging_metadata(
+        &self,
+        staging: &mut StagingFile,
+        update: &MetadataUpdate,
+    ) -> Result<Durability, OpError> {
+        self.refresh_staging(staging)?;
+        native::metadata(&staging.file, update)?;
+        self.refresh_staging(staging)
     }
     fn refresh_staging(&self, staging: &mut StagingFile) -> Result<Durability, OpError> {
         self.permit_staging(&staging.ownership.path)?;
@@ -723,8 +833,115 @@ impl Filesystem for PlatformFs {
         if self.permit(&entry.path).is_err() {
             self.permit_staging(&entry.path)?;
         }
+        self.remove_checked(entry, None)
+    }
+    fn remove_quarantined(&mut self, authority: &OwnedRemoval) -> Result<Durability, OpError> {
+        if !self.policy.allows_rename_reservation(&authority.owned.path) {
+            return Err(OpError::new(
+                ErrorCode::ProtectedEntry,
+                Phase::Remove,
+                "invalid quarantine reservation",
+            ));
+        }
+        self.remove_checked(&authority.owned, Some(&authority.parent))
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl PlatformFs {
+    fn create_directory_checked(
+        &mut self,
+        path: &Path,
+        reviewed_parent: Option<&PhysicalId>,
+    ) -> Result<OwnedEntry, OpError> {
+        self.permit(path)?;
+        let (parent, name) = parent(path)?;
+        check_reviewed_parent(&parent, reviewed_parent, Phase::Create)?;
+        native::mutation_supported(&parent, Phase::Create)?;
+        validate_destination_name(&parent, name)?;
+        verify_parent_binding(
+            path.parent().expect("validated parent"),
+            &parent,
+            Phase::Create,
+        )?;
+        let file = native::create(&parent, name, true)?;
+        let stamp = native::observation(&file)
+            .map_err(|_| {
+                OpError::new(
+                    ErrorCode::RecoveryRequired,
+                    Phase::Create,
+                    "created directory identity unavailable",
+                )
+            })?
+            .stamp;
+        applied_parent_binding(
+            path.parent().expect("validated parent"),
+            &parent,
+            Phase::Create,
+        )?;
+        Ok(OwnedEntry {
+            path: path.to_owned(),
+            stamp,
+        })
+    }
+    fn create_staging_checked(
+        &mut self,
+        path: &Path,
+        reviewed_parent: Option<&PhysicalId>,
+    ) -> Result<StagingFile, OpError> {
+        self.permit_staging(path)?;
+        let (parent, name) = parent(path)?;
+        check_reviewed_parent(&parent, reviewed_parent, Phase::Create)?;
+        native::mutation_supported(&parent, Phase::Create)?;
+        validate_destination_name(&parent, name)?;
+        verify_parent_binding(
+            path.parent().expect("validated parent"),
+            &parent,
+            Phase::Create,
+        )?;
+        let file = native::create(&parent, name, false)?;
+        let stamp = native::observation(&file)
+            .map_err(|_| {
+                OpError::new(
+                    ErrorCode::RecoveryRequired,
+                    Phase::Create,
+                    "created staging identity unavailable",
+                )
+            })?
+            .stamp;
+        applied_parent_binding(
+            path.parent().expect("validated parent"),
+            &parent,
+            Phase::Create,
+        )?;
+        Ok(StagingFile {
+            ownership: OwnedEntry {
+                path: path.to_owned(),
+                stamp,
+            },
+            file,
+        })
+    }
+    fn remove_checked(
+        &mut self,
+        entry: &OwnedEntry,
+        reviewed_parent: Option<&PhysicalId>,
+    ) -> Result<Durability, OpError> {
         let (parent, name) = parent(&entry.path)?;
         native::mutation_supported(&parent, Phase::Remove)?;
+        if reviewed_parent.is_some_and(|id| {
+            native::observation(&parent)
+                .ok()
+                .and_then(|o| o.stamp.physical_id)
+                .as_ref()
+                != Some(id)
+        }) {
+            return Err(OpError::new(
+                ErrorCode::StaleState,
+                Phase::Remove,
+                "quarantine parent changed",
+            ));
+        }
         let file = native::open_mutable_child(&parent, name, Phase::Remove)?;
         let observation = native::observation(&file)?;
         check_stamp(&observation.stamp, &entry.stamp, Phase::Remove)?;
@@ -842,6 +1059,24 @@ impl Filesystem for PlatformFs {
     fn remove_owned(&mut self, _: &OwnedEntry) -> Result<Durability, OpError> {
         Err(OpError::unsupported(Phase::Remove))
     }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn check_reviewed_parent(
+    held: &File,
+    expected: Option<&PhysicalId>,
+    phase: Phase,
+) -> Result<(), OpError> {
+    if let Some(expected) = expected {
+        if native::observation(held)?.stamp.physical_id.as_ref() != Some(expected) {
+            return Err(OpError::new(
+                ErrorCode::StaleState,
+                phase,
+                "held parent identity differs from reviewed namespace",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", windows))]

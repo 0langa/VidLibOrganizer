@@ -244,7 +244,8 @@ impl FrozenInputCache {
                 value.value = FrozenFieldValue::Metadata(Box::new(metadata));
                 let retained = next.retained.as_mut().expect("prepared retention");
                 retained.values.retain(|old| {
-                    !(old.entry_id == value.entry_id
+                    !(old.scope == value.scope
+                        && old.entry_id == value.entry_id
                         && old.rule_id == value.rule_id
                         && old.key == value.key)
                 });

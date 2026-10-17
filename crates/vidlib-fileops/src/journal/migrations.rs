@@ -60,6 +60,31 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
         conn.prepare("SELECT state FROM operations INDEXED BY history_by_state LIMIT 0")
             .map_err(|_| unsupported())?;
     }
+    if version >= 9 {
+        expected.push((9, format!("{:x}", md5::compute(schema::V9_SQL))));
+        let protocol: i64 = conn
+            .query_row(
+                "SELECT version FROM copy_protocol WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| unsupported())?;
+        if protocol != 1 {
+            return Err(unsupported());
+        }
+    }
+    if version >= 10 {
+        expected.push((10, format!("{:x}", md5::compute(schema::V10_SQL))));
+        conn.prepare("SELECT ordinal FROM recovery_effects LIMIT 0")
+            .map_err(|_| unsupported())?;
+    }
+    if version >= 11 {
+        expected.push((11, format!("{:x}", md5::compute(schema::V11_SQL))));
+        conn.prepare("SELECT inverse_step,prerequisite_step FROM recovery_dependencies LIMIT 0")
+            .map_err(|_| unsupported())?;
+        conn.prepare("SELECT group_id,canonical_effects FROM recovery_groups LIMIT 0")
+            .map_err(|_| unsupported())?;
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -176,6 +201,32 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
         tx.execute(
             "INSERT INTO schema_migrations(version,checksum) VALUES(8,?1)",
             [format!("{:x}", md5::compute(schema::V8_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 9 {
+        tx.execute_batch(schema::V9_SQL).map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(9,?1)",
+            [format!("{:x}", md5::compute(schema::V9_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 10 {
+        tx.execute_batch(schema::V10_SQL)
+            .map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(10,?1)",
+            [format!("{:x}", md5::compute(schema::V10_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 11 {
+        tx.execute_batch(schema::V11_SQL)
+            .map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(11,?1)",
+            [format!("{:x}", md5::compute(schema::V11_SQL))],
         )
         .map_err(super::sql_error)?;
     }

@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 8;
+pub(super) const VERSION: i64 = 11;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -81,6 +81,16 @@ enum ActionCodec {
         #[serde(with = "native")]
         target: PathBuf,
     },
+    CreateStaging {
+        #[serde(with = "native")]
+        staging: PathBuf,
+    },
+    WriteStaging {
+        #[serde(with = "EntryCodec")]
+        source: EntryPrestate,
+        #[serde(with = "boxed_owned")]
+        staging: Box<OwnedEntryPrestate>,
+    },
     StageCopy {
         #[serde(with = "EntryCodec")]
         source: EntryPrestate,
@@ -98,6 +108,12 @@ enum ActionCodec {
         #[serde(with = "EntryCodec")]
         source: EntryPrestate,
         published_by: StepId,
+    },
+    RemoveSourceDirectory {
+        #[serde(with = "EntryCodec")]
+        source: EntryPrestate,
+        destination_created_by: StepId,
+        required_descendants: Vec<StepId>,
     },
     SetMetadata {
         #[serde(with = "EntryCodec")]
@@ -125,7 +141,14 @@ struct EntryCodec {
 #[serde(remote = "ExpectedIdentity", deny_unknown_fields)]
 enum IdentityCodec {
     Observed(FileStamp),
-    FromReceipt { step_id: StepId },
+    FromReceipt {
+        step_id: StepId,
+    },
+    DirectoryAfterEffects {
+        original: FileStamp,
+        created_by: Option<StepId>,
+        effects: Vec<StepId>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "OwnedEntryPrestate", deny_unknown_fields)]
@@ -242,13 +265,15 @@ fn namespace_inspection(
 pub(super) fn source(action: &ExecutionAction) -> Option<&EntryPrestate> {
     match action {
         ExecutionAction::RenameEntry { source, .. }
+        | ExecutionAction::WriteStaging { source, .. }
         | ExecutionAction::StageCopy { source, .. }
-        | ExecutionAction::RemoveSource { source, .. } => Some(source),
+        | ExecutionAction::RemoveSource { source, .. }
+        | ExecutionAction::RemoveSourceDirectory { source, .. } => Some(source),
         ExecutionAction::SetMetadata { entry, .. } => Some(entry),
         ExecutionAction::PublishCopy { staging, .. } => Some(&staging.entry),
         ExecutionAction::RemoveOwnedCopy { owned }
         | ExecutionAction::RemoveOwnedEmptyDirectory { owned } => Some(&owned.entry),
-        ExecutionAction::CreateDirectory { .. } => None,
+        ExecutionAction::CreateDirectory { .. } | ExecutionAction::CreateStaging { .. } => None,
     }
 }
 pub(super) fn output(action: &ExecutionAction) -> Option<&Path> {
@@ -256,7 +281,10 @@ pub(super) fn output(action: &ExecutionAction) -> Option<&Path> {
         ExecutionAction::RenameEntry { target, .. }
         | ExecutionAction::CreateDirectory { target }
         | ExecutionAction::PublishCopy { target, .. } => Some(target),
-        ExecutionAction::StageCopy { staging, .. } => Some(staging),
+        ExecutionAction::StageCopy { staging, .. } | ExecutionAction::CreateStaging { staging } => {
+            Some(staging)
+        }
+        ExecutionAction::WriteStaging { staging, .. } => Some(&staging.entry.path),
         ExecutionAction::SetMetadata { entry, .. } => Some(&entry.path),
         _ => None,
     }
@@ -264,6 +292,7 @@ pub(super) fn output(action: &ExecutionAction) -> Option<&Path> {
 pub(super) fn owned(action: &ExecutionAction) -> Option<&OwnedEntryPrestate> {
     match action {
         ExecutionAction::PublishCopy { staging, .. } => Some(staging),
+        ExecutionAction::WriteStaging { staging, .. } => Some(staging),
         ExecutionAction::RemoveOwnedCopy { owned }
         | ExecutionAction::RemoveOwnedEmptyDirectory { owned } => Some(owned),
         _ => None,
@@ -273,9 +302,13 @@ pub(super) fn phase(action: &ExecutionAction) -> CompletedPhase {
     match action {
         ExecutionAction::RenameEntry { .. } => CompletedPhase::Renamed,
         ExecutionAction::CreateDirectory { .. } => CompletedPhase::DirectoryCreated,
-        ExecutionAction::StageCopy { .. } => CompletedPhase::CopyStaged,
+        ExecutionAction::CreateStaging { .. } => CompletedPhase::StagingCreated,
+        ExecutionAction::StageCopy { .. } | ExecutionAction::WriteStaging { .. } => {
+            CompletedPhase::CopyStaged
+        }
         ExecutionAction::PublishCopy { .. } => CompletedPhase::CopyPublished,
         ExecutionAction::RemoveSource { .. } => CompletedPhase::SourceRemoved,
+        ExecutionAction::RemoveSourceDirectory { .. } => CompletedPhase::SourceDirectoryRemoved,
         ExecutionAction::SetMetadata { .. } => CompletedPhase::MetadataSet,
         ExecutionAction::RemoveOwnedCopy { .. } => CompletedPhase::OwnedCopyRemoved,
         ExecutionAction::RemoveOwnedEmptyDirectory { .. } => {
@@ -330,10 +363,50 @@ pub(super) fn validate_plan(plan: &ExecutionPlan) -> Result<(), OpError> {
                     }
                 }
             }
+            if let Some(EntryPrestate {
+                path,
+                identity:
+                    ExpectedIdentity::DirectoryAfterEffects {
+                        original,
+                        created_by,
+                        effects,
+                    },
+            }) = source(&step.action)
+            {
+                if original.physical_id.is_none() {
+                    return Err(invalid("directory original identity missing"));
+                }
+                if let Some(created) = created_by {
+                    if !matches!(&earlier(*created)?.action, ExecutionAction::CreateDirectory { target } if target == path)
+                    {
+                        return Err(invalid("directory authority must name its exact creator"));
+                    }
+                }
+                let mut unique = BTreeSet::new();
+                for effect in effects {
+                    if !unique.insert(*effect) {
+                        return Err(invalid("duplicate directory child effect"));
+                    }
+                    earlier(*effect)?;
+                }
+            }
             if let Some(path) = output(&step.action) {
                 validate_path(path)?;
             }
             if let Some(owned) = owned(&step.action) {
+                // Historical cleanup authority is checked by re-deriving the
+                // entire inverse from its retained original in Journal::begin.
+                if !steps.contains_key(&owned.created_by)
+                    && plan.inverse_of.is_some()
+                    && matches!(
+                        step.action,
+                        ExecutionAction::RemoveOwnedCopy { .. }
+                            | ExecutionAction::RemoveOwnedEmptyDirectory { .. }
+                    )
+                {
+                    steps.insert(step.id, step);
+                    continue;
+                }
                 let creator = earlier(owned.created_by)?;
                 if matches!(
                     step.action,
@@ -349,7 +422,10 @@ pub(super) fn validate_plan(plan: &ExecutionPlan) -> Result<(), OpError> {
                     ExecutionAction::RemoveOwnedEmptyDirectory { .. } => {
                         matches!(creator.action, ExecutionAction::CreateDirectory { .. })
                     }
-                    _ => matches!(creator.action, ExecutionAction::StageCopy { .. }),
+                    _ => matches!(
+                        creator.action,
+                        ExecutionAction::StageCopy { .. } | ExecutionAction::CreateStaging { .. }
+                    ),
                 };
                 if !right_kind {
                     return Err(invalid(
@@ -358,17 +434,45 @@ pub(super) fn validate_plan(plan: &ExecutionPlan) -> Result<(), OpError> {
                 }
             }
             match &step.action {
+                ExecutionAction::RemoveSourceDirectory {
+                    source,
+                    destination_created_by,
+                    required_descendants,
+                } => {
+                    if !matches!(
+                        earlier(*destination_created_by)?.action,
+                        ExecutionAction::CreateDirectory { .. }
+                    ) {
+                        return Err(invalid(
+                            "source directory needs owned destination directory",
+                        ));
+                    }
+                    let ExpectedIdentity::FromReceipt { step_id } = source.identity else {
+                        return Err(invalid("source directory needs durable quarantine"));
+                    };
+                    if !matches!(&earlier(step_id)?.action, ExecutionAction::RenameEntry { target, source: EntryPrestate { identity: ExpectedIdentity::DirectoryAfterEffects { created_by: None, .. }, .. }, temporary: true } if target == &source.path)
+                    {
+                        return Err(invalid("invalid source directory quarantine lineage"));
+                    }
+                    for id in required_descendants {
+                        earlier(*id)?;
+                    }
+                }
                 ExecutionAction::PublishCopy {
                     staging,
                     verified_by,
                     ..
                 } => {
-                    if *verified_by != staging.created_by
-                        || !matches!(
-                            earlier(*verified_by)?.action,
-                            ExecutionAction::StageCopy { .. }
-                        )
-                    {
+                    if !match &earlier(*verified_by)?.action {
+                        ExecutionAction::StageCopy { .. } => *verified_by == staging.created_by,
+                        ExecutionAction::WriteStaging {
+                            staging: written, ..
+                        } => {
+                            written.created_by == staging.created_by
+                                && written.entry.path == staging.entry.path
+                        }
+                        _ => false,
+                    } {
                         return Err(invalid(
                             "publication requires its staging verification receipt",
                         ));
@@ -383,11 +487,21 @@ pub(super) fn validate_plan(plan: &ExecutionPlan) -> Result<(), OpError> {
                         return Err(invalid("source removal requires publication"));
                     };
                     let verified = earlier(*verified_by)?;
-                    let ExecutionAction::StageCopy { source: copied, .. } = &verified.action else {
+                    let (ExecutionAction::StageCopy { source: copied, .. }
+                    | ExecutionAction::WriteStaging { source: copied, .. }) = &verified.action
+                    else {
                         return Err(invalid("publication has no staged source"));
                     };
                     if remove != copied {
-                        return Err(invalid("removed source differs from verified copy source"));
+                        let ExpectedIdentity::FromReceipt { step_id } = remove.identity else {
+                            return Err(invalid("removed source lacks quarantine lineage"));
+                        };
+                        if !matches!(&earlier(step_id)?.action, ExecutionAction::RenameEntry { source, target, temporary: true } if source == copied && target == &remove.path)
+                        {
+                            return Err(invalid(
+                                "removed source differs from verified source/quarantine",
+                            ));
+                        }
                     }
                 }
                 _ => {}
@@ -437,3 +551,39 @@ CREATE TABLE history_revision(singleton INTEGER PRIMARY KEY CHECK(singleton=1), 
 INSERT INTO history_revision VALUES(1,'0');
 CREATE INDEX history_by_state ON operations(state);
 "#;
+
+// Protocol v9 separates create-new ownership from streaming verification.
+pub(super) const V9_SQL: &str = "CREATE TABLE copy_protocol(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1)); INSERT INTO copy_protocol VALUES(1,1);";
+
+// Preserve every v5 link as ordinal zero; a chain is durably compiled as a whole.
+pub(super) const V10_SQL: &str = r#"
+ALTER TABLE recovery_effects RENAME TO recovery_effects_v5;
+CREATE TABLE recovery_effects(operation_id TEXT NOT NULL, original_step TEXT NOT NULL, inverse_step TEXT NOT NULL, parents TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal>=0), PRIMARY KEY(operation_id,original_step,ordinal), UNIQUE(operation_id,inverse_step), FOREIGN KEY(operation_id,original_step) REFERENCES steps(operation_id,id), FOREIGN KEY(operation_id,inverse_step) REFERENCES steps(operation_id,id));
+INSERT INTO recovery_effects SELECT operation_id,original_step,inverse_step,parents,0 FROM recovery_effects_v5;
+DROP TABLE recovery_effects_v5;
+"#;
+
+// Typed future-parent bindings and explicit cross-original inverse prerequisites.
+// Existing parent payloads and ordered chain rows retain their exact meaning.
+pub(super) const V11_SQL: &str = r#"
+CREATE TABLE recovery_dependencies(operation_id TEXT NOT NULL, inverse_step TEXT NOT NULL, prerequisite_step TEXT NOT NULL, PRIMARY KEY(operation_id,inverse_step,prerequisite_step), FOREIGN KEY(operation_id,inverse_step) REFERENCES steps(operation_id,id), FOREIGN KEY(operation_id,prerequisite_step) REFERENCES steps(operation_id,id));
+INSERT INTO recovery_dependencies SELECT current.operation_id,current.inverse_step,prior.inverse_step FROM recovery_effects current JOIN recovery_effects prior ON prior.operation_id=current.operation_id AND prior.original_step=current.original_step AND prior.ordinal=current.ordinal-1;
+CREATE TABLE recovery_groups(operation_id TEXT NOT NULL REFERENCES operations(id), group_id TEXT NOT NULL, canonical_effects TEXT NOT NULL, PRIMARY KEY(operation_id,group_id));
+"#;
+
+// Boxing the in-memory write ownership keeps every execution step compact;
+// the private durable representation remains the exact existing OwnedCodec.
+mod boxed_owned {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        value: &OwnedEntryPrestate,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        OwnedCodec::serialize(value, serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Box<OwnedEntryPrestate>, D::Error> {
+        OwnedCodec::deserialize(deserializer).map(Box::new)
+    }
+}
