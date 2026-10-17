@@ -127,13 +127,21 @@ pub fn execute(
     let mut reservations: BTreeMap<PathBuf, (StepId, EntryId)> = BTreeMap::new();
     let mut attempted = false;
     let mut journal_failure = None;
+    let mut current_group = None;
+    let mut cancelled_partial = false;
     let result = (|| -> Result<(), OpError> {
         for group in &plan.execution.groups {
             if control.is_cancelled() {
                 report.state = OperationState::Cancelled;
                 break;
             }
+            current_group = Some(group.id);
             for step in &group.steps {
+                if control.is_cancelled() {
+                    cancelled_partial = true;
+                    report.state = OperationState::RecoveryRequired;
+                    return Ok(());
+                }
                 let ExecutionAction::RenameEntry {
                     source,
                     target,
@@ -281,6 +289,44 @@ pub fn execute(
         }
         Ok(())
     })();
+    // Failed/cancelled current groups are compensated only through fresh compiled
+    // ownership evidence. Journal/flush failures keep their original recovery gap.
+    if journal_failure.is_none()
+        && report.state == OperationState::RecoveryRequired
+        && (cancelled_partial
+            || report
+                .failure
+                .as_ref()
+                .is_some_and(|e| e.phase != Phase::Flush))
+    {
+        if let Some(group) = current_group {
+            match crate::recovery::compensate_current(
+                op,
+                group,
+                lease,
+                journal,
+                fs,
+                cancelled_partial,
+            ) {
+                Ok(()) => {
+                    report.state = if cancelled_partial {
+                        OperationState::Cancelled
+                    } else {
+                        OperationState::Failed
+                    };
+                    let record = journal.operation(op)?;
+                    report.receipts = record
+                        .steps
+                        .iter()
+                        .chain(record.recovery_effects.iter().map(|e| &e.inverse))
+                        .flat_map(|s| s.receipts.clone())
+                        .collect();
+                }
+                Err(error) if error.operation_id == Some(op) => journal_failure = Some(error),
+                Err(_) => {} // uncertain ownership retains the recovery gate
+            }
+        }
+    }
     // Advance while the pending journal still gates other processes. If either
     // finalization fails the operation remains pending, never falsely completed.
     if attempted {

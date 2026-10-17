@@ -37,6 +37,13 @@ pub(super) fn check(conn: &Connection) -> Result<i64, OpError> {
     if version >= 4 {
         expected.push((4, format!("{:x}", md5::compute(schema::V4_SQL))));
     }
+    if version >= 5 {
+        expected.push((5, format!("{:x}", md5::compute(schema::V5_SQL))));
+        conn.prepare("SELECT resolution,evidence FROM recovery_audit LIMIT 0")
+            .map_err(|_| unsupported())?;
+        conn.prepare("SELECT original_step,inverse_step,parents FROM recovery_effects LIMIT 0")
+            .map_err(|_| unsupported())?;
+    }
     let migrations = conn
         .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
         .and_then(|mut stmt| {
@@ -121,6 +128,14 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), OpError> {
         tx.execute(
             "INSERT INTO schema_migrations(version,checksum) VALUES(4,?1)",
             [format!("{:x}", md5::compute(schema::V4_SQL))],
+        )
+        .map_err(super::sql_error)?;
+    }
+    if version < 5 {
+        tx.execute_batch(schema::V5_SQL).map_err(super::sql_error)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,checksum) VALUES(5,?1)",
+            [format!("{:x}", md5::compute(schema::V5_SQL))],
         )
         .map_err(super::sql_error)?;
     }

@@ -168,6 +168,7 @@ impl Filesystem for FaultFs {
         let step = operation
             .steps
             .iter()
+            .chain(operation.recovery_effects.iter().map(|e| &e.inverse))
             .find(|s| s.step.id == authority.step_id())
             .unwrap();
         assert_eq!(step.state, StepState::IntentDurable);
@@ -213,7 +214,11 @@ impl Filesystem for FaultFs {
         let pending = journal.pending().unwrap();
         let intent = pending
             .iter()
-            .flat_map(|p| &p.steps)
+            .flat_map(|p| {
+                p.steps
+                    .iter()
+                    .chain(p.recovery_effects.iter().map(|e| &e.inverse))
+            })
             .find(|s| s.state == StepState::IntentDurable)
             .expect("native effect requires committed intent visible on separate connection");
         self.calls.push(intent.step.id);
@@ -264,6 +269,9 @@ impl Filesystem for FaultFs {
         self.native.set_metadata(p, s, u)
     }
     fn flush_directory(&self, p: &Path) -> Result<Durability, OpError> {
+        if let Some(durability) = &self.durability {
+            return Ok(durability.clone());
+        }
         self.native.flush_directory(p)
     }
     fn remove_owned(&mut self, o: &OwnedEntry) -> Result<Durability, OpError> {
@@ -342,7 +350,7 @@ fn failed_group_stops_following_groups() {
     let report = f.run(&mut adapter, &JobControl::default()).unwrap();
     assert_eq!(adapter.calls.len(), 2, "stop on failed group");
     assert_eq!(report.completed_groups.len(), 1);
-    assert_eq!(report.state, OperationState::RecoveryRequired);
+    assert_eq!(report.state, OperationState::Failed);
     assert!(f.media.join("c").exists());
     assert!(!f.media.join("last").exists());
 }
@@ -765,7 +773,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
         .unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
-    db.execute_batch("UPDATE operations SET inspection=json_remove(inspection,'$.expected_namespace'); ALTER TABLE operations DROP COLUMN inspection_version; DELETE FROM schema_migrations WHERE version=4; PRAGMA user_version=3;").unwrap();
+    db.execute_batch("UPDATE operations SET inspection=json_remove(inspection,'$.expected_namespace'); ALTER TABLE operations DROP COLUMN inspection_version; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;").unwrap();
     let journal = Journal::open(&f.coordinator.database_path()).unwrap();
     let record = journal.operation(op).unwrap();
     assert_eq!(record.steps[0].state, StepState::IntentDurable);
@@ -779,7 +787,7 @@ fn compatible_v3_migration_preserves_pending_evidence_without_inventing_namespac
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
 }
 #[test]
@@ -789,7 +797,7 @@ fn failed_v3_migration_rolls_back_schema_and_keeps_evidence() {
     let op = journal.begin(&f.plan.execution).unwrap();
     drop(journal);
     let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
-    db.execute_batch("ALTER TABLE operations DROP COLUMN inspection_version; DELETE FROM schema_migrations WHERE version=4; PRAGMA user_version=3; CREATE TRIGGER reject_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
+    db.execute_batch("ALTER TABLE operations DROP COLUMN inspection_version; DROP TABLE recovery_effects; DROP TABLE recovery_audit; DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3; CREATE TRIGGER reject_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;").unwrap();
     let before: String = db
         .query_row("SELECT inspection FROM operations", [], |r| r.get(0))
         .unwrap();
@@ -849,44 +857,54 @@ fn finalization_failure_keeps_recovery_gate_and_advanced_epoch() {
     assert_eq!(fs::read(f.media.join("new")).unwrap(), b"fixture");
 }
 #[test]
-fn cancellation_inside_cycle_finishes_group_before_stopping() {
+fn cancellation_inside_cycle_restores_current_group_before_stopping() {
+    // Task08 completes the interim Task07 boundary behavior with verified
+    // current-group compensation. Completed independent groups stay factual.
     let f = Fixture::new(&[("a", "b"), ("b", "a"), ("c", "last")]);
     let control = JobControl::default();
     let mut adapter = FaultFs::new(&f);
     adapter.cancel = Some(control.clone());
     let report = f.run(&mut adapter, &control).unwrap();
     assert_eq!(report.state, OperationState::Cancelled);
-    assert_eq!(report.completed_groups.len(), 1);
-    assert_eq!(report.receipts.len(), 3);
-    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"fixture");
+    assert!(report.completed_groups.is_empty());
+    assert_eq!(report.receipts.len(), 2);
+    assert_eq!(fs::read(f.media.join("a")).unwrap(), b"fixture");
+    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"b");
     assert!(f.media.join("c").exists());
     assert!(!f.media.join("last").exists());
-    let ids: Vec<_> = f.plan.execution.groups[0]
+    assert_eq!(adapter.calls.len(), 2, "one forward and one inverse");
+    assert_eq!(adapter.calls[0], f.plan.execution.groups[0].steps[0].id);
+    assert!(!f.plan.execution.groups[0]
         .steps
         .iter()
-        .map(|s| s.id)
-        .collect();
-    assert_eq!(adapter.calls, ids);
+        .any(|s| s.id == adapter.calls[1]));
 }
 #[test]
-fn failed_cycle_keeps_owned_temporary_receipt_for_recovery() {
+fn failed_cycle_compensates_verified_temporary_and_retains_both_receipts() {
     let f = Fixture::new(&[("a", "b"), ("b", "a"), ("c", "last")]);
     let mut adapter = FaultFs::new(&f);
     adapter.fail_at = Some(2);
     let report = f.run(&mut adapter, &JobControl::default()).unwrap();
-    assert_eq!(report.state, OperationState::RecoveryRequired);
+    assert_eq!(report.state, OperationState::Failed);
     assert!(report.completed_groups.is_empty());
-    assert_eq!(report.receipts.len(), 1);
+    assert_eq!(report.receipts.len(), 2);
     let temp = decode_path(report.receipts[0].after_path.as_ref().unwrap()).unwrap();
-    assert!(temp.exists());
+    assert!(!temp.exists());
+    assert_eq!(fs::read(f.media.join("a")).unwrap(), b"fixture");
+    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"b");
     assert!(f.media.join("c").exists());
-    assert_eq!(adapter.calls.len(), 2);
+    assert_eq!(adapter.calls.len(), 3);
     let record = Journal::open(&f.coordinator.database_path())
         .unwrap()
         .operation(report.operation_id.unwrap())
         .unwrap();
-    assert_eq!(record.steps[0].state, StepState::CompletionDurable);
-    assert_eq!(record.steps[1].state, StepState::Unresolved);
+    assert_eq!(record.steps[0].state, StepState::Compensated);
+    assert_eq!(record.steps[1].state, StepState::Planned);
+    assert_eq!(record.recovery_effects.len(), 1);
+    assert_eq!(
+        record.recovery_effects[0].inverse.state,
+        StepState::CompletionDurable
+    );
 }
 #[test]
 fn ancestor_cycle_finishes_before_child_escape_invalidates_directory_stamp() {
@@ -1033,4 +1051,169 @@ fn source_parent_replaced_with_same_source_object_is_rejected_by_native_handles(
 #[test]
 fn reserved_rename_rejects_parent_replaced_before_native_handle_acquisition() {
     reviewed_parent_replacement_is_rejected(true, true);
+}
+
+#[test]
+fn runtime_failure_compensates_only_current_group() {
+    let f = Fixture::new(&[("a", "b"), ("b", "a"), ("c", "last")]);
+    let mut adapter = FaultFs::new(&f);
+    adapter.fail_at = Some(2);
+    let report = f.run(&mut adapter, &JobControl::default()).unwrap();
+    assert_eq!(
+        report.state,
+        OperationState::Failed,
+        "verified compensation must finish the failed operation"
+    );
+    assert_eq!(fs::read(f.media.join("a")).unwrap(), b"fixture");
+    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"b");
+    assert_eq!(fs::read(f.media.join("c")).unwrap(), b"c");
+    assert!(!f.media.join("last").exists());
+    let journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    assert!(journal.pending().unwrap().is_empty());
+    assert_eq!(
+        journal.events_after(0, 200).unwrap().items.len(),
+        2,
+        "original and inverse facts must both remain"
+    );
+}
+#[test]
+fn cancellation_compensates_partial_cycle() {
+    let f = Fixture::new(&[("a", "b"), ("b", "a"), ("c", "last")]);
+    let control = JobControl::default();
+    let mut adapter = FaultFs::new(&f);
+    adapter.cancel = Some(control.clone());
+    let report = f.run(&mut adapter, &control).unwrap();
+    assert_eq!(report.state, OperationState::Cancelled);
+    assert!(
+        report.completed_groups.is_empty(),
+        "partial cancelled cycle is restored, not completed"
+    );
+    assert_eq!(fs::read(f.media.join("a")).unwrap(), b"fixture");
+    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"b");
+    assert!(f.media.join("c").exists());
+}
+
+#[test]
+fn recovery_retains_reviewed_parent_ids_at_native_handle_acquisition() {
+    for reserved in [false, true] {
+        let f = Fixture::new(if reserved {
+            &[("a", "b"), ("b", "a")]
+        } else {
+            &[("a", "new")]
+        });
+        let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+        let op = journal.begin(&f.plan.execution).unwrap();
+        journal
+            .intent(op, &f.plan.execution.groups[0].steps[0])
+            .unwrap();
+        let preview =
+            recovery::reconcile(&journal.operation(op).unwrap(), &mut PlatformFs::default())
+                .unwrap();
+        let nonce = preview.review_nonce();
+        let lease = f.coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+        let mut adapter = FaultFs::new(&f);
+        adapter.replace_parent = Some((f.media.clone(), f.media.with_file_name("parked")));
+        let result = recovery::apply_recovery(
+            preview.review(nonce).unwrap(),
+            recovery::RecoveryChoice::Resume,
+            &lease,
+            &mut journal,
+            &mut adapter,
+            &JobControl::default(),
+        );
+        assert_eq!(result.unwrap_err().code, ErrorCode::StaleState);
+        assert_eq!(fs::read(f.media.join("a")).unwrap(), b"fixture");
+        assert!(!f.media.join("new").exists());
+        assert!(journal.events_after(0, 200).unwrap().items.is_empty());
+        assert_eq!(journal.pending().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn compensation_journal_failure_is_reported_and_stops_inverse_write() {
+    let f = Fixture::new(&[("a", "b"), ("b", "a")]);
+    let db = rusqlite::Connection::open(f.coordinator.database_path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_inverse BEFORE INSERT ON recovery_effects BEGIN SELECT RAISE(ABORT,'inverse intent durability failure'); END;").unwrap();
+    let mut adapter = FaultFs::new(&f);
+    adapter.fail_at = Some(2);
+    let result = f.run(&mut adapter, &JobControl::default());
+    assert!(
+        result.unwrap_err().step_id.is_some(),
+        "compensation journal failure must retain its inverse step context"
+    );
+    assert_eq!(
+        adapter.calls.len(),
+        2,
+        "no inverse syscall before durable recovery intent"
+    );
+    let journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    let op = journal.pending().unwrap().remove(0);
+    assert_eq!(op.steps[0].state, StepState::CompletionDurable);
+    assert!(op.recovery_effects.is_empty());
+    let temp = decode_path(op.steps[0].receipts[0].after_path.as_ref().unwrap()).unwrap();
+    assert_eq!(fs::read(temp).unwrap(), b"fixture");
+    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"b");
+}
+
+#[test]
+fn cycle_compensation_preserves_a_completed_earlier_group() {
+    let f = Fixture::new(&[("a", "new"), ("b", "c"), ("c", "b"), ("d", "last")]);
+    let mut adapter = FaultFs::new(&f);
+    adapter.fail_at = Some(3);
+    let report = f.run(&mut adapter, &JobControl::default()).unwrap();
+    assert_eq!(report.state, OperationState::Failed);
+    assert_eq!(report.completed_groups.len(), 1);
+    assert_eq!(fs::read(f.media.join("new")).unwrap(), b"fixture");
+    assert!(!f.media.join("a").exists());
+    assert_eq!(fs::read(f.media.join("b")).unwrap(), b"b");
+    assert_eq!(fs::read(f.media.join("c")).unwrap(), b"c");
+    assert_eq!(fs::read(f.media.join("d")).unwrap(), b"d");
+    assert!(!f.media.join("last").exists());
+}
+
+#[test]
+fn recovery_cannot_clear_an_unconfirmed_durability_receipt_without_flush() {
+    let f = Fixture::new(&[("a", "new")]);
+    let mut adapter = FaultFs::new(&f);
+    adapter.durability = Some(Durability::Unsupported);
+    let report = f.run(&mut adapter, &JobControl::default()).unwrap();
+    assert_eq!(report.state, OperationState::RecoveryRequired);
+    let mut journal = Journal::open(&f.coordinator.database_path()).unwrap();
+    let op = journal.pending().unwrap().remove(0);
+    let preview = recovery::reconcile(&op, &mut PlatformFs::default()).unwrap();
+    let nonce = preview.review_nonce();
+    let lease = f.coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    assert!(
+        recovery::apply_recovery(
+            preview.review(nonce).unwrap(),
+            recovery::RecoveryChoice::Resume,
+            &lease,
+            &mut journal,
+            &mut adapter,
+            &JobControl::default()
+        )
+        .is_err(),
+        "unconfirmed durable receipt must not clear its gate without a successful fresh flush"
+    );
+    assert_eq!(journal.pending().unwrap().len(), 1);
+    assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 1);
+    let preview =
+        recovery::reconcile(&journal.pending().unwrap()[0], &mut PlatformFs::default()).unwrap();
+    let nonce = preview.review_nonce();
+    let report = recovery::apply_recovery(
+        preview.review(nonce).unwrap(),
+        recovery::RecoveryChoice::Resume,
+        &lease,
+        &mut journal,
+        &mut PlatformFs::default(),
+        &JobControl::default(),
+    )
+    .unwrap();
+    assert_eq!(report.state, OperationState::Completed);
+    assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 1);
+    assert_eq!(
+        journal.operation(op.operation_id).unwrap().steps[0].receipts[0].durability,
+        Durability::Unsupported,
+        "original receipt must stay factual"
+    );
 }

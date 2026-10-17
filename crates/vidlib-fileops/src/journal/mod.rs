@@ -1,6 +1,7 @@
 //! Durable local execution journal; no method performs media filesystem effects.
 use crate::{events::*, platform::Durability, ErrorCode, OpError, Phase};
 mod migrations;
+mod recovery;
 mod schema;
 use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -40,14 +41,14 @@ pub struct StepReceipt {
     pub observed_ns: i128,
     pub durability: Durability,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingStep {
     pub step: ExecutionStep,
     pub sequence: u64,
     pub state: StepState,
     pub receipts: Vec<StepReceipt>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingOperation {
     pub operation_id: OperationId,
     pub state: OperationState,
@@ -55,6 +56,14 @@ pub struct PendingOperation {
     /// Inspection-only snapshot. Recovery authority resides in compiled steps.
     pub inspection: serde_json::Value,
     pub groups: Vec<OperationGroup>,
+    pub recovery_effects: Vec<RecoveryEffect>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryEffect {
+    pub original_step: StepId,
+    pub inverse: PendingStep,
+    pub source_parent: vidlib_inventory::PhysicalId,
+    pub target_parent: vidlib_inventory::PhysicalId,
 }
 pub type OperationRecord = PendingOperation;
 pub use schema::StoredGroup as OperationGroup;
@@ -636,7 +645,9 @@ fn load_operation(connection: &Connection, op: OperationId) -> Result<OperationR
             receipts,
         });
     }
+    let recovery_effects = recovery::load_effects(connection, op, &mut steps)?;
     Ok(PendingOperation {
+        recovery_effects,
         operation_id: op,
         state: from_json(&format!("\"{state}\""))?,
         steps,

@@ -6,7 +6,7 @@ use vidlib_rename::{
     EntryPrestate, ExecutionAction, ExpectedIdentity, MetadataChange, OwnedEntryPrestate,
 };
 
-pub(super) const VERSION: i64 = 4;
+pub(super) const VERSION: i64 = 5;
 pub(super) const SQL: &str = r#"
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL);
 CREATE TABLE operations(id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('Prepared','Running','Completed','Cancelled','Failed','RecoveryRequired')), inspection TEXT NOT NULL, groups_json TEXT NOT NULL);
@@ -168,7 +168,7 @@ pub(super) struct ReceiptCodec {
 }
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredReceipt(#[serde(with = "ReceiptCodec")] pub StepReceipt);
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredGroup {
     pub id: GroupId,
     pub depends_on: Vec<GroupId>,
@@ -409,3 +409,9 @@ fn validate_path(path: &Path) -> Result<(), OpError> {
     }
     Ok(())
 }
+
+// Recovery adds evidence; original compiled steps and factual receipts are immutable.
+pub(super) const V5_SQL: &str = r#"
+CREATE TABLE recovery_audit(sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL REFERENCES operations(id), step_id TEXT NOT NULL, resolution TEXT NOT NULL, evidence TEXT NOT NULL, FOREIGN KEY(operation_id,step_id) REFERENCES steps(operation_id,id));
+CREATE TABLE recovery_effects(operation_id TEXT NOT NULL, original_step TEXT NOT NULL, inverse_step TEXT NOT NULL, parents TEXT NOT NULL, PRIMARY KEY(operation_id,original_step), UNIQUE(operation_id,inverse_step), FOREIGN KEY(operation_id,original_step) REFERENCES steps(operation_id,id), FOREIGN KEY(operation_id,inverse_step) REFERENCES steps(operation_id,id));
+"#;

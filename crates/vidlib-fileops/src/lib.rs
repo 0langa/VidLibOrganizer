@@ -463,3 +463,5 @@ mod tests {
         assert_eq!(fs::read(&keeper_path).unwrap(), b"original video bytes");
     }
 }
+
+pub mod recovery;
