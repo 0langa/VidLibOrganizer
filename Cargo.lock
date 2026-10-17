@@ -4123,9 +4123,12 @@ name = "vidlib-fileops"
 version = "0.2.0"
 dependencies = [
  "md5",
+ "rustix",
  "serde",
  "tempfile",
  "vidlib-engine",
+ "vidlib-inventory",
+ "windows",
 ]
 
 [[package]]

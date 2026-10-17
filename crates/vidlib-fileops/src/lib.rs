@@ -1,3 +1,8 @@
+pub mod error;
+pub mod platform;
+pub use error::{ErrorCode, OpError, Phase};
+pub use platform::{Filesystem, PlatformFs};
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, FileTimes, Metadata, OpenOptions};

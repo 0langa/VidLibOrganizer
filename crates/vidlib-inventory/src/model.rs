@@ -219,6 +219,24 @@ pub enum NameNormalization {
     #[default]
     Unknown,
 }
+/// Native syntax policy observed for one parent, independent of execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NamePolicy {
+    Posix,
+    Windows,
+    #[default]
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameViolation {
+    UnknownPolicy,
+    InvalidComponent,
+    TooLong,
+    ForbiddenCharacter,
+    ReservedName,
+    TrailingDotOrSpace,
+}
+
 /// Exact names/observations captured per parent by a read-only platform adapter.
 #[derive(Clone, Debug, Serialize)]
 pub struct NamespaceEntry {
@@ -242,6 +260,8 @@ pub struct DirectoryFacts {
     #[serde(with = "crate::exact::option_u64_decimal")]
     pub max_path_units: Option<u64>,
     pub forbidden_characters: Vec<String>,
+    pub name_policy: NamePolicy,
+    pub reserved_names: Vec<String>,
     pub trailing_dots_spaces_allowed: Option<bool>,
     pub capabilities: FilesystemCapabilities,
     pub children_complete: bool,
@@ -303,5 +323,87 @@ impl ProtectedPolicy {
                 .iter()
                 .any(|prefix| crate::path::conservative_name_matches(name, prefix.as_ref(), true))
         })
+    }
+}
+
+impl DirectoryFacts {
+    /// Pure native-unit validation shared by the planner and mutation adapter.
+    pub fn validate_name(&self, name: &NativePathRecord) -> Result<(), NameViolation> {
+        use crate::PathPlatform;
+        use NameViolation::*;
+        let units: Vec<u16> = match (self.name_policy, name.platform) {
+            (NamePolicy::Unknown, _) => return Err(UnknownPolicy),
+            (NamePolicy::Posix, PathPlatform::UnixBytes) => {
+                name.bytes.iter().map(|b| u16::from(*b)).collect()
+            }
+            (NamePolicy::Windows, PathPlatform::WindowsUtf16Le)
+                if name.bytes.len().is_multiple_of(2) =>
+            {
+                name.bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_le_bytes(*b))
+                    .collect()
+            }
+            _ => return Err(InvalidComponent),
+        };
+        if units.is_empty() || units == [46] || units == [46, 46] {
+            return Err(InvalidComponent);
+        }
+        if self
+            .max_component_units
+            .is_some_and(|limit| units.len() as u64 > limit)
+        {
+            return Err(TooLong);
+        }
+        if units.iter().any(|u| {
+            *u == 0
+                || *u == 47
+                || (self.name_policy == NamePolicy::Windows
+                    && (*u < 32 || [34, 42, 58, 60, 62, 63, 92, 124].contains(u)))
+        }) {
+            return Err(ForbiddenCharacter);
+        }
+        if self.trailing_dots_spaces_allowed == Some(false)
+            && units.last().is_some_and(|u| *u == 32 || *u == 46)
+        {
+            return Err(TrailingDotOrSpace);
+        }
+        if self.name_policy == NamePolicy::Windows {
+            let stem = units.split(|u| *u == 46).next().unwrap_or_default();
+            let end = stem.iter().rposition(|u| *u != 32).map_or(0, |i| i + 1);
+            let stem = &stem[..end];
+            let fold = |unit: u16| {
+                if (97..=122).contains(&unit) {
+                    unit - 32
+                } else {
+                    unit
+                }
+            };
+            if self.reserved_names.iter().any(|reserved| {
+                stem.iter()
+                    .copied()
+                    .map(fold)
+                    .eq(reserved.encode_utf16().map(fold))
+            }) {
+                return Err(ReservedName);
+            }
+        }
+        for forbidden in &self.forbidden_characters {
+            let forbidden: Vec<_> = if self.name_policy == NamePolicy::Posix {
+                forbidden.bytes().map(u16::from).collect()
+            } else {
+                forbidden.encode_utf16().collect()
+            };
+            if !forbidden.is_empty()
+                && units
+                    .windows(forbidden.len())
+                    .any(|window| window == forbidden)
+            {
+                return Err(ForbiddenCharacter);
+            }
+        }
+        Ok(())
     }
 }

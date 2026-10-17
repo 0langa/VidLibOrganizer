@@ -8,6 +8,13 @@ license.workspace = true
 vidlib-engine = { path = "../vidlib-engine" }
 serde = { version = "1.0", features = ["derive"] }
 md5 = "0.8"
+vidlib-inventory = { path = "../vidlib-inventory" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO", "Wdk_Foundation", "Wdk_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3.23"
