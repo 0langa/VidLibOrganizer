@@ -427,17 +427,17 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** `render_template(parts: &[TemplatePart], context: &TemplateContext) -> Result<String, RuleIssue>`; `freeze_inputs(request: &InputRequirements, inventory: &Inventory, control: &JobControl) -> Result<FrozenInputs, RenameError>`. File I/O is a separate input-preparation stage, not inside pure evaluation; source freshness is checked before/after content reads.
 
-- [ ] **Step 1 — Red:** Add `all_template_field_families`, `missing_required_optional_and_fallback`, `original_and_current_stem_differ`, `hashes_match_independent_full_file_vectors`, `text_recipe_reads_no_contents`, `generated_tokens_survive_repeated_preview`, and `hash_cancel_and_stale_source`.
+- [x] **Step 1 — Red:** Add `all_template_field_families`, `missing_required_optional_and_fallback`, `original_and_current_stem_differ`, `hashes_match_independent_full_file_vectors`, `text_recipe_reads_no_contents`, `generated_tokens_survive_repeated_preview`, and `hash_cancel_and_stale_source`.
   ```rust
   assert_eq!(optional_result, "Movie (2020)"); // no dangling resolution brackets
   assert_eq!(abc_sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   assert_eq!(content_read_count_for_text_only, 0);
   assert_eq!(first.uuid_tokens, second.uuid_tokens);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test templates_hashes`.
-- [ ] **Step 3 — Implement:** Template AST fields/formatters, fallback/optional behavior, exact numeric/date formatting; prepare each requested full-file CRC32/MD5/SHA-1/SHA-256/SHA-512 digest once using a bounded 1 MiB buffer and chunk cancellation. Store clock/random results in FrozenInputs. Verify all five algorithms against fixed independent known vectors, not another call to the production hash function.
-- [ ] **Step 4 — Verify green:** Template/hash tests plus date contracts; compare files differing only beyond the first buffer and assert a required missing metadata property blocks the row.
-- [ ] **Step 5 — Commit:** `feat: render typed templates with frozen lazy inputs`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-rename --test templates_hashes`.
+- [x] **Step 3 — Implement:** Template AST fields/formatters, fallback/optional behavior, exact numeric/date formatting; prepare each requested full-file CRC32/MD5/SHA-1/SHA-256/SHA-512 digest once using a bounded 1 MiB buffer and chunk cancellation. Store clock/random results in FrozenInputs. Verify all five algorithms against fixed independent known vectors, not another call to the production hash function.
+- [x] **Step 4 — Verify green:** Template/hash tests plus date contracts; compare files differing only beyond the first buffer and assert a required missing metadata property blocks the row.
+- [x] **Step 5 — Commit:** `feat: render typed templates with frozen lazy inputs`.
 
 ### Task 15: Selection filters, mappings, overrides, and exports
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–13 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13's Windows local-zone/runtime checks remain pending. Task 14 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–14 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–10's Windows execution/recovery/Undo/desktop checks remain incomplete. Task 12's real Windows PCRE2 verification also remains pending. Task 13's Windows local-zone/runtime checks remain pending. Task 14's verified-reader Windows runtime and desktop cross-check remain pending. Task 15 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -812,6 +812,8 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 12: `8ca48e1` | Native PCRE2 UTF/UCP/no-JIT adapter with exact 16 KiB pattern, 1,000,000 match, 1,000 depth and 8,192 KiB heap limits; validated capture replacement, current-segment reassembly, structured failures and compile-once preparation. 86 scoped and 345 distinct workspace tests pass, including real native match/depth/heap exhaustion. Clippy/fmt and Windows all-target compilation/test-executable linking/static-import checks pass. Independent review approved with no findings. Step 4 real native Windows CI remains pending; no runtime/release gate opened. Next eligible: Task 13. |
 
 | 2026-10-17 | Task 13: `a249c4a` | Checked frozen-order numbering/repeats/signed padding/alphabetic formats/original-folder resets and typed date parsing, explicit zones, frozen time, source separation and DST policies. 106 scoped and 365 distinct workspace tests pass; Clippy/fmt and all six Windows test-executable cross-links/import checks pass. Independent review approved; legacy offset inspection remains backward-readable. Minor excess RFC3339 fractional precision is deferred for final triage. Windows local-zone/native runtime and packaged release remain pending. Next eligible: Task 14. |
+
+| 2026-10-17 | Task 14: `7ed27a8`, review fix `8df016d` | Typed template AST rendering, exact formatters and missing/optional behavior; verified lazy full-file five-algorithm hashing with 1 MiB chunks and frozen per-inventory/rule tokens, clock and Counter scope. Initial 157 owning tests and 391 distinct workspace tests pass; final anchor-root regression fix passes 25 covering tests and owning static checks. Core Windows test executables link; desktop cross-check is blocked in resource preprocessing by a missing GCC executable. Independent review plus scoped re-review approved. Minor cache scaling concern deferred. Actual Windows/UNC/reparse/storage and installed runtime remain pending; mutation gates closed. Next eligible: Task 15. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -840,3 +842,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 12 real native PCRE2 CI/runtime: UTF/UCP, no JIT, actual match/depth/heap exhaustion, captures/empty matches and static runtime in the Windows process. GNU fixtures compile/link and import only OS DLLs; Windows execution, MSVC package and offline installed runtime remain pending.
 
 - [ ] Windows Task 13 native date/number/runtime: explicit OS local-zone resolution and confirmation, UTC/fixed/IANA and DST fixtures, exact date fields in the installed app. All six GNU test executables link with OS DLLs only; actual Windows/MSVC execution and packaging remain pending.
+
+- [ ] Windows Task 14 content/input runtime: drive/share anchor identity, no-follow content reads, native material freshness, hashing/cancellation and frozen desktop preview. Core GNU test binaries link; the desktop GNU cross-check stopped in tauri-winres resource preprocessing because x86_64-w64-mingw32-gcc is unavailable (gcc-posix exists). Actual Windows/MSVC/package checks remain pending; no runtime gate opened.
