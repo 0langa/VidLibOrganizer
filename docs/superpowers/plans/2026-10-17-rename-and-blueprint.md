@@ -340,16 +340,16 @@ Implement task order unless the following dependencies allow safe parallel work.
 
 **Interfaces:** Produces plan_undo, paged OperationRecord/history DTOs, and explicit history-removal policy. Undo is a new RenamePlan with inverse_of OperationId and the same confirmation/executor path; edit undo/redo comes later in Task 16.
 
-- [ ] **Step 1 — Red:** Add `undo_requires_current_poststate`, `recreated_original_blocks_inverse`, `interrupted_undo_is_recoverable`, `unfinished_history_cannot_be_removed`, and `history_pages_are_stable`.
+- [x] **Step 1 — Red:** Add `undo_requires_current_poststate`, `recreated_original_blocks_inverse`, `interrupted_undo_is_recoverable`, `unfinished_history_cannot_be_removed`, and `history_pages_are_stable`.
   ```rust
   assert_eq!(inverse.rows[0].status, RowStatus::Blocked);
   assert_eq!(delete_pending.unwrap_err().code, ErrorCode::RecoveryRequired);
   assert_eq!(page.items.len(), 200);
   ```
-- [ ] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test undo`.
-- [ ] **Step 3 — Implement:** Inverse graph from receipts/expected poststates, full conflict/freshness checks, paged read-only history and explicit deletion of completed undo support. Keep pending recovery and undelivered outbox facts independently protected. Later tasks extend typed inverse variants, not a second undo engine.
-- [ ] **Step 4 — Verify green:** Undo/history tests plus existing duplicate actions tests. Confirm an undo failure never overwrites a newly created original or removes unrelated content.
-- [ ] **Step 5 — Commit:** `feat: add reviewed inverse plans and operation history`.
+- [x] **Step 2 — Verify red:** `cargo test -p vidlib-fileops --test undo`.
+- [x] **Step 3 — Implement:** Inverse graph from receipts/expected poststates, full conflict/freshness checks, paged read-only history and explicit deletion of completed undo support. Keep pending recovery and undelivered outbox facts independently protected. Later tasks extend typed inverse variants, not a second undo engine.
+- [x] **Step 4 — Verify green:** Undo/history tests plus existing duplicate actions tests. Confirm an undo failure never overwrites a newly created original or removes unrelated content.
+- [x] **Step 5 — Commit:** `feat: add reviewed inverse plans and operation history`.
 
 ### Task 10: Usable Rename vertical slice and bounded IPC
 
@@ -788,7 +788,7 @@ Non-matrix safety requirements are owned explicitly: native-path and exact trans
 
 ## 8. Execution ledger
 
-Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–08 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07/08's Windows execution/recovery checks remain incomplete. Task 09 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
+Execution status: implementation is in progress on `feat/rename-blueprint` in `.worktrees/rename-blueprint`. Tasks 01–09 are implemented and reviewed with portable evidence; Task 02's Windows red/green platform checks, Task 05's installed Windows app checks, Task 06's Windows path fixtures and Tasks 07–09's Windows execution/recovery/Undo checks remain incomplete. Task 10 is the next eligible implementation task. Windows runtime checks remain pending. Neither the complete Rename release nor Blueprint foundation is complete. The storage assumption accepted with the specs is app-local Blueprint data plus opt-in portable identity markers; no new preference question is required before following it.
 
 | Date | Task / commit | Evidence / next action |
 | --- | --- | --- |
@@ -802,6 +802,8 @@ Execution status: implementation is in progress on `feat/rename-blueprint` in `.
 | 2026-10-17 | Task 06: `fa5051e`, corrections `838cb03`, review fix `a68207e` | Pure identity-based final paths, collision suffixes, protected cycle reservations, hierarchical material prestates and whole-selection preflight. Final focused 39 graph +18 contract tests and 3 policy tests pass; scoped Clippy/fmt pass. Earlier 189-test workspace run preceded final focused corrections. Windows-target fixtures compiled; runtime pending. Independent review and scoped fix review clean, including unselected carried-descendant path limits. Task 03 grant-snapshot consistency finding resolved. Native reservation execution and namespace inspection persistence remain Task 07. Next eligible: Task 07. |
 | 2026-10-17 | Task 07: `3c4e9d2`, review fix `20ee7cf` | Journaled exact in-place execution, whole-selection preflight, typed parent identities checked on native held handles, reserved-temp lineage, honest partial reports and safe epoch/terminal ordering. v4 migration preserves exact expected-namespace inspection and prior evidence. Native integration corrected Task 06 root-path trailing separators and owned-staging compatibility. Earlier 230-test workspace run passed; final 66 focused lib/platform/executor tests, Clippy/fmt and Windows compile pass. Independent review and scoped fix review clean. Windows sharing/timestamp/native runtime pending; crash reconciliation and compensation remain Task 08. Next eligible: Task 08. |
 | 2026-10-17 | Task 08: `2d708f0`, review fix `f5a26f5` | Actual process-crash reconciliation, reviewed Resume/Restore, non-application/durability audits and separately journaled inverse effects. v5/v6 migrations preserve prior evidence and durable optional Restore scope; completed earlier groups stay completed across resets and receipt boundaries. Epoch advancement precedes terminal finalization. Earlier 261-test workspace run passed; final 96 focused recovery/executor/journal/coordinator tests, Clippy/fmt and Windows compile pass. Independent review plus scoped fix review clean. Cancellation now safely restores a partial current group when proved possible (completing the approved spec); uncertain ownership stays pending. Copy/metadata execution extensions remain their owning tasks. Windows/removable-hardware runtime pending; power-loss durability unqualified. Next eligible: Task 09. |
+
+| 2026-10-17 | Task 09: `e5bcb84` | Test-first inverse plans through the existing graph/executor/recovery, checked v7 historical lineage, current poststate and complete historical subtree validation, stable 200-row history and explicit visibility/Undo removal preserving recovery/outbox facts. Final 289 workspace tests, scoped Clippy/fmt and Windows compile pass. Independent combined review approved with no findings. Missing historical subtree evidence blocks directory Undo; large inverse transaction scale is not qualified. Windows runtime and hardware durability remain pending. Next eligible: Task 10. |
 
 During execution append task commits, commands/results, pending Windows capability rows and the next eligible incomplete task here. Keep this file canonical. Scope changes require an explicit spec/plan amendment, not an implementation agent silently dropping a required capability or expanding Blueprint into a mature hero feature.
 
@@ -822,3 +824,5 @@ During execution append task commits, commands/results, pending Windows capabili
 - [ ] Windows Task 07 executor runtime: sharing violations, timestamp preservation, case-temporary moves, file-ID/parent-handle substitution and installed application behavior. Core Windows cross-compilation passes; executor native tests ran on Linux only. Production Windows mutations remain gated.
 
 - [ ] Windows Task 08 recovery runtime and real removable-device disconnect/reconnect: forward/inverse crash boundaries, group preservation, durability retry and native parent binding. Linux process exits, simulated path loss, SQLite failure triggers and GNU-target compilation pass; no Windows, removable-hardware or hardware power-loss result is inferred.
+
+- [ ] Windows Task 09 Undo/history runtime: reviewed inverse execution, original/inverse process-crash recovery, native hierarchy/timestamp/material checks and history/outbox independence. Final Linux workspace and GNU-target compile pass; Windows runtime and hardware durability remain pending.
