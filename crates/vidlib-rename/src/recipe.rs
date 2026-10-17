@@ -31,10 +31,29 @@ pub struct Rule {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuleParameters {
     Keep,
-    FixedStem { value: String },
-    Template { parts: Vec<TemplatePart> },
-    Text { operation: crate::TextOperation },
-    Regex { rule: crate::RegexRule },
+    FixedStem {
+        value: String,
+    },
+    Template {
+        parts: Vec<TemplatePart>,
+    },
+    Text {
+        operation: crate::TextOperation,
+    },
+    Regex {
+        rule: crate::RegexRule,
+    },
+    Number {
+        rule: crate::NumberRule,
+    },
+    PadNumbers {
+        #[serde(with = "vidlib_inventory::exact::u64_decimal")]
+        padding: u64,
+        scope: crate::MatchScope,
+    },
+    Date {
+        operation: crate::DateOperation,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -335,7 +354,18 @@ impl RecipeV1 {
                 RuleParameters::Text { operation } => {
                     crate::text::validate_operation(operation).map_err(|e| invalid(e.message))?
                 }
-                RuleParameters::Keep | RuleParameters::Regex { .. } => {}
+                RuleParameters::Number { rule } => crate::numbers::validate_number_rule(rule)?,
+                RuleParameters::PadNumbers { padding, .. } if *padding > 4096 => {
+                    return Err(invalid("padding exceeds 4096"))
+                }
+                RuleParameters::Date { operation } => {
+                    let (crate::DateOperation::Insert { rule, .. }
+                    | crate::DateOperation::Reformat { rule }) = operation;
+                    crate::dates::validate_date_rule(rule)?;
+                }
+                RuleParameters::Keep
+                | RuleParameters::Regex { .. }
+                | RuleParameters::PadNumbers { .. } => {}
             }
         }
         if let Destination::Granted { layout, .. } = &self.destination {
@@ -428,7 +458,7 @@ fn validate_template(parts: &[TemplatePart], depth: usize) -> Result<(), RenameE
 }
 /// Pinned, locale-independent strftime subset: %Y %m %d %H %M %S %f %z %:z
 /// and %%. Locale names, composite formats and arbitrary modifiers are excluded.
-fn valid_date_pattern(pattern: &str) -> bool {
+pub(crate) fn valid_date_pattern(pattern: &str) -> bool {
     if pattern.is_empty() {
         return false;
     }

@@ -36,6 +36,9 @@ pub fn evaluate(
                 | RuleParameters::FixedStem { .. }
                 | RuleParameters::Text { .. }
                 | RuleParameters::Regex { .. }
+                | RuleParameters::Number { .. }
+                | RuleParameters::PadNumbers { .. }
+                | RuleParameters::Date { .. }
         ) {
             return Err(RenameError::new(
                 RenameErrorCode::UnsupportedRule,
@@ -43,6 +46,21 @@ pub fn evaluate(
             ));
         }
     }
+    let numbered = recipe
+        .rules
+        .iter()
+        .filter(|rule| rule.enabled)
+        .filter_map(|rule| {
+            if let RuleParameters::Number { rule: parameters } = &rule.parameters {
+                Some(
+                    assign_numbers(&inventory.entries, &inputs.primary_order, parameters)
+                        .map(|values| (rule.id.as_str(), values)),
+                )
+            } else {
+                None
+            }
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let mut rows = Vec::with_capacity(recipe.numbering_order.len());
     for id in &recipe.numbering_order {
         let entry = entries[id];
@@ -92,6 +110,30 @@ pub fn evaluate(
                         compiled_regex[rule.id.as_str()].apply(selected)
                     })
                 }
+                RuleParameters::Number { rule: parameters } => {
+                    crate::text::apply_segment(&current, &rule.segment, false, |selected| {
+                        crate::numbers::insert_value(
+                            selected,
+                            &parameters.at,
+                            format!(
+                                "{}{}{}",
+                                parameters.prefix,
+                                numbered[rule.id.as_str()][id],
+                                parameters.suffix
+                            ),
+                        )
+                    })
+                }
+                RuleParameters::PadNumbers { padding, scope } => {
+                    crate::text::apply_segment(&current, &rule.segment, false, |selected| {
+                        pad_existing_numbers(selected, *padding, *scope)
+                    })
+                }
+                RuleParameters::Date { operation } => {
+                    crate::text::apply_segment(&current, &rule.segment, false, |selected| {
+                        crate::dates::apply_date(selected, operation, entry, &rule.id, inputs)
+                    })
+                }
                 parameters => {
                     let operation = match parameters {
                         RuleParameters::Keep => TextOperation::Keep,
@@ -126,6 +168,14 @@ pub fn evaluate(
                             RuleIssueCode::InvalidInput => RenameErrorCode::InvalidRuleInput,
                             RuleIssueCode::RegexLimit => RenameErrorCode::RegexLimit,
                             RuleIssueCode::RegexNative => RenameErrorCode::RegexNative,
+                            RuleIssueCode::DateNeedsFormat => RenameErrorCode::DateNeedsFormat,
+                            RuleIssueCode::DateTimezoneUnknown => {
+                                RenameErrorCode::DateTimezoneUnknown
+                            }
+                            RuleIssueCode::DateAmbiguous => RenameErrorCode::DateAmbiguous,
+                            RuleIssueCode::DateNonexistent => RenameErrorCode::DateNonexistent,
+                            RuleIssueCode::DateMissing => RenameErrorCode::DateMissing,
+                            RuleIssueCode::DateInvalid => RenameErrorCode::DateInvalid,
                         },
                         entry_id: Some(*id),
                         rule_id: Some(rule.id.clone()),
@@ -268,7 +318,7 @@ fn validate_inputs(
             .is_some_and(|id| !recipe.rules.iter().any(|r| &r.id == id))
             || !seen.insert((value.entry_id, &value.rule_id, &value.key))
             || !valid_frozen_value(&value.key, &value.value)
-            || matches!(&value.value, FrozenFieldValue::Timestamp { timezone: Some(zone), .. } if !valid_timezone(zone))
+            || matches!(&value.value, FrozenFieldValue::Timestamp { timezone: Some(zone), .. } | FrozenFieldValue::LocalTimestamp { timezone: Some(zone), .. } if !valid_timezone(zone))
         {
             return Err(RenameError::new(
                 RenameErrorCode::InvalidFrozenInputs,
@@ -279,20 +329,7 @@ fn validate_inputs(
     Ok(())
 }
 fn valid_timezone(zone: &FrozenTimezone) -> bool {
-    match zone {
-        FrozenTimezone::Utc => true,
-        FrozenTimezone::FixedOffset { seconds } => (-86_399..=86_399).contains(seconds),
-        FrozenTimezone::Iana { name } => {
-            !name.is_empty()
-                && name.len() <= 255
-                && name
-                    .split('/')
-                    .all(|part| !part.is_empty() && part != "." && part != "..")
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"/_-+".contains(&b))
-        }
-    }
+    crate::dates::valid_timezone(zone)
 }
 
 fn valid_frozen_value(key: &FieldKey, value: &FrozenFieldValue) -> bool {
@@ -300,7 +337,10 @@ fn valid_frozen_value(key: &FieldKey, value: &FrozenFieldValue) -> bool {
         return true;
     }
     match key {
-        FieldKey::Date { .. } => matches!(value, FrozenFieldValue::Timestamp { .. }),
+        FieldKey::Date { .. } => matches!(
+            value,
+            FrozenFieldValue::Timestamp { .. } | FrozenFieldValue::LocalTimestamp { .. }
+        ),
         FieldKey::Counter => matches!(value, FrozenFieldValue::Integer(_)),
         FieldKey::SizeBytes
         | FieldKey::Random

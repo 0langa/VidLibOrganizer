@@ -16,3 +16,8 @@ pub use text::*;
 
 pub mod regex;
 pub use regex::*;
+
+pub mod numbers;
+pub use numbers::*;
+pub mod dates;
+pub use dates::*;

@@ -50,6 +50,12 @@ pub enum RuleIssueCode {
     InvalidInput,
     RegexLimit,
     RegexNative,
+    DateNeedsFormat,
+    DateTimezoneUnknown,
+    DateAmbiguous,
+    DateNonexistent,
+    DateMissing,
+    DateInvalid,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleIssue {
@@ -422,7 +428,7 @@ fn insertion(current: &str, at: &InsertPosition) -> Result<usize, RuleIssue> {
         }
     }
 }
-fn transform(current: &str, operation: &TextOperation) -> Result<String, RuleIssue> {
+pub(crate) fn transform(current: &str, operation: &TextOperation) -> Result<String, RuleIssue> {
     use TextOperation::*;
     Ok(match operation {
         Keep => current.into(),

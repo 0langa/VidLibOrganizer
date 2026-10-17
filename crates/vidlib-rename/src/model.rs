@@ -11,6 +11,12 @@ pub enum RenameErrorCode {
     InvalidRuleInput,
     RegexLimit,
     RegexNative,
+    DateNeedsFormat,
+    DateTimezoneUnknown,
+    DateAmbiguous,
+    DateNonexistent,
+    DateMissing,
+    DateInvalid,
     RecipeTooLarge,
     TooManyRules,
     UnknownEntry,
@@ -70,8 +76,13 @@ pub struct FrozenInputs {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FrozenTimezone {
     Utc,
-    Iana { name: String },
-    FixedOffset { seconds: i32 },
+    Iana {
+        name: String,
+    },
+    FixedOffset {
+        #[serde(with = "crate::numbers::exact_i32")]
+        seconds: i32,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +110,11 @@ pub enum FrozenFieldValue {
     Timestamp {
         #[serde(with = "vidlib_inventory::exact::i128_decimal")]
         ns: i128,
+        timezone: Option<FrozenTimezone>,
+    },
+    /// A civil recording timestamp, serialized as ISO text, with no invented zone.
+    LocalTimestamp {
+        value: chrono::NaiveDateTime,
         timezone: Option<FrozenTimezone>,
     },
     Missing {
