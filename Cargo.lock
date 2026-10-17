@@ -4129,6 +4129,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vidlib-inventory"
+version = "0.2.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+ "walkdir",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "vidlib-tauri"
 version = "0.2.0"
 dependencies = [

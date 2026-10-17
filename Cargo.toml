@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vidlib-engine", "crates/vidlib-fileops", "src-tauri"]
+members = ["crates/vidlib-engine", "crates/vidlib-fileops", "crates/vidlib-inventory", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
