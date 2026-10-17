@@ -1,0 +1,6 @@
+{
+  "planRef":{"sessionId":"00000000-0000-4000-8000-000000000001","planId":"00000000-0000-4000-8000-000000000002","revision":"1"},
+  "pageQuery":{"cursor":null,"limit":200,"sort":"name","filter":"","expectedRevision":"1"},
+  "row":{"itemId":"00000000-0000-4000-8000-000000000003","oldName":"original.mp4","newName":"renamed.mp4","oldDisplay":"Library / original.mp4","newDisplay":"Library / renamed.mp4","sizeBytes":"9007199254740993","modifiedNs":"-9007199254740993","status":"changed","carriedDescendants":"0","issues":[]},
+  "error":{"code":"staleState","message":"Preview expired. Preview again.","phase":"verify","itemId":null,"operationId":null,"retryable":false}
+}

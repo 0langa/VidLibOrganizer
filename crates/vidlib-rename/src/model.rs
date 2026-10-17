@@ -385,7 +385,7 @@ impl RenamePlan {
 pub struct PlanStore {
     session_id: SessionId,
     last_revision: Option<u64>,
-    current: Option<RenamePlan>,
+    current: Option<std::sync::Arc<RenamePlan>>,
     confirmation: Option<(PlanRef, String)>,
     used_nonces: std::collections::BTreeSet<String>,
 }
@@ -423,12 +423,12 @@ impl PlanStore {
         }
         self.last_revision = Some(plan.version.revision);
         self.confirmation = None;
-        self.current = Some(plan);
+        self.current = Some(std::sync::Arc::new(plan));
         Ok(())
     }
     pub fn current(&self, version: PlanRef) -> Result<&RenamePlan, RenameError> {
         self.current
-            .as_ref()
+            .as_deref()
             .filter(|plan| plan.version == version)
             .ok_or_else(|| {
                 RenameError::new(
@@ -436,6 +436,16 @@ impl PlanStore {
                     "plan is stale or belongs to another session",
                 )
             })
+    }
+    /// Shared read-only native snapshot for bounded desktop paging. Owning a
+    /// snapshot never consumes confirmation or authorizes a later execution.
+    pub fn snapshot(&self, version: PlanRef) -> Result<std::sync::Arc<RenamePlan>, RenameError> {
+        self.current(version)?;
+        Ok(self
+            .current
+            .as_ref()
+            .expect("validated current plan")
+            .clone())
     }
     pub fn confirm(&mut self, version: PlanRef, nonce: String) -> Result<(), RenameError> {
         let plan = self.current(version)?;

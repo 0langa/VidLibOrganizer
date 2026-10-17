@@ -2,9 +2,12 @@ import { $, el, hydrateIcons, bytes, count, displayPath } from './dom.js';
 import { call, isDesktop, sampleResult } from './api.js';
 import { renderLibraries } from './libraries.js';
 import { createResults } from './results.js';
+import { createRename } from './rename/main.js';
 import { createActions } from './actions.js';
 
 hydrateIcons();
+const rename = createRename();
+let currentView = "finder";
 const state = { paths: [], included: new Set(), ready: !isDesktop, scanning: false, busy: false, acting: false, cancelling: false, id: null, loadedResultId: null, preview: false, pollTimer: null };
 const locked = () => !state.ready || state.scanning || state.busy || state.acting;
 
@@ -29,13 +32,16 @@ const results = createResults({ onSelection: selectionChanged, onReveal: async p
 } });
 
 function navigate(view) {
-  if (!['finder', 'libraries', 'about'].includes(view)) view = 'finder';
+  if (!['finder', 'libraries', 'about', 'rename'].includes(view)) view = 'finder';
+  if (currentView === 'rename' && view !== 'rename') rename.deactivate();
+  if (view === 'rename') rename.activate();
+  currentView = view;
   document.querySelectorAll('.page').forEach(page => { page.hidden = page.id !== `view-${view}`; });
   document.querySelectorAll('[data-view]').forEach(button => {
     button.classList.toggle('active', button.dataset.view === view);
     button.dataset.view === view ? button.setAttribute('aria-current', 'page') : button.removeAttribute('aria-current');
   });
-  $('#breadcrumb').textContent = { finder: 'Duplicate finder', libraries: 'Library folders', about: 'About this app' }[view];
+  $('#breadcrumb').textContent = { finder: 'Duplicate finder', libraries: 'Library folders', about: 'About this app', rename: 'Rename' }[view];
 }
 
 function updateControls() {

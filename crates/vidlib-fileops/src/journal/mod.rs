@@ -91,6 +91,8 @@ pub struct HistoryCursor {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct HistoryItem {
+    /// Factual eligibility only; fresh native review remains mandatory.
+    pub undo_available: bool,
     pub operation_id: OperationId,
     pub state: OperationState,
     pub inverse_of: Option<OperationId>,
@@ -136,7 +138,7 @@ impl Journal {
             return Err(invalid("invalid history cursor bounds"));
         }
         let values = {
-            let mut stmt=tx.prepare("SELECT o.rowid,o.id,o.state,i.original_operation,(SELECT COUNT(*) FROM steps s WHERE s.operation_id=o.id AND s.state='CompletionDurable' AND NOT EXISTS(SELECT 1 FROM recovery_effects e WHERE e.operation_id=o.id AND e.inverse_step=s.id)) FROM operations o JOIN history_visibility h ON h.operation_id=o.id AND h.visible=1 LEFT JOIN operation_inverses i ON i.operation_id=o.id WHERE o.rowid>?1 AND o.rowid<=?2 ORDER BY o.rowid LIMIT 201").map_err(sql_error)?;
+            let mut stmt=tx.prepare("SELECT o.rowid,o.id,o.state,i.original_operation,(SELECT COUNT(*) FROM steps s WHERE s.operation_id=o.id AND s.state='CompletionDurable' AND NOT EXISTS(SELECT 1 FROM recovery_effects e WHERE e.operation_id=o.id AND e.inverse_step=s.id)), NOT EXISTS(SELECT 1 FROM steps u WHERE u.operation_id=o.id AND u.state IN ('IntentDurable','Unresolved')) AND NOT EXISTS(SELECT 1 FROM operation_inverses ai JOIN operations ao ON ao.id=ai.operation_id WHERE ai.original_operation=o.id AND (ao.state IN ('Prepared','Running','RecoveryRequired') OR EXISTS(SELECT 1 FROM steps ast WHERE ast.operation_id=ao.id AND ast.state='CompletionDurable' AND NOT EXISTS(SELECT 1 FROM recovery_effects ae WHERE ae.operation_id=ao.id AND ae.inverse_step=ast.id)))) FROM operations o JOIN history_visibility h ON h.operation_id=o.id AND h.visible=1 LEFT JOIN operation_inverses i ON i.operation_id=o.id WHERE o.rowid>?1 AND o.rowid<=?2 ORDER BY o.rowid LIMIT 201").map_err(sql_error)?;
             let rows = stmt
                 .query_map(params![after, through], |r| {
                     Ok((
@@ -145,6 +147,7 @@ impl Journal {
                         r.get::<_, String>(2)?,
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, i64>(4)? as u64,
+                        r.get::<_, bool>(5)?,
                     ))
                 })
                 .map_err(sql_error)?;
@@ -157,8 +160,11 @@ impl Journal {
         let items = values
             .into_iter()
             .take(200)
-            .map(|(_, id, state, inverse, completed_steps)| {
+            .map(|(_, id, state, inverse, completed_steps, eligible)| {
                 Ok(HistoryItem {
+                    undo_available: eligible
+                        && completed_steps > 0
+                        && matches!(state.as_str(), "Completed" | "Cancelled" | "Failed"),
                     operation_id: parse_id(&id)?,
                     state: from_json(&format!("\"{state}\""))?,
                     inverse_of: inverse.map(|id| parse_id(&id)).transpose()?,

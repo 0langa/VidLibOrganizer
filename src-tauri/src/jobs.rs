@@ -209,6 +209,58 @@ pub fn run_action(
     }
 }
 
+/// Bounded Rename job progress and owned completion facts. Cancellation only
+/// requests a stop; a factual partial-operation result is still delivered.
+pub(crate) struct RenameJob {
+    pub control: vidlib_inventory::JobControl,
+    pub status: crate::commands::rename::JobStatusDto,
+    progress: std::sync::mpsc::Receiver<vidlib_inventory::Progress>,
+}
+impl RenameJob {
+    pub fn new() -> Self {
+        let (control, progress) = vidlib_inventory::JobControl::with_progress(4);
+        Self {
+            control,
+            progress,
+            status: crate::commands::rename::JobStatusDto {
+                state: "running".into(),
+                result: None,
+                error: None,
+                progress: None,
+            },
+        }
+    }
+    pub fn status(&mut self) -> crate::commands::rename::JobStatusDto {
+        if let Some(progress) = self.progress.try_iter().last() {
+            self.status.progress = Some(serde_json::json!({
+                "phase": match progress.phase { vidlib_inventory::ProgressPhase::Scanning => "scanning", vidlib_inventory::ProgressPhase::Complete => "complete", vidlib_inventory::ProgressPhase::Cancelled => "cancelled" },
+                "done": progress.done.to_string(), "total": progress.total.map(|n| n.to_string()), "currentEntry": progress.current_entry,
+            }));
+        }
+        self.status.clone()
+    }
+    pub fn finish(
+        &mut self,
+        outcome: Result<serde_json::Value, crate::commands::rename::CommandError>,
+    ) {
+        match outcome {
+            Ok(result) => {
+                self.status.state = "completed".into();
+                self.status.result = Some(result);
+            }
+            Err(error) => {
+                self.status.state = if self.control.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+                .into();
+                self.status.error = Some(error);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

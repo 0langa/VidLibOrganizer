@@ -8,26 +8,38 @@ use vidlib_fileops::{coordinator::Coordinator, OpError};
 use vidlib_inventory::ids::SessionId;
 use vidlib_rename::PlanStore;
 
+#[derive(Clone)]
 pub struct AppState {
+    pub rename: Arc<Mutex<crate::commands::rename::RenameState>>,
     pub(crate) jobs: Arc<Mutex<Jobs>>,
     pub plans: Arc<Mutex<PlanRegistry>>,
     pub coordinator: Arc<Coordinator>,
     pub operations: PathBuf,
     pub blueprint: PathBuf,
     pub(crate) preferences: PathBuf,
-    pub(crate) preferences_lock: Mutex<()>,
+    pub(crate) preferences_lock: Arc<Mutex<()>>,
 }
 impl AppState {
     pub fn open(app_data: &Path, preferences: PathBuf) -> Result<Self, OpError> {
         let coordinator = Arc::new(Coordinator::open(app_data)?);
         Ok(Self {
+            rename: Arc::new(Mutex::new(crate::commands::rename::RenameState::new(
+                vidlib_inventory::ProtectedPolicy {
+                    protected_roots: vec![coordinator
+                        .database_path()
+                        .parent()
+                        .expect("absolute app data database")
+                        .to_path_buf()],
+                    ..Default::default()
+                },
+            ))),
             jobs: Arc::new(Mutex::new(Jobs::new(coordinator.clone()))),
             plans: Arc::new(Mutex::new(PlanRegistry::new(coordinator.clone()))),
             operations: coordinator.database_path(),
             blueprint: coordinator.blueprint_path(),
             coordinator,
             preferences,
-            preferences_lock: Mutex::new(()),
+            preferences_lock: Arc::new(Mutex::new(())),
         })
     }
     /// True prevents closing while a local writer/recovery lease is active.
@@ -39,6 +51,7 @@ impl AppState {
             return true;
         }
         jobs.cancel.store(true, Ordering::Relaxed);
+        crate::commands::rename::cancel_all(self);
         false
     }
 }
@@ -96,6 +109,23 @@ impl PlanRegistry {
         let epochs = plan_epochs(self.store.current(version).map_err(plan_error)?);
         self.check(lease, epochs)?;
         self.store.current(version).map_err(plan_error)
+    }
+    pub fn snapshot(
+        &mut self,
+        version: vidlib_rename::PlanRef,
+        lease: &vidlib_fileops::coordinator::Lease,
+    ) -> Result<Arc<vidlib_rename::RenamePlan>, OpError> {
+        self.current(version, lease)?;
+        self.store.snapshot(version).map_err(plan_error)
+    }
+    pub fn consume_owned(
+        &mut self,
+        version: vidlib_rename::PlanRef,
+        nonce: &str,
+        lease: &vidlib_fileops::coordinator::Lease,
+    ) -> Result<Arc<vidlib_rename::RenamePlan>, OpError> {
+        self.consume_confirmation(version, nonce, lease)?;
+        self.store.snapshot(version).map_err(plan_error)
     }
     pub fn confirm(
         &mut self,

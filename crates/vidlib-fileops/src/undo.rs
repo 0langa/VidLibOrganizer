@@ -47,6 +47,36 @@ fn current_path(op: &OperationRecord, original: &Path) -> PathBuf {
     current
 }
 
+/// Backend-only capture inputs. This is read-only context, never mutation
+/// authority; `plan_undo` still validates historical lineage, complete subtree
+/// evidence and the supplied fresh namespace before the ordinary executor.
+pub struct UndoCaptureContext {
+    pub grants: GrantSet,
+    pub candidates: Vec<PathBuf>,
+}
+pub fn capture_context(completed: &OperationRecord) -> Result<UndoCaptureContext, OpError> {
+    let mut grants = GrantSet::default();
+    for value in completed.inspection["grants"]
+        .as_array()
+        .ok_or_else(|| invalid("historical grants unavailable"))?
+    {
+        grants.grants.push(SourceGrant {
+            id: decode(&value["id"])?,
+            path: current_path(completed, &path(&value["path"])?),
+            source: decode(&value["source"])?,
+        });
+    }
+    let (parents, entries, _) = transformed_namespace(completed)?;
+    let mut candidates: Vec<_> = entries
+        .into_keys()
+        .chain(parents.into_iter().map(|(p, _)| p.join(".vidlib-capture")))
+        .filter(|p| grants.grants.iter().any(|g| p.starts_with(&g.path)))
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    Ok(UndoCaptureContext { grants, candidates })
+}
+
 /// A terminal batch can retain completed earlier groups even when its final
 /// label is Failed/Cancelled. Recovery inverse receipts are never new originals.
 pub fn plan_undo(

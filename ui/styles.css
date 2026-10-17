@@ -1689,3 +1689,18 @@ dialog::backdrop{
     transition:none!important
   }
 }
+
+/* Rename keeps its tables and editor local to the new view. */
+.rename-view .rename-toolbar { display:flex; gap:12px; flex-wrap:wrap; margin:16px 0; }
+.rename-view .rename-rules { display:flex; gap:20px; border:0; padding:16px 0; }
+.rename-view .rename-rules label { display:flex; flex-direction:column; gap:8px; }
+.rename-view .rename-table { width:100%; border-collapse:collapse; margin:20px 0; table-layout:fixed; }
+.rename-view .rename-table th, .rename-view .rename-table td { text-align:left; padding:12px 8px; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+.rename-view .rename-table input[type=checkbox] { margin-right:12px; }
+.rename-view .rename-history-item { padding:12px; border-bottom:1px solid var(--border); }
+.rename-view .rename-sources { overflow-wrap:anywhere; }
+.rename-view .panel { margin-bottom:24px; overflow-x:auto; }
+.rename-dialog { max-width:600px; }
+.rename-dialog .button { margin:8px; }
+.rename-view .rename-rules { flex-wrap:wrap; }
+.rename-view .rename-rules input { min-height:40px; width:240px; max-width:100%; padding:10px 14px; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:5px; }
