@@ -1,5 +1,8 @@
 # VidLibOrganizer
 
+Cloud checkpoint paused for local continuation: [current handoff](docs/verification/rename-local-handoff.md). Six Rename phase findings remain open; Windows release qualification is pending.
+
+
 A local Windows desktop app for organizing large video libraries. Add folders from your computer or external drives, scan their subfolders, review duplicate groups, and decide which copies to keep, move or delete.
 
 ## Run
