@@ -45,7 +45,6 @@ pub enum DateOperation {
 }
 
 use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use std::fmt::Write;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -301,11 +300,19 @@ pub fn format_date(
     if let DateValue::Text { value } = value {
         return format_date(&parse_text(value, rule)?, rule, env);
     }
-    let mut output = String::new();
+    let mut output = crate::output::Writer::default();
     if let DateValue::Date { value } = value {
-        write!(&mut output, "{}", value.format(&rule.output_format))
-            .map_err(|_| invalid_date("date-only value cannot supply requested time or offset"))?;
-        return Ok(output);
+        value
+            .format(&rule.output_format)
+            .write_to(&mut output)
+            .map_err(|_| {
+                if output.exceeded {
+                    crate::output::limit()
+                } else {
+                    invalid_date("date-only value cannot supply requested time or offset")
+                }
+            })?;
+        return Ok(output.text);
     }
     let value = match value {
         DateValue::Instant { ns } => instant(*ns)?,
@@ -331,31 +338,30 @@ pub fn format_date(
     };
     let zone = rule.timezone.as_ref().unwrap_or(&env.timezone);
     match zone {
-        FrozenTimezone::Utc => write!(&mut output, "{}", value.format(&rule.output_format)),
-        FrozenTimezone::FixedOffset { seconds } => write!(
-            &mut output,
-            "{}",
-            value
-                .with_timezone(
-                    &FixedOffset::east_opt(*seconds)
-                        .ok_or_else(|| invalid_date("invalid offset"))?
-                )
-                .format(&rule.output_format)
-        ),
-        FrozenTimezone::Iana { name } => write!(
-            &mut output,
-            "{}",
-            value
-                .with_timezone(
-                    &name
-                        .parse::<chrono_tz::Tz>()
-                        .map_err(|_| invalid_date("unknown IANA timezone"))?
-                )
-                .format(&rule.output_format)
-        ),
+        FrozenTimezone::Utc => value.format(&rule.output_format).write_to(&mut output),
+        FrozenTimezone::FixedOffset { seconds } => value
+            .with_timezone(
+                &FixedOffset::east_opt(*seconds).ok_or_else(|| invalid_date("invalid offset"))?,
+            )
+            .format(&rule.output_format)
+            .write_to(&mut output),
+        FrozenTimezone::Iana { name } => value
+            .with_timezone(
+                &name
+                    .parse::<chrono_tz::Tz>()
+                    .map_err(|_| invalid_date("unknown IANA timezone"))?,
+            )
+            .format(&rule.output_format)
+            .write_to(&mut output),
     }
-    .map_err(|_| invalid_date("date cannot supply requested format"))?;
-    Ok(output)
+    .map_err(|_| {
+        if output.exceeded {
+            crate::output::limit()
+        } else {
+            invalid_date("date cannot supply requested format")
+        }
+    })?;
+    Ok(output.text)
 }
 
 pub(crate) fn apply_date(
@@ -387,7 +393,11 @@ pub(crate) fn apply_date(
         DateOperation::Reformat { .. } => Ok(formatted),
         DateOperation::Insert {
             at, prefix, suffix, ..
-        } => crate::numbers::insert_value(input, at, format!("{prefix}{formatted}{suffix}")),
+        } => crate::numbers::insert_value(
+            input,
+            at,
+            crate::output::concat(&[prefix, &formatted, suffix])?,
+        ),
     }
 }
 pub(crate) fn date_source(

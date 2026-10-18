@@ -659,11 +659,12 @@ fn page_items<T>(
                 .is_none_or(|status| key(v, "status").0 == *status)
     });
     if q.sort == "natural" {
-        rows.sort_by(|a, b| {
-            let a = key(a, "name");
-            let b = key(b, "name");
-            natural_cmp(&a.0, &b.0).then_with(|| a.1.cmp(&b.1))
-        });
+        let mut keyed = rows
+            .into_iter()
+            .map(|row| (key(row, "name"), row))
+            .collect::<Vec<_>>();
+        keyed.sort_by(|(a, _), (b, _)| natural_cmp(&a.0, &b.0).then_with(|| a.1.cmp(&b.1)));
+        rows = keyed.into_iter().map(|(_, row)| row).collect();
     } else {
         rows.sort_by_cached_key(|v| key(v, &q.sort));
     }
@@ -1062,19 +1063,36 @@ fn metadata_change_dto(change: &MetadataChange) -> Value {
         }
     }
 }
-fn reviewed_row_dto(plan: &RenamePlan, row: &PlanRow) -> Value {
+struct ReviewProjection<'a> {
+    entries: BTreeMap<EntryId, &'a vidlib_inventory::EntrySnapshot>,
+    metadata: BTreeMap<EntryId, Vec<&'a Vec<MetadataChange>>>,
+}
+impl<'a> ReviewProjection<'a> {
+    fn new(plan: &'a RenamePlan) -> Self {
+        let entries = plan
+            .execution
+            .provenance
+            .inventory
+            .entries
+            .iter()
+            .map(|e| (e.id, e))
+            .collect();
+        let mut metadata = BTreeMap::<_, Vec<_>>::new();
+        for step in plan.execution.groups.iter().flat_map(|g| &g.steps) {
+            if let ExecutionAction::SetMetadata { changes, .. } = &step.action {
+                metadata.entry(step.entry_id).or_default().push(changes);
+            }
+        }
+        Self { entries, metadata }
+    }
+}
+fn reviewed_row_dto(projection: &ReviewProjection<'_>, row: &PlanRow) -> Value {
     let mut value = row_dto(row);
-    let entry = plan
-        .execution
-        .provenance
-        .inventory
-        .entries
-        .iter()
-        .find(|e| e.id == row.entry_id);
+    let entry = projection.entries.get(&row.entry_id);
     value["kind"] = json!(entry.map(|e| camel_tag(&format!("{:?}", e.kind))));
-    value["metadata"] = json!(plan.execution.groups.iter().flat_map(|g|&g.steps).filter(|s|s.entry_id==row.entry_id).filter_map(|s|if let ExecutionAction::SetMetadata{changes,..}=&s.action {
-        Some(json!({"requested":changes.iter().map(metadata_change_dto).collect::<Vec<_>>(),"original":stamp_dto(&row.stamp)}))
-    }else{None}).collect::<Vec<_>>());
+    value["metadata"] = json!(projection.metadata.get(&row.entry_id).into_iter().flatten().map(|changes|
+        json!({"requested":changes.iter().map(metadata_change_dto).collect::<Vec<_>>(),"original":stamp_dto(&row.stamp)})
+    ).collect::<Vec<_>>());
     value
 }
 fn row_dto(row: &PlanRow) -> Value {
@@ -1113,6 +1131,7 @@ pub fn page_owned(state: &AppState, request: PageRequest) -> Result<Page> {
     let plan = plans(state)?.snapshot(request.plan_ref.into(), &lease)?;
     drop(r);
     drop(lease);
+    let projection = ReviewProjection::new(&plan);
     page_items(
         plan.rows.iter().collect(),
         &request.query,
@@ -1135,7 +1154,7 @@ pub fn page_owned(state: &AppState, request: PageRequest) -> Result<Page> {
                 row.entry_id.to_string(),
             )
         },
-        |row| reviewed_row_dto(&plan, row),
+        |row| reviewed_row_dto(&projection, row),
     )
 }
 pub fn confirm_owned(state: &AppState, request: PlanRequest) -> Result<Confirmation> {
@@ -2202,3 +2221,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/rename_scale.rs"]
+mod scale;

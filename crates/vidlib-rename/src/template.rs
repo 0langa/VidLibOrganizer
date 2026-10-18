@@ -35,9 +35,9 @@ fn render(parts: &[TemplatePart], context: &TemplateContext<'_>) -> Result<Strin
     let mut output = String::new();
     for part in parts {
         match part {
-            TemplatePart::Literal(text) => output.push_str(text),
+            TemplatePart::Literal(text) => crate::output::append(&mut output, text)?,
             TemplatePart::Optional(parts) => match render(parts, context) {
-                Ok(text) => output.push_str(&text),
+                Ok(text) => crate::output::append(&mut output, &text)?,
                 Err(error) if error.code == RuleIssueCode::MetadataMissing => {}
                 Err(error) => return Err(error),
             },
@@ -51,10 +51,10 @@ fn render(parts: &[TemplatePart], context: &TemplateContext<'_>) -> Result<Strin
                 match value {
                     FrozenFieldValue::Missing {
                         decision: MissingDecision::Fallback(text),
-                    } => output.push_str(&text),
+                    } => crate::output::append(&mut output, &text)?,
                     FrozenFieldValue::Missing { .. } => {
                         if let Some(text) = fallback {
-                            output.push_str(text);
+                            crate::output::append(&mut output, text)?;
                         } else {
                             return Err(match &raw {
                                 FrozenFieldValue::Metadata(value) => value.missing_issue(),
@@ -62,7 +62,10 @@ fn render(parts: &[TemplatePart], context: &TemplateContext<'_>) -> Result<Strin
                             });
                         }
                     }
-                    value => output.push_str(&formatted(key, &value, format, context)?),
+                    value => crate::output::append(
+                        &mut output,
+                        &formatted(key, &value, format, context)?,
+                    )?,
                 }
             }
         }
@@ -168,8 +171,20 @@ fn formatted(
     context: &TemplateContext<'_>,
 ) -> Result<String, RuleIssue> {
     match (value, format) {
-        (FrozenFieldValue::Text(text), ValueFormat::Text) => Ok(text.clone()),
-        (FrozenFieldValue::TextList(text), ValueFormat::Text) => Ok(text.join("; ")),
+        (FrozenFieldValue::Text(text), ValueFormat::Text) => {
+            crate::output::size(text.len())?;
+            Ok(text.clone())
+        }
+        (FrozenFieldValue::TextList(text), ValueFormat::Text) => {
+            let mut output = String::new();
+            for (i, item) in text.iter().enumerate() {
+                if i > 0 {
+                    crate::output::append(&mut output, "; ")?;
+                }
+                crate::output::append(&mut output, item)?;
+            }
+            Ok(output)
+        }
         (FrozenFieldValue::Integer(value), ValueFormat::Text) => Ok(value.to_string()),
         (FrozenFieldValue::Integer(value), ValueFormat::Integer { radix, padding }) => {
             format_number(*value, *radix, u64::from(*padding))

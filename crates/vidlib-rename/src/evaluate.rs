@@ -223,12 +223,11 @@ pub fn evaluate_controlled(
                         crate::numbers::insert_value(
                             selected,
                             &parameters.at,
-                            format!(
-                                "{}{}{}",
-                                parameters.prefix,
-                                numbered[rule.id.as_str()][id],
-                                parameters.suffix
-                            ),
+                            crate::output::concat(&[
+                                &parameters.prefix,
+                                &numbered[rule.id.as_str()][id],
+                                &parameters.suffix,
+                            ])?,
                         )
                     })
                 }
@@ -289,6 +288,7 @@ pub fn evaluate_controlled(
                     row.issues.push(PlanIssue {
                         code: match issue.code {
                             RuleIssueCode::InvalidInput => RenameErrorCode::InvalidRuleInput,
+                            RuleIssueCode::OutputLimit => RenameErrorCode::OutputLimit,
                             RuleIssueCode::RegexLimit => RenameErrorCode::RegexLimit,
                             RuleIssueCode::RegexNative => RenameErrorCode::RegexNative,
                             RuleIssueCode::DateNeedsFormat => RenameErrorCode::DateNeedsFormat,
@@ -352,7 +352,7 @@ pub fn evaluate_controlled(
             });
         }
     }
-    crate::metadata::evaluate_changes(&mut batch);
+    crate::metadata::evaluate_changes(&mut batch, control)?;
     Ok(batch)
 }
 

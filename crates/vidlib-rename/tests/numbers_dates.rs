@@ -647,3 +647,30 @@ fn date_parsing_preserves_explicit_offsets_and_rejects_lossy_leap_seconds() {
         "epoch nanoseconds cannot represent a leap second without changing it: {leap:?}"
     );
 }
+
+#[test]
+fn many_numeric_runs_refuse_oversized_padding_output() {
+    let error = pad_existing_numbers(&"1-".repeat(17), 4096, MatchScope::All)
+        .expect_err("padding each run must share the generated segment budget");
+    assert_eq!(format!("{:?}", error.code), "OutputLimit");
+}
+
+#[test]
+fn date_formatter_stops_before_oversized_expansion() {
+    let rule = DateRule {
+        input_format: None,
+        output_format: "%f".repeat(8000),
+        timezone: None,
+        assume_timezone: None,
+        ambiguity: DstAmbiguity::Reject,
+        nonexistent: NonexistentTime::Reject,
+    };
+    let env = FrozenEnvironment {
+        now_ns: 0,
+        timezone: FrozenTimezone::Utc,
+        ambiguity: DstAmbiguity::Reject,
+        nonexistent: NonexistentTime::Reject,
+    };
+    let error = format_date(&DateValue::Instant { ns: 0 }, &rule, &env).unwrap_err();
+    assert_eq!(error.code, RuleIssueCode::OutputLimit);
+}

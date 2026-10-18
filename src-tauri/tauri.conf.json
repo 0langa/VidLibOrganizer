@@ -24,6 +24,6 @@
       "resources/mediainfo/": "mediainfo/",
       "../tools/media-info-manifest.json": "mediainfo/manifest.json"
     },
-    "windows": { "nsis": { "installerHooks": "installer/hooks.nsh" } }
+    "windows": { "webviewInstallMode": { "type": "offlineInstaller", "silent": true }, "nsis": { "installerHooks": "installer/hooks.nsh" } }
   }
 }

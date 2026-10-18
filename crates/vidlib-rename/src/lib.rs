@@ -42,3 +42,6 @@ pub use companions::*;
 
 pub mod destination;
 pub use destination::resolve_destinations;
+
+mod output;
+pub use output::MAX_OUTPUT_BYTES;

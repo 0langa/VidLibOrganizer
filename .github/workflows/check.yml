@@ -1,0 +1,53 @@
+name: Rename verification
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_VERSION: 1.99.1
+jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Pinned Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --component rustfmt
+          rustup default "$RUST_VERSION"
+      - run: cargo test --locked --workspace --exclude vidlib-tauri --no-fail-fast
+      - run: cargo clippy --locked --workspace --exclude vidlib-tauri --all-targets -- -D warnings
+      - run: cargo fmt --all -- --check
+      - run: python3 -m unittest discover -s tools/tests -v
+      - run: python3 tools/vendor_media_info.py --check
+  windows:
+    # CI is build/test evidence, not the NTFS/exFAT/share/offline-install release gate.
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Pinned Rust MSVC
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal --component clippy --component rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default $env:RUST_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: cargo test --locked --workspace --no-fail-fast
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo fmt --all -- --check
+      - run: cargo build --locked --release -p vidlib-tauri
+      - run: python tools/vendor_media_info.py --check
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.19.0
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Browser development tests
+        run: npm test
+      - name: JavaScript syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem ui -Recurse -Filter *.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

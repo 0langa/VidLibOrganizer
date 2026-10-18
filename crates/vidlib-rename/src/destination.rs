@@ -106,7 +106,11 @@ pub fn resolve_destinations(
                     Err(error) => {
                         crate::validate::issue(
                             row,
-                            RenameErrorCode::InvalidRuleInput,
+                            if error.code == RuleIssueCode::OutputLimit {
+                                RenameErrorCode::OutputLimit
+                            } else {
+                                RenameErrorCode::InvalidRuleInput
+                            },
                             &error.message,
                         );
                         continue;

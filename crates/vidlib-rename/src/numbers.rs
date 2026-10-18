@@ -167,25 +167,26 @@ pub fn pad_existing_numbers(
     let mut rest = input;
     let mut matched = false;
     while let Some(start) = rest.find(|c: char| c.is_ascii_digit()) {
-        result.push_str(&rest[..start]);
+        crate::output::append(&mut result, &rest[..start])?;
         rest = &rest[start..];
         let end = rest
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(rest.len());
         if !matched || scope == MatchScope::All {
+            crate::output::sum([result.len(), (padding as usize).saturating_sub(end)])?;
             result.extend(std::iter::repeat_n(
                 '0',
                 (padding as usize).saturating_sub(end),
             ));
         }
-        result.push_str(&rest[..end]);
+        crate::output::append(&mut result, &rest[..end])?;
         rest = &rest[end..];
         matched = true;
         if scope == MatchScope::First {
             break;
         }
     }
-    result.push_str(rest);
+    crate::output::append(&mut result, rest)?;
     Ok(result)
 }
 

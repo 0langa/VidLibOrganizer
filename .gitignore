@@ -17,3 +17,5 @@ src-tauri/gen/
 
 test-results/
 playwright-report/
+
+__pycache__/

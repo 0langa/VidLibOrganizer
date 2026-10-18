@@ -377,6 +377,25 @@ pub fn resolved_changes(
     recipe: &RecipeV1,
     preserve_equal: bool,
 ) -> Result<Vec<MetadataChange>, RenameError> {
+    let ordinal = recipe
+        .metadata_changes
+        .iter()
+        .any(|change| matches!(change, MetadataChange::TimestampIncrement { .. }))
+        .then(|| {
+            recipe
+                .numbering_order
+                .iter()
+                .position(|id| *id == row.primary_id)
+        })
+        .flatten();
+    resolved_changes_at(row, recipe, preserve_equal, ordinal)
+}
+fn resolved_changes_at(
+    row: &PlanRow,
+    recipe: &RecipeV1,
+    preserve_equal: bool,
+    ordinal: Option<usize>,
+) -> Result<Vec<MetadataChange>, RenameError> {
     let invalid = |message| RenameError::new(RenameErrorCode::InvalidRuleInput, message);
     let mut out = Vec::new();
     for change in &recipe.metadata_changes {
@@ -393,13 +412,9 @@ pub fn resolved_changes(
                 start_ns,
                 step_ns,
             } => {
-                let ordinal = recipe
-                    .numbering_order
-                    .iter()
-                    .position(|id| *id == row.primary_id)
-                    .ok_or_else(|| {
-                        invalid("metadata increment requires resolved frozen primary ordinal")
-                    })? as i128;
+                let ordinal = ordinal.ok_or_else(|| {
+                    invalid("metadata increment requires resolved frozen primary ordinal")
+                })? as i128;
                 MetadataChange::Timestamp {
                     field: *field,
                     value_ns: step_ns
@@ -430,20 +445,69 @@ pub fn resolved_changes(
     }
     Ok(out)
 }
-pub(crate) fn evaluate_changes(batch: &mut EvaluatedBatch) {
-    for row in &mut batch.rows {
+// Per-call indexes preserve the original first ordinal and any-directory match.
+// They do not become persisted native identity or metadata authority.
+struct ChangeIndex {
+    ordinals: BTreeMap<vidlib_inventory::ids::EntryId, usize>,
+    directories: std::collections::BTreeSet<vidlib_inventory::ids::EntryId>,
+}
+impl ChangeIndex {
+    fn new(inventory: &vidlib_inventory::Inventory, recipe: &RecipeV1) -> Self {
+        let mut ordinals = BTreeMap::new();
+        for (ordinal, id) in recipe.numbering_order.iter().enumerate() {
+            ordinals.entry(*id).or_insert(ordinal);
+        }
+        Self {
+            ordinals,
+            directories: inventory
+                .entries
+                .iter()
+                .filter(|e| e.kind == vidlib_inventory::EntryKind::Directory)
+                .map(|e| e.id)
+                .collect(),
+        }
+    }
+    fn resolve(
+        &self,
+        row: &PlanRow,
+        recipe: &RecipeV1,
+    ) -> Result<Vec<MetadataChange>, RenameError> {
+        resolved_changes_at(
+            row,
+            recipe,
+            self.directories.contains(&row.entry_id),
+            self.ordinals.get(&row.primary_id).copied(),
+        )
+    }
+}
+pub(crate) fn evaluate_changes(
+    batch: &mut EvaluatedBatch,
+    control: &JobControl,
+) -> Result<(), RenameError> {
+    let total = batch.rows.len();
+    crate::evaluate::checkpoint(
+        control,
+        vidlib_inventory::ProgressPhase::Evaluating,
+        0,
+        total,
+        None,
+    )?;
+    if batch.recipe.metadata_changes.is_empty() {
+        return Ok(());
+    }
+    let index = ChangeIndex::new(&batch.inventory, &batch.recipe);
+    for (done, row) in batch.rows.iter_mut().enumerate() {
+        crate::evaluate::checkpoint(
+            control,
+            vidlib_inventory::ProgressPhase::Evaluating,
+            done,
+            total,
+            Some(row.entry_id),
+        )?;
         if matches!(row.status, RowStatus::Blocked | RowStatus::NeedsReview) {
             continue;
         }
-        match resolved_changes(
-            row,
-            &batch.recipe,
-            batch
-                .inventory
-                .entries
-                .iter()
-                .any(|e| e.id == row.entry_id && e.kind == vidlib_inventory::EntryKind::Directory),
-        ) {
+        match index.resolve(row, &batch.recipe) {
             Ok(changes) if !changes.is_empty() => {
                 row.status = RowStatus::Changed;
                 for change in changes {
@@ -458,6 +522,7 @@ pub(crate) fn evaluate_changes(batch: &mut EvaluatedBatch) {
             Err(error) => crate::validate::issue(row, error.code, &error.message),
         }
     }
+    Ok(())
 }
 /// Append field effects after path/content effects. Each field's original and
 /// expected state is the exact observed prestate or named preceding receipt.
@@ -467,22 +532,19 @@ pub fn compile_changes(
     recipe: &RecipeV1,
     groups: &mut Vec<ExecutionGroup>,
 ) -> Result<(), RenameError> {
+    if recipe.metadata_changes.is_empty() {
+        return Ok(());
+    }
+    let index = ChangeIndex::new(inventory, recipe);
     let mut ordinal = groups.iter().map(|g| g.steps.len()).sum::<usize>() as u64;
     let mut order: Vec<_> = (0..rows.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(rows[i].target_path.components().count()));
-    for index in order {
-        let row = &mut rows[index];
+    for row_index in order {
+        let row = &mut rows[row_index];
         if matches!(row.status, RowStatus::Blocked | RowStatus::NeedsReview) {
             continue;
         }
-        let changes = resolved_changes(
-            row,
-            recipe,
-            inventory
-                .entries
-                .iter()
-                .any(|e| e.id == row.entry_id && e.kind == vidlib_inventory::EntryKind::Directory),
-        )?;
+        let changes = index.resolve(row, recipe)?;
         if changes.is_empty() {
             continue;
         }
@@ -491,7 +553,7 @@ pub fn compile_changes(
             .iter()
             .position(|g| g.steps.iter().any(|s| s.entry_id == row.entry_id))
             .or_else(|| groups.iter().position(|g| g.steps.iter().any(|step| {
-                inventory.entries.iter().any(|e| e.id == step.entry_id && e.kind == vidlib_inventory::EntryKind::Directory)
+                index.directories.contains(&step.entry_id)
                     && matches!(&step.action, ExecutionAction::RenameEntry { source, target, .. } if row.source_path.starts_with(&source.path) || row.target_path.starts_with(target))
             })))
             .or_else(|| groups.iter().position(|g| g.id == row.group_id))
@@ -505,10 +567,7 @@ pub fn compile_changes(
             });
         let group = &mut groups[group_index];
         row.group_id = group.id;
-        let directory = inventory
-            .entries
-            .iter()
-            .any(|e| e.id == row.entry_id && e.kind == vidlib_inventory::EntryKind::Directory);
+        let directory = index.directories.contains(&row.entry_id);
         let last = group.steps.iter().rev().find(|s| match &s.action {
             ExecutionAction::RenameEntry { target, .. }
             | ExecutionAction::PublishCopy { target, .. }
@@ -572,5 +631,138 @@ fn original_field(
             serde_json::json!({"mask": set | clear, "value": stamp.windows_attributes.map(|bits| bits & (set | clear))})
         }
         _ => unreachable!("summaries use resolved intents"),
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+    use vidlib_inventory::*;
+
+    fn batch() -> (tempfile::TempDir, EvaluatedBatch) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("movie.mkv"), b"x").unwrap();
+        let inventory = scan(
+            &InventoryRequest::new(vec![RootBinding::new(dir.path().to_path_buf()).unwrap()]),
+            &JobControl::default(),
+        )
+        .unwrap();
+        let id = inventory.entries[0].id;
+        let recipe: RecipeV1 = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"revision":"1","selection":[id],"numbering_order":[id],
+            "rules":[],"metadata_changes":[],"companions":{"type":"none"},"destination":{"type":"same_directory"},"collision_policy":{"type":"block"}
+        })).unwrap();
+        let inputs = FrozenInputCache::default()
+            .prepare(
+                &InputRequirements::from_recipe(&recipe, FrozenTimezone::Utc).unwrap(),
+                &inventory,
+                &JobControl::default(),
+            )
+            .unwrap();
+        let batch = evaluate(&inventory, &recipe, &inputs).unwrap();
+        (dir, batch)
+    }
+
+    #[test]
+    fn metadata_tail_preserves_first_primary_ordinal_companions_and_explicit_directory_set() {
+        let (_dir, mut batch) = batch();
+        let first = batch.rows[0].entry_id;
+        let second = vidlib_inventory::ids::EntryId::new();
+        let companion = vidlib_inventory::ids::EntryId::new();
+        let mut directory = batch.inventory.entries[0].clone();
+        directory.id = second;
+        directory.kind = EntryKind::Directory;
+        batch.inventory.entries.push(directory);
+        let sample = batch.rows[0].clone();
+        batch.rows = vec![sample.clone(), sample.clone(), sample];
+        batch.rows[1].entry_id = second;
+        batch.rows[1].primary_id = second;
+        batch.rows[2].entry_id = companion;
+        batch.rows[2].primary_id = first;
+        batch.recipe.numbering_order = vec![second, first, second];
+        batch.recipe.metadata_changes = vec![
+            MetadataChange::TimestampIncrement {
+                field: TimestampField::Created,
+                start_ns: 100,
+                step_ns: 7,
+            },
+            MetadataChange::Timestamp {
+                field: TimestampField::Modified,
+                value_ns: batch.rows[0].stamp.modified_ns.unwrap(),
+            },
+        ];
+        evaluate_changes(&mut batch, &JobControl::default()).unwrap();
+        assert_eq!(
+            batch.rows.iter().map(|r| r.entry_id).collect::<Vec<_>>(),
+            vec![first, second, companion]
+        );
+        for (row, expected, effects) in [
+            (&batch.rows[0], "107", 1),
+            (&batch.rows[1], "100", 2),
+            (&batch.rows[2], "107", 1),
+        ] {
+            assert_eq!(row.status, RowStatus::Changed);
+            assert_eq!(row.explanations.len(), effects);
+            let intent: serde_json::Value =
+                serde_json::from_str(&row.explanations[0].after).unwrap();
+            assert_eq!(intent["value_ns"], expected);
+        }
+        batch.recipe.metadata_changes.clear();
+        let before = batch.rows.clone();
+        evaluate_changes(&mut batch, &JobControl::default()).unwrap();
+        assert_eq!(batch.rows, before, "Keep must add no metadata intent");
+    }
+
+    #[test]
+    fn cancellation_interrupts_actual_metadata_tail_after_partial_work() {
+        let (_dir, mut batch) = batch();
+        batch.rows = vec![batch.rows[0].clone(); 30_000];
+        batch.recipe.metadata_changes = [
+            TimestampField::Created,
+            TimestampField::Modified,
+            TimestampField::Accessed,
+        ]
+        .into_iter()
+        .map(|field| MetadataChange::TimestampIncrement {
+            field,
+            start_ns: 100,
+            step_ns: 3,
+        })
+        .collect();
+        let (control, updates) = JobControl::with_progress(16);
+        let worker_control = control.clone();
+        let worker = std::thread::spawn(move || {
+            let result = evaluate_changes(&mut batch, &worker_control);
+            (result, batch)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut partial = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(update) = updates.recv_timeout(std::time::Duration::from_millis(100)) {
+                if update.done > 0 && update.done < update.total.unwrap() {
+                    partial = true;
+                    control.cancel();
+                    break;
+                }
+            }
+            if worker.is_finished() {
+                break;
+            }
+        }
+        let (result, batch) = worker.join().unwrap();
+        assert!(
+            partial,
+            "actual metadata tail must publish progress before finishing"
+        );
+        assert_eq!(result.unwrap_err().code, RenameErrorCode::Cancelled);
+        let processed = batch
+            .rows
+            .iter()
+            .filter(|row| !row.explanations.is_empty())
+            .count();
+        assert!(
+            processed > 0 && processed < batch.rows.len(),
+            "cancellation must interrupt the tail between metadata rows"
+        );
     }
 }

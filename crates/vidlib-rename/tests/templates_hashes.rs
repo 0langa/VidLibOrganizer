@@ -1037,3 +1037,28 @@ fn hash_scoped_missing_choices_do_not_share_seeded_values() {
         assert_eq!(error.code, RenameErrorCode::StaleInputs);
     }
 }
+
+#[test]
+fn repeated_current_stem_template_blocks_before_exponential_growth() {
+    let (_dir, inventory, mut recipe, inputs) = fixture(
+        &["x.mkv"],
+        template(vec![
+            field(FieldKey::CurrentStem),
+            field(FieldKey::CurrentStem),
+        ]),
+    );
+    recipe.rules = (0..17)
+        .map(|i| Rule {
+            id: format!("grow{i}"),
+            ..recipe.rules[0].clone()
+        })
+        .collect();
+    let row = result(&inventory, &recipe, &inputs);
+    assert_eq!(
+        row.status,
+        RowStatus::Blocked,
+        "intermediate template expansion must be bounded"
+    );
+    assert_eq!(format!("{:?}", row.issues[0].code), "OutputLimit");
+    assert_eq!(row.new_display_name, "x.mkv");
+}

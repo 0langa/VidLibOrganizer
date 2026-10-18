@@ -15,6 +15,7 @@ pub enum RenameErrorCode {
     UnknownRecipeVersion,
     InvalidRecipe,
     InvalidRuleInput,
+    OutputLimit,
     RegexLimit,
     RegexNative,
     DateNeedsFormat,

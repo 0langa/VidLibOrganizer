@@ -1160,3 +1160,36 @@ fn directory_after_effects_rename_gap_requires_complete_surviving_namespace() {
         }
     }
 }
+
+// A surviving receipt gap must not grant a second process write access.
+#[test]
+fn real_crash_gap_keeps_concurrent_instances_read_only_until_reviewed_resume() {
+    let (_dir, media, coordinator, mut journal) = crashed("after", 1, true);
+    let other = Coordinator::open(coordinator.database_path().parent().unwrap()).unwrap();
+    assert!(other.try_acquire(LeaseKind::Write).is_err());
+    let before = journal.pending().unwrap().remove(0);
+    let preview = reconcile(&before, &mut PlatformFs::default()).unwrap();
+    assert_eq!(
+        journal.pending().unwrap()[0].steps,
+        before.steps,
+        "read-only inspection must not synthesize receipts"
+    );
+    let lease = coordinator.try_acquire(LeaseKind::Recovery).unwrap();
+    assert!(other.try_acquire(LeaseKind::Recovery).is_err());
+    let nonce = preview.review_nonce();
+    let report = apply_recovery(
+        preview.review(nonce).unwrap(),
+        RecoveryChoice::Resume,
+        &lease,
+        &mut journal,
+        &mut PlatformFs::default(),
+        &JobControl::default(),
+    )
+    .unwrap();
+    assert_eq!(report.state, OperationState::Completed);
+    drop(lease);
+    assert!(other.try_acquire(LeaseKind::Write).is_ok());
+    assert_eq!(fs::read(media.join("a")).unwrap(), b"b");
+    assert_eq!(fs::read(media.join("b")).unwrap(), b"fixture");
+    assert_eq!(journal.events_after(0, 200).unwrap().items.len(), 3);
+}

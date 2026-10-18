@@ -971,3 +971,100 @@ fn sentence_case_consumes_titlecase_letters_and_preserves_context() {
         "ǅ hello.mkv"
     );
 }
+
+// A bounded fixture catches exponential intermediate growth without stressing memory.
+#[test]
+fn repeated_current_segment_copy_refuses_resource_growth() {
+    let rule = TextRule {
+        segment: SegmentSelector::Stem,
+        operation: TextOperation::MoveCopy {
+            start: 1,
+            end: -1,
+            destination: InsertPosition::End,
+            copy: true,
+        },
+    };
+    let mut current = NameParts::stem_only("x");
+    for _ in 0..17 {
+        match apply_text(&current, &rule) {
+            Ok(next) => current = next,
+            Err(error) => {
+                assert_eq!(format!("{:?}", error.code), "OutputLimit");
+                return;
+            }
+        }
+    }
+    panic!(
+        "untrusted repeated Copy must refuse intermediate output growth; got {} bytes",
+        current.stem.len()
+    );
+}
+
+#[test]
+fn replacement_list_refuses_growth_inside_one_rule() {
+    let result = run(
+        "x",
+        SegmentSelector::Stem,
+        TextOperation::Replace {
+            replacements: (0..17)
+                .map(|_| LiteralReplacement {
+                    from: "x".into(),
+                    to: "xx".into(),
+                })
+                .collect(),
+            scope: MatchScope::All,
+            case_sensitive: true,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "one replacement rule must bound its intermediate allocations"
+    );
+    assert_eq!(format!("{:?}", result.unwrap_err().code), "OutputLimit");
+}
+
+#[test]
+fn output_budget_counts_utf8_and_keeps_valid_later_shrink() {
+    let current = NameParts::stem_only(&"é".repeat(32768));
+    let next = apply_text(
+        &current,
+        &TextRule {
+            segment: SegmentSelector::Stem,
+            operation: TextOperation::Keep,
+        },
+    )
+    .unwrap();
+    assert_eq!(next.stem.len(), 65536);
+    let result = apply_text(
+        &next,
+        &TextRule {
+            segment: SegmentSelector::Stem,
+            operation: TextOperation::Suffix { text: "x".into() },
+        },
+    );
+    assert_eq!(result.unwrap_err().code, RuleIssueCode::OutputLimit);
+    let shrunk = apply_text(
+        &next,
+        &TextRule {
+            segment: SegmentSelector::Stem,
+            operation: TextOperation::Fixed {
+                value: "small".into(),
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(shrunk.filename(), "small");
+    let uppercase = run(
+        &"ß".repeat(22000),
+        SegmentSelector::Stem,
+        case(CaseMode::Upper),
+    )
+    .unwrap();
+    assert_eq!(uppercase.stem.len(), 44000);
+    let expanded = run(
+        &"ΐ".repeat(11000),
+        SegmentSelector::Stem,
+        case(CaseMode::Upper),
+    );
+    assert_eq!(expanded.unwrap_err().code, RuleIssueCode::OutputLimit);
+}

@@ -31,18 +31,37 @@ This release finds exact copies, not visually similar videos, alternate encodes 
 
 Scan results and Keep-all decisions last for the current session. Saved folders live in the app configuration directory (`%APPDATA%\com.vidliborganizer.app\libraries.json` on Windows). Files stay on your computer. No telemetry or network requests are used by the running application.
 
+## Rename (implemented; Windows release qualification pending)
+
+The Rename view supports ordered text/regex/number/date/template rules, explicit selection and numbering scopes, mappings, versioned presets, optional companion ownership, folder layouts and explicit Copy/Move destinations. Preview and confirmation use backend-owned plans and exact native grants; edits require a new preview. Table pages contain at most 200 rows and conflicts include all selected items. History, recovery and validated Undo use the durable app-local journal; a batch is recoverable, not an atomic filesystem transaction.
+
+Native picker/drop/Explorer arguments only select items for review. Explorer integration is optional at interactive installation and silent installs do not opt in. Metadata flags/timestamps default to Keep. Renaming an extension does not convert media. Blueprint remains a later optional feature and is not implemented at this checkpoint.
+
+**Windows mutation gates remain closed pending native qualification.** This branch is a reviewable Rename implementation, not a qualified Windows release. See [the evidence and pending gates](docs/verification/rename.md) and [resumable phase handoff](docs/verification/rename-handoff.md). Generated intermediate names have a 64 KiB UTF-8 resource budget; recipes that exceed it before a later shrink are refused. Recipe imports are bounded at 1 MiB / 100 rules; large runtime selection bindings currently also count toward that preparation cap. Mapping imports are bounded at 64 MiB / 100,000 rows.
+
 ## Development
 
+Use Rust 1.99.1, Node 24.19.0 and committed lockfiles. Windows builds need MSVC C++ Build Tools and the Windows SDK. Node/Playwright are development tools, not installed-app runtime requirements.
+
 ```powershell
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --no-fail-fast
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-cargo build -p vidlib-tauri
+npm ci
+npx playwright install chromium
+npm test
+python tools/vendor_media_info.py --check
+cargo build --locked --release -p vidlib-tauri
+./tools/benchmark-library.ps1
 ```
 
-- `crates/vidlib-engine`: traversal, size/MD5 grouping and cancellation.
-- `crates/vidlib-fileops`: validated move/delete operations.
-- `src-tauri`: background jobs, saved folders and desktop integration.
-- `ui`: accessible, dependency-free HTML/CSS/JavaScript interface.
+MediaInfo resources and notices are shipped and hash-verified offline. `tools/vendor_media_info.py --fetch` is an explicit build-time hydration action; a local `--archive` never implicitly fetches a missing notice. The NSIS configuration uses the WebView2 offline installer; a real Windows bundle build must embed and verify it. `cargo build` alone does not create the installer. The documented Windows packaging command is `npx @tauri-apps/cli@2.12.3 build --bundles nsis`; actual clean-machine offline installation remains a pending release gate.
 
-Open `ui/index.html` through a static HTTP server to inspect the interface; its explicit preview uses example data and cannot touch files. The desktop application is required for real library access. The old metadata/ML prototype has been retired; its history remains in Git. See `docs/spec.md` and `docs/implementation-plan.md` for the current design.
+- `crates/vidlib-engine`: existing duplicate traversal/grouping/cancellation.
+- `crates/vidlib-inventory`: native observations, paths, grants and bounded progress.
+- `crates/vidlib-rename`: authoritative pure recipe/planning logic and read-only input preparation.
+- `crates/vidlib-fileops`: no-replace execution, journal, recovery, Undo and legacy duplicate actions.
+- `src-tauri`: native selection/helpers, app-local state, jobs and desktop commands.
+- `ui`: dependency-free HTML/CSS/JavaScript interface; browser samples cannot mutate files.
+
+Run `npm run dev` to inspect the browser interface. Tests and fixture generators live outside packaged `ui`. Linux portable CI excludes the desktop package; local full desktop checks require GTK3/WebKitGTK4.1 development libraries. See the verification document for precise cloud setup, separate Windows cfg checks, scale reproduction, supported filesystem gates and limits.

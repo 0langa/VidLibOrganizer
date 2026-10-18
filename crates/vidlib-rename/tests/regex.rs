@@ -351,3 +351,18 @@ fn generated_components_are_validated_without_sanitization() {
     assert_eq!(row.issues[0].code, RenameErrorCode::InvalidRuleInput);
     assert_eq!(row.issues[0].rule_id.as_deref(), Some("bad"));
 }
+
+#[test]
+fn regex_replacement_refuses_oversized_native_output_buffer() {
+    let rule = CompiledRegexRule::compile(&RegexRule {
+        pattern: "x".into(),
+        replacement: "x".repeat(4096),
+        scope: MatchScope::All,
+        case_sensitive: true,
+    })
+    .unwrap();
+    let error = rule
+        .apply(&"x".repeat(17))
+        .expect_err("native replacement output must be bounded before resizing");
+    assert_eq!(format!("{:?}", error.code), "OutputLimit");
+}

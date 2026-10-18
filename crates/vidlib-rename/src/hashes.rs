@@ -189,6 +189,12 @@ impl FrozenInputCache {
             .enumerate()
             .map(|(ordinal, id)| (*id, ordinal as i128 + 1))
             .collect::<BTreeMap<_, _>>();
+        // Local indexes preserve first-value lookup and serialized vector order.
+        let mut retained_index = BTreeMap::new();
+        for (index, value) in retained.values.iter().enumerate() {
+            retained_index.entry(value_key(value)).or_insert(index);
+        }
+        let mut output_keys = BTreeSet::new();
         // Hashes are shared per entry, independent of how many rules request them.
         let mut requested_hashes = BTreeMap::<EntryId, BTreeSet<HashAlgorithm>>::new();
         for field in &request.fields {
@@ -196,7 +202,7 @@ impl FrozenInputCache {
                 // Explicit choices still require the original native binding
                 // check, although they need no computed value or content read.
                 let algorithms = requested_hashes.entry(field.entry_id).or_default();
-                if lookup(&retained, field).is_none() {
+                if lookup(&retained, &retained_index, field).is_none() {
                     algorithms.insert(algorithm);
                 }
             }
@@ -245,7 +251,7 @@ impl FrozenInputCache {
                     },
                 })
             } else {
-                lookup(&retained, field)
+                lookup(&retained, &retained_index, field)
                     .map(|previous| {
                         let mut value = previous.clone();
                         if matches!(field.key, FieldKey::Hash { .. }) {
@@ -292,16 +298,12 @@ impl FrozenInputCache {
             });
             // Default counters follow the current explicit primary vector. Explicit overrides stay frozen.
             if !matches!(field.key, FieldKey::Counter | FieldKey::Hash { .. })
-                && lookup(&retained, field).is_none()
+                && lookup(&retained, &retained_index, field).is_none()
             {
+                retained_index.insert(value_key(&value), retained.values.len());
                 retained.values.push(value.clone());
             }
-            if !output.values.iter().any(|v| {
-                v.scope == value.scope
-                    && v.entry_id == value.entry_id
-                    && v.rule_id == value.rule_id
-                    && v.key == value.key
-            }) {
+            if output_keys.insert(value_key(&value)) {
                 output.values.push(value);
             }
         }
@@ -311,24 +313,30 @@ impl FrozenInputCache {
         Ok(output)
     }
 }
-fn lookup<'a>(inputs: &'a FrozenInputs, field: &RequestedInput) -> Option<&'a FrozenValue> {
-    inputs
-        .values
-        .iter()
-        .find(|v| {
-            v.scope == field.scope
-                && v.entry_id == field.entry_id
-                && v.rule_id == field.rule_id
-                && v.key == field.key
-        })
-        .or_else(|| {
-            inputs.values.iter().find(|v| {
-                v.scope == field.scope
-                    && v.entry_id == field.entry_id
-                    && v.rule_id.is_none()
-                    && v.key == field.key
-            })
-        })
+type ValueKey = (FrozenScope, EntryId, Option<String>, FieldKey);
+fn value_key(value: &FrozenValue) -> ValueKey {
+    (
+        value.scope,
+        value.entry_id,
+        value.rule_id.clone(),
+        value.key.clone(),
+    )
+}
+fn lookup<'a>(
+    inputs: &'a FrozenInputs,
+    index: &BTreeMap<ValueKey, usize>,
+    field: &RequestedInput,
+) -> Option<&'a FrozenValue> {
+    let key = (
+        field.scope,
+        field.entry_id,
+        field.rule_id.clone(),
+        field.key.clone(),
+    );
+    index
+        .get(&key)
+        .or_else(|| index.get(&(field.scope, field.entry_id, None, field.key.clone())))
+        .map(|index| &inputs.values[*index])
 }
 fn needs_frozen(key: &FieldKey) -> bool {
     matches!(

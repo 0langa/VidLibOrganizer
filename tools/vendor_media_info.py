@@ -53,6 +53,8 @@ def run(root, fetch=False, archive=None):
                 if path.exists():
                     data = path.read_bytes()
                 else:
+                    if not fetch:
+                        raise ValueError(f"missing offline notice {path}; supply it or explicitly use --fetch")
                     data = fetch_bytes(item["url"])
                     if item["extraction"] == "first_c_comment":
                         data = data[data.index(b"/*"):data.index(b"*/") + 2] + b"\n"

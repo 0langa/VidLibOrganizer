@@ -1,4 +1,5 @@
 //! Unicode text operations. Positions are one-based extended graphemes.
+use crate::output::{append, concat, push, size, sum};
 use crate::{recipe::valid_component, NameSegment, SegmentSelector};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
@@ -48,6 +49,7 @@ pub struct TextRule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleIssueCode {
     InvalidInput,
+    OutputLimit,
     RegexLimit,
     RegexNative,
     DateNeedsFormat,
@@ -235,10 +237,16 @@ pub(crate) fn apply_segment(
     clear_empty_extension: bool,
     transform: impl FnOnce(&str) -> Result<String, RuleIssue>,
 ) -> Result<NameParts, RuleIssue> {
+    sum([
+        input.stem.len(),
+        input.ext.len(),
+        usize::from(input.extension_present || !input.ext.is_empty()),
+    ])?;
     let target = selector.target();
     let current = input.segment(target);
     let range = resolve_segment(&current, selector)?;
     let replacement = transform(&current[range.clone()])?;
+    sum([current.len() - range.len(), replacement.len()])?;
     let mut transformed = current;
     transformed.replace_range(range, &replacement);
     let mut output = input.clone();
@@ -257,6 +265,11 @@ pub(crate) fn apply_segment(
             output = NameParts::from_filename(&transformed);
         }
     }
+    sum([
+        output.stem.len(),
+        output.ext.len(),
+        usize::from(output.extension_present || !output.ext.is_empty()),
+    ])?;
     if !valid_component(&output.filename()) {
         return Err(issue("rule produced an invalid filename component"));
     }
@@ -431,13 +444,18 @@ fn insertion(current: &str, at: &InsertPosition) -> Result<usize, RuleIssue> {
 }
 pub(crate) fn transform(current: &str, operation: &TextOperation) -> Result<String, RuleIssue> {
     use TextOperation::*;
+    size(current.len())?;
     Ok(match operation {
         Keep => current.into(),
-        Fixed { value } => value.clone(),
+        Fixed { value } => {
+            size(value.len())?;
+            value.clone()
+        }
         Remove => String::new(),
-        Prefix { text } => format!("{text}{current}"),
-        Suffix { text } => format!("{current}{text}"),
+        Prefix { text } => concat(&[text, current])?,
+        Suffix { text } => concat(&[current, text])?,
         Insert { at, text } => {
+            sum([current.len(), text.len()])?;
             let mut value = current.to_owned();
             value.insert_str(insertion(current, at)?, text);
             value
@@ -449,7 +467,7 @@ pub(crate) fn transform(current: &str, operation: &TextOperation) -> Result<Stri
         } => {
             let mut value = current.to_owned();
             for replacement in replacements {
-                value = replace_literal(&value, replacement, *scope, *case_sensitive);
+                value = replace_literal(&value, replacement, *scope, *case_sensitive)?;
             }
             value
         }
@@ -493,6 +511,9 @@ pub(crate) fn transform(current: &str, operation: &TextOperation) -> Result<Stri
             let range = grapheme_range(current, *start, *end)?;
             let mut dest = insertion(current, destination)?;
             let selected = &current[range.clone()];
+            if *copy {
+                sum([current.len(), selected.len()])?;
+            }
             let mut value = current.to_owned();
             if !copy {
                 if dest > range.start && dest < range.end {
@@ -514,12 +535,12 @@ pub(crate) fn transform(current: &str, operation: &TextOperation) -> Result<Stri
             for c in current.chars() {
                 if c.is_whitespace() {
                     if !whitespace {
-                        value.push_str(replacement);
+                        append(&mut value, replacement)?;
                     }
                     whitespace = true;
                 } else {
                     whitespace = false;
-                    value.push(c);
+                    push(&mut value, c)?;
                 }
             }
             value
@@ -528,19 +549,26 @@ pub(crate) fn transform(current: &str, operation: &TextOperation) -> Result<Stri
             let mut value = String::new();
             for c in current.chars() {
                 if let Some(t) = translations.iter().find(|t| t.from == c) {
-                    value.push_str(&t.to);
+                    append(&mut value, &t.to)?;
                 } else {
-                    value.push(c);
+                    push(&mut value, c)?;
                 }
             }
             value
         }
-        Transliterate => deunicode::deunicode(current),
+        Transliterate => {
+            use deunicode::AsciiChars;
+            let mut value = String::new();
+            for text in current.ascii_chars() {
+                append(&mut value, text.unwrap_or("[?]"))?;
+            }
+            value
+        }
         Case {
             mode,
             exceptions,
             roman,
-        } => convert_case(current, *mode, exceptions, *roman),
+        } => convert_case(current, *mode, exceptions, *roman)?,
     })
 }
 
@@ -552,7 +580,7 @@ fn replace_literal(
     replacement: &LiteralReplacement,
     scope: MatchScope,
     case_sensitive: bool,
-) -> String {
+) -> Result<String, RuleIssue> {
     let bounds = boundaries(current);
     let needle = if case_sensitive {
         replacement.from.clone()
@@ -583,17 +611,17 @@ fn replace_literal(
             }
         }
         if let Some(end) = found {
-            output.push_str(&current[cursor..start]);
-            output.push_str(&replacement.to);
+            append(&mut output, &current[cursor..start])?;
+            append(&mut output, &replacement.to)?;
             cursor = end;
             replaced = true;
         }
     }
-    output.push_str(&current[cursor..]);
-    output
+    append(&mut output, &current[cursor..])?;
+    Ok(output)
 }
 
-fn title_first(value: &str) -> String {
+fn title_first(value: &str) -> Result<String, RuleIssue> {
     let mut output = String::new();
     let mut changed = false;
     for c in value.chars() {
@@ -604,29 +632,29 @@ fn title_first(value: &str) -> String {
         {
             let mapped = unicode_case_mapping::to_titlecase(c);
             if mapped == [0; 3] {
-                output.push(c);
+                push(&mut output, c)?;
             } else {
-                output.extend(mapped.into_iter().filter_map(|cp| {
-                    if cp == 0 {
-                        None
-                    } else {
-                        char::from_u32(cp)
-                    }
-                }));
+                for ch in mapped
+                    .into_iter()
+                    .filter_map(char::from_u32)
+                    .filter(|c| *c != '\0')
+                {
+                    push(&mut output, ch)?;
+                }
             }
             changed = true;
         } else {
-            output.push(c);
+            push(&mut output, c)?;
         }
     }
-    output
+    Ok(output)
 }
 fn convert_case(
     current: &str,
     mode: CaseMode,
     exceptions: &[String],
     roman: Option<RomanCase>,
-) -> String {
+) -> Result<String, RuleIssue> {
     // Restore exceptions/Roman from the original words even when full case mappings expand.
     let mut converted = String::new();
     let mut sentence_start = true;
@@ -634,25 +662,28 @@ fn convert_case(
         for part in sentence.split_word_bounds() {
             let is_word = part.unicode_words().next().is_some();
             if !is_word {
-                converted.push_str(part);
+                append(&mut converted, part)?;
                 continue;
             }
             let word = if let Some(exception) = exceptions.iter().find(|e| fold(e) == fold(part)) {
+                size(exception.len())?;
                 exception.clone()
             } else if let Some(roman_mode) = roman.filter(|_| is_roman(part)) {
                 match roman_mode {
                     RomanCase::Keep => part.into(),
-                    RomanCase::Upper => part.to_uppercase(),
-                    RomanCase::Lower => part.to_lowercase(),
+                    RomanCase::Upper => checked_case(part, true)?,
+                    RomanCase::Lower => checked_case(part, false)?,
                 }
             } else {
                 match mode {
                     CaseMode::Keep => part.into(),
-                    CaseMode::Upper => part.to_uppercase(),
-                    CaseMode::Lower => part.to_lowercase(),
-                    CaseMode::Title => title_first(&part.to_lowercase()),
-                    CaseMode::Sentence if sentence_start => title_first(&part.to_lowercase()),
-                    CaseMode::Sentence => part.to_lowercase(),
+                    CaseMode::Upper => checked_case(part, true)?,
+                    CaseMode::Lower => checked_case(part, false)?,
+                    CaseMode::Title => title_first(&checked_case(part, false)?)?,
+                    CaseMode::Sentence if sentence_start => {
+                        title_first(&checked_case(part, false)?)?
+                    }
+                    CaseMode::Sentence => checked_case(part, false)?,
                 }
             };
             // Numeric/uncased words do not consume sentence capitalization.
@@ -665,11 +696,11 @@ fn convert_case(
             }) {
                 sentence_start = false;
             }
-            converted.push_str(&word);
+            append(&mut converted, &word)?;
         }
         sentence_start = true;
     }
-    converted
+    Ok(converted)
 }
 fn is_roman(word: &str) -> bool {
     let word = word.to_ascii_uppercase();
@@ -722,4 +753,21 @@ fn is_roman(word: &str) -> bool {
         }
     }
     canonical == word
+}
+
+fn checked_case(value: &str, upper: bool) -> Result<String, RuleIssue> {
+    // Preserve standard Unicode contextual casing after a checked length preflight.
+    if upper {
+        sum(value
+            .chars()
+            .flat_map(char::to_uppercase)
+            .map(char::len_utf8))?;
+        Ok(value.to_uppercase())
+    } else {
+        sum(value
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(char::len_utf8))?;
+        Ok(value.to_lowercase())
+    }
 }

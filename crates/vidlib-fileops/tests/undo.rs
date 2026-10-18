@@ -875,3 +875,49 @@ fn missing_historical_nested_namespace_cannot_bless_current_child_material() {
         b"unrecorded material change"
     );
 }
+
+#[test]
+#[ignore = "explicit real-files inverse/journal scale workload"]
+fn benchmark_large_inverse_journal_begin() {
+    use std::time::Instant;
+    let count: usize = std::env::var("VIDLIB_INVERSE_ENTRIES")
+        .ok()
+        .map(|v| v.parse().unwrap())
+        .unwrap_or(1000);
+    assert!((1..=2000).contains(&count));
+    let names = (0..count)
+        .map(|i| (format!("before-{i:05}"), format!("after-{i:05}")))
+        .collect::<Vec<_>>();
+    let pairs = names
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let fixture = Fixture::new(&pairs);
+    let prepare_ms = started.elapsed().as_millis();
+    let started = Instant::now();
+    let original = fixture.complete();
+    let execute_ms = started.elapsed().as_millis();
+    let namespace = fixture.namespace();
+    let started = Instant::now();
+    let inverse = plan_undo(&original, &namespace, version()).unwrap();
+    let plan_ms = started.elapsed().as_millis();
+    assert_eq!(inverse.rows.len(), count);
+    assert_eq!(inverse.counts.blocked, 0);
+    let mut journal = fixture.journal();
+    let started = Instant::now();
+    let id = journal.begin(&inverse.execution).unwrap();
+    let begin_ms = started.elapsed().as_millis();
+    assert_eq!(
+        journal.operation(id).unwrap().groups.len(),
+        inverse.execution.groups.len()
+    );
+    assert_eq!(
+        journal.operation(original.operation_id).unwrap().steps,
+        original.steps
+    );
+    for (_, target) in &names {
+        assert!(fixture.media.join(target).exists());
+    }
+    println!("BENCH inverse entries={count} prepare_ms={prepare_ms} execute_ms={execute_ms} plan_ms={plan_ms} journal_begin_ms={begin_ms}");
+}

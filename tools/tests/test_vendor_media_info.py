@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import hashlib
+import zipfile
+from unittest.mock import patch
 from pathlib import Path
 import shutil
 import tempfile
@@ -39,6 +42,23 @@ class PackageIntegrity(unittest.TestCase):
         path.write_text(json.dumps(config))
         with self.assertRaisesRegex(ValueError, "resource"):
             VENDOR.run(self.root)
+
+    def test_local_archive_without_fetch_never_downloads_missing_notice(self):
+        manifest_path = self.root / "tools/media-info-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        artifact = manifest["artifacts"][0]
+        directory = self.root / artifact["destination"]
+        archive = self.root / "local.zip"
+        with zipfile.ZipFile(archive, "w") as output:
+            for name, item in artifact["files"].items():
+                output.writestr(item["archive_member"], (directory / name).read_bytes())
+        artifact["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        (directory / artifact["notices"][0]["file"]).unlink()
+        with patch.object(VENDOR, "fetch_bytes", side_effect=AssertionError("unexpected network request")) as download:
+            with self.assertRaisesRegex(ValueError, "--fetch"):
+                VENDOR.run(self.root, archive=archive)
+            download.assert_not_called()
 
     def test_untrusted_archive_never_replaces_packaged_executable(self):
         archive = self.root / "wrong.zip"

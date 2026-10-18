@@ -203,6 +203,7 @@ impl CompiledRegexRule {
     }
 
     pub fn apply(&self, input: &str) -> Result<String, RuleIssue> {
+        crate::output::size(input.len())?;
         // SAFETY: default allocator; code lives throughout data creation and use.
         let context = MatchContext(allocation(unsafe {
             pcre2_match_context_create_8(ptr::null_mut())
@@ -257,7 +258,8 @@ impl CompiledRegexRule {
                     &mut length,
                 )
             };
-            if result == PCRE2_ERROR_NOMEMORY && length > output.len() && length != usize::MAX {
+            if result == PCRE2_ERROR_NOMEMORY && length > output.len() {
+                crate::output::size(length - 1)?;
                 // OVERFLOW_LENGTH returns the required capacity, including NUL.
                 output
                     .try_reserve_exact(length - output.len())
@@ -268,6 +270,7 @@ impl CompiledRegexRule {
             if result < 0 {
                 return Err(native_issue(result));
             }
+            crate::output::size(length)?;
             output.truncate(length);
             return String::from_utf8(output).map_err(|_| RuleIssue {
                 code: RuleIssueCode::RegexNative,
