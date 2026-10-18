@@ -4,7 +4,7 @@
 
 ## Evidence and reproduction
 
-Worktree `/workspace/VidLibOrganizer/.worktrees/rename-blueprint`, branch `feat/rename-blueprint`; Task23 base `e6f17339e19bd9cd698d73799abc242ead4ffe9c`. Run from the repository root. Cargo.lock and package-lock.json are committed. Verification uses Rust **1.99.1** (58cf8f9c3, 2026-10-13), Node **24.19.0**, Playwright **1.58.2**. CI pins tool versions and action commits; hosted runner image/native SDK packages remain runner-provided and CI has not run in this local-only session.
+Worktree `/workspace/VidLibOrganizer/.worktrees/rename-blueprint`, branch `feat/rename-blueprint`; Task23 base `e6f17339e19bd9cd698d73799abc242ead4ffe9c`; implementation/verification commit `74937c27e772444b992c059dedd3586c438d121a`. Run from the repository root. Cargo.lock and package-lock.json are committed. Verification uses Rust **1.99.1** (58cf8f9c3, 2026-10-13), Node **24.19.0**, Playwright **1.58.2**. CI pins tool versions and action commits; hosted runner image/native SDK packages remain runner-provided and CI has not run in this local-only session.
 
 Standard supported native development environment:
 
